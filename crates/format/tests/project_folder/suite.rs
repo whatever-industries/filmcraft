@@ -360,3 +360,114 @@ fn moving_a_sequence_survives_writer_death_at_each_publication_boundary() {
         }
     }
 }
+
+use converter::recovery::{history, rescue, restore_copy};
+
+#[test]
+fn historical_cut_restores_as_a_new_item_without_replacing_the_current_cut() {
+    let tmp = tempdir().unwrap();
+    let folder = tmp.path().join("project");
+    let input = tmp.path().join("input");
+    let past = current();
+    write_doc(&input, &past);
+    pack(&input, &folder, atomic_write_new).unwrap();
+    let base = checkout(&folder, &tmp.path().join("base")).unwrap();
+    let mut edited = past.clone();
+    edited["project"]["items"]["73"]["name"] = json!("Revised cut");
+    let clip = &mut edited["project"]["items"]["73"]["kind"]["Sequence"]["video_tracks"][0]["items"][0];
+    clip["duration"] = json!(clip["duration"].as_i64().unwrap() / 2);
+    write_doc(&input, &edited);
+    let current_revision = save(&folder, &base, &input).unwrap();
+    let (id, restored) = restore_copy(&folder, &current_revision, &base, 73).unwrap();
+    assert!(id >= 900000);
+    let mut revisions = Vec::new();
+    history(&folder, |n, hash| {
+        revisions.push((n, hash.to_owned()));
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(revisions, [(2, restored.clone()), (1, current_revision.clone()), (0, base.clone())]);
+    let out = tmp.path().join("result");
+    unpack(&folder, &out).unwrap();
+    let result: Value = serde_json::from_slice(&fs::read(out).unwrap()).unwrap();
+    let mut expected = edited;
+    let mut copy = past["project"]["items"]["73"].clone();
+    copy["id"] = json!(id);
+    copy["created"] = json!(id);
+    copy["name"] = json!(format!("{} (Recovered)", copy["name"].as_str().unwrap()));
+    expected["project"]["items"][id.to_string()] = copy;
+    let nested = expected["project"]["root"]["children"][0]["Bin"]["children"].as_array_mut().unwrap().iter_mut().find_map(|v| v.get_mut("Bin")).unwrap();
+    nested["children"].as_array_mut().unwrap().push(json!({"Item":id}));
+    expected["project"]["next_id"] = json!(id + 1);
+    assert_eq!(result, expected);
+    assert!(restore_copy(&folder, &current_revision, &base, 73).unwrap_err().to_string().contains("stale"));
+    assert!(restore_copy(&folder, &restored, &base, 5).is_err());
+    fs::write(folder.join(&base), b"damaged").unwrap();
+    assert!(restore_copy(&folder, &restored, &base, 73).unwrap_err().to_string().contains("damaged archived manifest"));
+    assert_eq!(checkout(&folder, &tmp.path().join("after")).unwrap(), restored);
+}
+
+#[test]
+fn rescue_recovers_nested_sources_despite_unrelated_damage_but_refuses_missing_required_items() {
+    let tmp = tempdir().unwrap();
+    let folder = tmp.path().join("project");
+    let input = tmp.path().join("input");
+    let doc = current();
+    write_doc(&input, &doc);
+    pack(&input, &folder, atomic_write_new).unwrap();
+    let base = checkout(&folder, &tmp.path().join("base")).unwrap();
+    let mut edited = doc.clone();
+    edited["project"]["items"]["5"]["name"] = json!("Replacement footage");
+    write_doc(&input, &edited);
+    let next = save(&folder, &base, &input).unwrap();
+    assert!(restore_copy(&folder, &next, &base, 73).unwrap_err().to_string().contains("dependency item 5"));
+    let manifest: Value = serde_json::from_slice(&fs::read(folder.join(&base)).unwrap()).unwrap();
+    let path_for = |group: &str, id: u64| folder.join(manifest[group].as_array().unwrap().iter().find(|row| row[0] == id).unwrap()[1].as_str().unwrap());
+    fs::remove_file(path_for("items", 74)).unwrap();
+    fs::remove_file(path_for("bins", 88)).unwrap();
+    assert!(unpack(&folder, &tmp.path().join("all")).is_err());
+    let out = tmp.path().join("rescue.fcproj");
+    rescue(&folder, &base, 73, &out).unwrap();
+    let bytes = fs::read(&out).unwrap();
+    let loaded = filmcraft_format::decode(&bytes).unwrap();
+    assert_eq!(loaded.project.items.keys().map(|id| id.0).collect::<Vec<_>>(), [5, 21, 73]);
+    assert_eq!(loaded.view.unwrap().active_sequence, Some(filmcraft_project::ItemId(73)));
+    let saved: Value = serde_json::from_slice(&bytes).unwrap();
+    for id in ["5", "21", "73"] {
+        assert_eq!(saved["project"]["items"][id], doc["project"]["items"][id]);
+    }
+    assert!(rescue(&folder, &base, 73, &out).is_err());
+    fs::write(path_for("items", 5), b"damaged").unwrap();
+    let refused = tmp.path().join("refused");
+    assert!(rescue(&folder, &base, 73, &refused).unwrap_err().to_string().contains("item 5"));
+    assert!(!refused.exists());
+    assert_eq!(fs::read(out).unwrap(), bytes);
+}
+
+#[test]
+fn a_deleted_sequence_recovers_into_the_root_and_corrupt_history_cannot_be_used() {
+    let tmp = tempdir().unwrap();
+    let folder = tmp.path().join("project");
+    let input = tmp.path().join("input");
+    let mut doc = current();
+    write_doc(&input, &doc);
+    pack(&input, &folder, atomic_write_new).unwrap();
+    let base = checkout(&folder, &tmp.path().join("base")).unwrap();
+    doc["project"]["items"].as_object_mut().unwrap().remove("73");
+    let bins = doc["project"]["root"]["children"][0]["Bin"]["children"].as_array_mut().unwrap();
+    bins.retain(|entry| entry.get("Bin").is_none());
+    write_doc(&input, &doc);
+    let deleted = save(&folder, &base, &input).unwrap();
+    let (id, next) = restore_copy(&folder, &deleted, &base, 73).unwrap();
+    let result = tmp.path().join("result");
+    unpack(&folder, &result).unwrap();
+    let out: Value = serde_json::from_slice(&fs::read(result).unwrap()).unwrap();
+    assert!(out["project"]["items"].get("73").is_none());
+    assert_eq!(out["project"]["root"]["children"].as_array().unwrap().last(), Some(&json!({"Item":id})));
+    let archived = folder.join(&base);
+    let root = fs::read(folder.join(ROOT)).unwrap();
+    fs::write(&archived, &root).unwrap();
+    let error = restore_copy(&folder, &next, &base, 73).unwrap_err();
+    assert!(error.to_string().contains("damaged archived manifest"));
+    assert_eq!(fs::read(folder.join(ROOT)).unwrap(), root);
+}

@@ -3,6 +3,7 @@ mod converter;
 
 use converter::{
     pack,
+    recovery::{history, rescue, restore_copy},
     revisions::{checkout, save},
     unpack,
 };
@@ -31,9 +32,31 @@ fn run() -> io::Result<()> {
         println!("{}", save(Path::new(folder), expected, Path::new(source))?);
         return Ok(());
     }
+    if let [command, folder] = args.as_slice()
+        && command == "history"
+    {
+        return history(Path::new(folder), |number, hash| {
+            use std::io::Write;
+            writeln!(io::stdout().lock(), "{number} {hash}")
+        });
+    }
+    if let [command, folder, base, revision, id] = args.as_slice()
+        && command == "restore-copy"
+        && let (Some(base), Some(revision), Some(id)) = (base.to_str(), revision.to_str(), id.to_str().and_then(|s| s.parse().ok()))
+    {
+        let (new_id, digest) = restore_copy(Path::new(folder), base, revision, id)?;
+        println!("{new_id} {digest}");
+        return Ok(());
+    }
+    if let [command, folder, revision, id, out] = args.as_slice()
+        && command == "rescue"
+        && let (Some(revision), Some(id)) = (revision.to_str(), id.to_str().and_then(|s| s.parse().ok()))
+    {
+        return rescue(Path::new(folder), revision, id, Path::new(out));
+    }
     Err(io::Error::new(
         io::ErrorKind::InvalidInput,
-        "usage: project_folder pack SOURCE.fcproj NEW_FOLDER | unpack FOLDER NEW_FILE.fcproj | checkout FOLDER NEW_FILE.fcproj | save FOLDER BASE_REVISION EDITED.fcproj",
+        "usage: project_folder pack SOURCE.fcproj NEW_FOLDER | unpack FOLDER NEW_FILE.fcproj | checkout FOLDER NEW_FILE.fcproj | save FOLDER BASE_REVISION EDITED.fcproj | history FOLDER | restore-copy FOLDER BASE_REVISION HISTORICAL_REVISION SEQUENCE_ID | rescue FOLDER REVISION SEQUENCE_ID NEW_FILE.fcproj",
     ))
 }
 
