@@ -91,6 +91,8 @@ Reading it partially and saving it back would silently drop whatever the newer v
 
 ## Developer project-folder converter
 
+The [modular roadmap](modular-roadmap.md) tracks verified capabilities, prototype workflows and the remaining desktop and shared-storage milestones.
+
 To try the modular fork from a fresh checkout:
 
 ```sh
