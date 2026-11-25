@@ -54,10 +54,15 @@ impl FolderSnapshot {
     }
 
     pub fn save(&mut self, before: &[u8], after: &[u8]) -> io::Result<()> {
+        self.save_from(&self.revision.clone(), before, after)
+    }
+
+    /// Merge an edit based on an earlier snapshot, publishing against the open HEAD.
+    pub fn save_from(&mut self, base: &str, before: &[u8], after: &[u8]) -> io::Result<()> {
         if !self.writable() {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, "project folder is read-only"));
         }
-        let next = self.merge(before, after)?;
+        let next = self.merge(base, before, after)?;
         // Keep the new raw baseline only after the manifest has been published.
         let rev = revisions::save_locked(&self.folder, &self.revision, &next, revisions::publish)?;
         self.raw = next;
@@ -65,18 +70,27 @@ impl FolderSnapshot {
         Ok(())
     }
 
-    fn merge(&self, before: &[u8], after: &[u8]) -> io::Result<ProjectRecords> {
+    fn merge(&self, base: &str, before: &[u8], after: &[u8]) -> io::Result<ProjectRecords> {
         let before = ProjectRecords::split(before).map_err(invalid)?;
         let after = ProjectRecords::split(after).map_err(invalid)?;
-        overlay::edited(&self.raw, &before, after)
+        if base == self.revision {
+            return overlay::edited(&self.raw, &before, after);
+        }
+        let manifest = super::recovery::at(&self.folder, base)?;
+        let raw = super::read_records(&self.folder, &manifest)?;
+        overlay::edited(&raw, &before, after)
     }
 
     pub fn export(&self, before: &[u8], after: &[u8], destination: &Path) -> io::Result<()> {
+        self.export_from(&self.revision, before, after, destination)
+    }
+
+    pub fn export_from(&self, base: &str, before: &[u8], after: &[u8], destination: &Path) -> io::Result<()> {
         if destination.extension().is_none_or(|ext| ext != "fcproj") {
             return Err(invalid("expected a new .fcproj destination"));
         }
         super::outside_folder(&self.folder, destination)?;
-        let data = encode_at(&self.folder, self.merge(before, after)?, destination)?;
+        let data = encode_at(&self.folder, self.merge(base, before, after)?, destination)?;
         crate::atomic_write_new(destination, &data)
     }
 }

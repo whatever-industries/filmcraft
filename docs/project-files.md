@@ -169,7 +169,9 @@ Saving retains extra JSON fields on surviving records, including clips moved bet
 tracks and markers reordered by time. An edit that makes an extension's owner ambiguous
 reports the affected record and field. The last published revision stays available and
 the edited session can undo or revise the change and retry. The same rules apply to
-standard exports from the folder session.
+standard exports from the folder session. Undoing a saved deletion restores the clip’s
+extra fields along with its timing and edits. Saving again records that restoration as
+a new revision. Redo in the same session can remove the clip again.
 
 ### Recover a sequence
 

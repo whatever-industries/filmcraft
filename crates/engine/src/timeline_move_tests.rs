@@ -276,7 +276,7 @@ fn duplicate_new_track_move_preserves_full_undo_history() {
                 assert_eq!(s.history.undo.len(), s.history.limit);
                 assert!(s.history.merge_key.is_some());
                 reject_duplicate_new_track_move(&mut s, v.id, insert, linked, new_first);
-                let oldest = s.history.undo.first().unwrap().1.clone();
+                let oldest = s.history.undo.first().unwrap().1.project.clone();
                 for _ in 0..s.history.limit {
                     s.execute("edit.undo", json!({})).unwrap();
                 }

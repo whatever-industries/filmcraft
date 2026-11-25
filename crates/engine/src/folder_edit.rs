@@ -2,19 +2,34 @@
 use crate::{EngineError, Result, Session};
 use filmcraft_format::project_folder::{FolderSnapshot, ROOT};
 use serde_json::{Value, json};
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 pub(crate) struct EditingFolder {
     pub(crate) snapshot: FolderSnapshot,
-    baseline: Vec<u8>,
+    pub(super) baseline: Arc<FolderBase>,
+}
+
+/// Shared by all undo/redo entries made against this saved representation. The
+/// immutable raw records stay in the folder. The project snapshot shares the engine's Arcs.
+#[derive(Debug, PartialEq)]
+pub(super) struct FolderBase {
+    revision: String,
+    project: Arc<filmcraft_project::Project>,
+    view: filmcraft_project::ProjectView,
+}
+
+impl FolderBase {
+    fn capture(s: &Session, revision: String) -> Arc<Self> {
+        Arc::new(Self { revision, project: s.project.clone(), view: s.project_view() })
+    }
+
+    fn typed(&self) -> Vec<u8> {
+        filmcraft_format::encode_with_view(&self.project, Some(&self.view), false)
+    }
 }
 
 pub(crate) fn manifest(path: &str) -> bool {
     Path::new(path).file_name().is_some_and(|name| name == ROOT)
-}
-
-fn typed(s: &Session) -> Vec<u8> {
-    filmcraft_format::encode_with_view(&s.project, Some(&s.project_view()), false)
 }
 
 impl Session {
@@ -43,23 +58,28 @@ impl Session {
         result["storage"] = json!("projectFolder");
         result["readOnly"] = json!(!snapshot.writable());
         result["folderRevision"] = json!(snapshot.revision());
-        self.editing_folder = Some(EditingFolder { snapshot, baseline: typed(self) });
+        let baseline = FolderBase::capture(self, snapshot.revision().to_owned());
+        self.editing_folder = Some(EditingFolder { snapshot, baseline });
         Ok(result)
     }
 
     pub(crate) fn save_folder(&mut self, path: &str, adopt: bool) -> Result<Value> {
-        let next = typed(self);
+        let view = self.project_view();
+        let next = filmcraft_format::encode_with_view(&self.project, Some(&view), false);
         let folder = self.editing_folder.as_mut().ok_or_else(|| EngineError::Other("open the folder before saving its manifest".into()))?;
         if manifest(path) {
             if !adopt || !folder.snapshot.is_manifest(Path::new(path)) {
                 return Err(EngineError::Other("a folder can only publish to its open manifest".into()));
             }
-            folder.snapshot.save(&folder.baseline, &next).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
-            folder.baseline = next;
+            folder.snapshot.save_from(&folder.baseline.revision, &folder.baseline.typed(), &next).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+            folder.baseline = Arc::new(FolderBase { revision: folder.snapshot.revision().to_owned(), project: self.project.clone(), view });
             self.saved_revision = self.revision;
             return Ok(json!({"path":path,"folderRevision":folder.snapshot.revision(),"readOnly":false}));
         }
-        folder.snapshot.export(&folder.baseline, &next, Path::new(path)).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+        folder
+            .snapshot
+            .export_from(&folder.baseline.revision, &folder.baseline.typed(), &next, Path::new(path))
+            .map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
         if adopt {
             // Reinstall the stock document so offline references use the exported location.
             return crate::commands::open_project(self, path);
@@ -84,6 +104,8 @@ mod tests {
         let p = filmcraft_format::decode(include_bytes!("../../format/tests/fixtures/v1-edit.fcproj")).unwrap().project;
         let mut doc: Value = serde_json::from_slice(&filmcraft_format::encode(&p, false)).unwrap();
         doc["view"] = json!({"extra":"edit suite","open_sequences":[21],"active_sequence":21});
+        doc["project"]["items"]["21"]["kind"]["Sequence"]["video_tracks"][0]["items"][0]["extension"] =
+            json!({"timing":{"rate":[24,1]},"labels":[null,"camera"]});
         let effects = doc.pointer_mut("/project/items/21/kind/Sequence/video_tracks/0/items/0/effects").unwrap().as_array_mut().unwrap();
         let mut duplicate = effects[0].clone();
         duplicate["extra"] = json!("must keep");
@@ -152,6 +174,77 @@ mod tests {
         let old: Value = serde_json::from_slice(&fs::read(old).unwrap()).unwrap();
         let effects = old.pointer("/project/items/21/kind/Sequence/video_tracks/0/items/0/effects").unwrap();
         assert_eq!(effects.as_array().unwrap().last().unwrap()["extra"], "must keep");
+    }
+
+    #[test]
+    fn undo_and_redo_after_folder_save_preserve_clip_extensions_and_revision_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let path = fixture(dir);
+        let mut writer = Session::local_folder_editor();
+        writer.execute("file.open", json!({"path":path})).unwrap();
+        let export = |s: &mut Session, name: &str| -> Value {
+            let out = dir.join(name);
+            s.execute("file.saveCopy", json!({"path":out})).unwrap();
+            let bytes = fs::read(out).unwrap();
+            filmcraft_format::decode(&bytes).unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        let reopen = |name: &str| -> Value {
+            let mut reader = Session::local_folder_editor();
+            assert_eq!(reader.execute("file.open", json!({"path":path})).unwrap()["readOnly"], true);
+            export(&mut reader, name)
+        };
+        let original = export(&mut writer, "original.fcproj");
+        let track = "/project/items/21/kind/Sequence/video_tracks/0";
+        let before = original.pointer(track).unwrap();
+        let clip = before["items"][0]["id"].as_u64().unwrap();
+        assert!(before["items"][0]["extension"].is_object());
+        writer.execute("timeline.delete", json!({"clip":clip})).unwrap();
+        writer.execute("file.save", json!({})).unwrap();
+        let deleted = reopen("deleted.fcproj");
+        assert!(deleted.pointer(track).unwrap()["items"].as_array().unwrap().is_empty());
+        writer.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(export(&mut writer, "undo-copy.fcproj").pointer(track), Some(before));
+        let restored = writer.execute("file.save", json!({})).unwrap()["folderRevision"].as_str().unwrap().to_owned();
+        assert_eq!(reopen("restored.fcproj").pointer(track), Some(before));
+        writer.execute("edit.redo", json!({})).unwrap();
+        writer.execute("file.save", json!({})).unwrap();
+        assert_eq!(reopen("redone.fcproj")["project"], deleted["project"]);
+        let past = dir.join("historical.fcproj");
+        filmcraft_format::project_folder::recovery::rescue(path.parent().unwrap(), &restored, 21, &past).unwrap();
+        let doc: Value = serde_json::from_slice(&fs::read(past).unwrap()).unwrap();
+        assert_eq!(doc.pointer(track), Some(before));
+        writer.execute("edit.undo", json!({})).unwrap();
+        writer.execute("timeline.move", json!({"moves":[{"clip":clip,"track":"new","time":0}],"linked":false,"copy":true})).unwrap();
+        assert!(!writer.history.can_redo());
+        writer.execute("file.save", json!({})).unwrap();
+        let branched = reopen("branched.fcproj");
+        assert_eq!(branched.pointer(track), Some(before));
+        let copy = branched.pointer("/project/items/21/kind/Sequence/video_tracks/1/items/0").unwrap();
+        assert_ne!(copy["id"], clip);
+        assert!(copy.get("extension").is_none());
+    }
+
+    #[test]
+    fn missing_history_during_undo_save_leaves_the_draft_retryable() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = fixture(temp.path());
+        let mut writer = Session::local_folder_editor();
+        let opened = writer.execute("file.open", json!({"path":path})).unwrap();
+        let archive = path.with_file_name(opened["folderRevision"].as_str().unwrap());
+        writer.execute("timeline.delete", json!({"clip":29})).unwrap();
+        writer.execute("file.save", json!({})).unwrap();
+        writer.execute("edit.undo", json!({})).unwrap();
+        let head = fs::read(&path).unwrap();
+        let held = temp.path().join("held-manifest");
+        fs::rename(&archive, &held).unwrap();
+        assert!(writer.execute("file.save", json!({})).is_err());
+        assert!(writer.is_dirty() && writer.history.can_redo());
+        assert_eq!(fs::read(path).unwrap(), head);
+        fs::rename(held, archive).unwrap();
+        writer.execute("file.save", json!({})).unwrap();
+        assert!(!writer.is_dirty() && writer.history.can_redo());
     }
 
     #[test]

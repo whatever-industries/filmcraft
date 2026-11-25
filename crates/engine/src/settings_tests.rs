@@ -750,7 +750,7 @@ fn auto_transcribe_sequence_clips_share_undo_and_preserve_existing_transcripts()
             if limit > 1 {
                 for (old, kept) in undo.iter().zip(&s.history.undo) {
                     assert_eq!(old.0, kept.0);
-                    assert!(std::sync::Arc::ptr_eq(&old.1, &kept.1), "older undo steps must be retained");
+                    assert!(std::sync::Arc::ptr_eq(&old.1.project, &kept.1.project), "older undo steps must be retained");
                 }
             }
             s.execute("edit.undo", json!({})).unwrap();

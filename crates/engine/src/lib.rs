@@ -303,13 +303,21 @@ impl Services for FsServices {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UndoMark(Option<usize>);
 
+/// The typed edit state and, for a folder document, the origin of its extension fields.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectSnapshot {
+    pub project: Arc<Project>,
+    #[cfg(not(target_arch = "wasm32"))]
+    folder_base: Option<Arc<folder_edit::FolderBase>>,
+}
+
 /// Undo history of whole-project snapshots. Each step is its label, the project before (undo) or
 /// after (redo) it, and the id of the command that made it (None for an edit made outside
 /// [`Session::execute`]); the History panel draws that command's icon.
 #[derive(Clone, Default)]
 pub struct History {
-    pub undo: Vec<(String, Arc<Project>, Option<String>)>,
-    pub redo: Vec<(String, Arc<Project>, Option<String>)>,
+    pub undo: Vec<(String, ProjectSnapshot, Option<String>)>,
+    pub redo: Vec<(String, ProjectSnapshot, Option<String>)>,
     /// Labels of all applied states, oldest first (History panel).
     pub limit: usize,
     /// Key of the last [`Session::edit_merged`] step: a continuous gesture (a fader drag) with the
@@ -1083,6 +1091,24 @@ impl Session {
         }
     }
 
+    fn capture_project(&self) -> ProjectSnapshot {
+        ProjectSnapshot {
+            project: self.project.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            folder_base: self.editing_folder.as_ref().map(|f| f.baseline.clone()),
+        }
+    }
+
+    /// Swap only the editable content. The session keeps its current writer lease and HEAD.
+    fn replace_project(&mut self, mut state: ProjectSnapshot) -> ProjectSnapshot {
+        std::mem::swap(&mut self.project, &mut state.project);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (Some(folder), Some(base)) = (&mut self.editing_folder, &mut state.folder_base) {
+            std::mem::swap(&mut folder.baseline, base);
+        }
+        state
+    }
+
     /// Apply an undoable project edit. The closure gets a mutable copy; on error nothing changes.
     pub fn edit<R>(&mut self, label: &str, f: impl FnOnce(&mut Project, &mut EditorState) -> Result<R>) -> Result<R> {
         let mut p = (*self.project).clone();
@@ -1090,7 +1116,8 @@ impl Session {
         let r = f(&mut p, &mut st)?;
         self.refuse_self_nesting(&p)?;
         self.drop_orphan_transitions(&mut p);
-        let old = std::mem::replace(&mut self.project, Arc::new(p));
+        let old = self.capture_project();
+        self.project = Arc::new(p);
         self.history.undo.push((label.to_string(), old, self.command_origin.clone()));
         if self.history.undo.len() > self.history.limit {
             self.history.undo.remove(0);
@@ -1128,7 +1155,7 @@ impl Session {
     /// is rolled back and the history is as before.
     pub fn edit_group<R>(&mut self, label: &str, f: impl FnOnce(&mut Session) -> Result<R>) -> Result<R> {
         let (project, state, undo, redo, limit) =
-            (self.project.clone(), self.state.clone(), self.history.undo.len(), self.history.redo.clone(), self.history.limit);
+            (self.capture_project(), self.state.clone(), self.history.undo.len(), self.history.redo.clone(), self.history.limit);
         // keep every step the group makes, however many, so the first one can be found afterwards
         self.history.limit = usize::MAX;
         // a panic inside the group must not leave the history unlimited: restore, then let it go on
@@ -1139,7 +1166,7 @@ impl Session {
             s.history.undo.truncate(undo);
             s.history.redo = redo.clone();
             s.history.merge_key = None;
-            s.project = project.clone();
+            s.replace_project(project.clone());
             s.state = state.clone();
             s.bump();
         };
@@ -1167,7 +1194,7 @@ impl Session {
 
     /// Where the undo history stands now, for [`Session::revert_to`].
     pub fn undo_mark(&self) -> UndoMark {
-        UndoMark(self.history.undo.last().map(|u| Arc::as_ptr(&u.1) as usize))
+        UndoMark(self.history.undo.last().map(|u| Arc::as_ptr(&u.1.project) as usize))
     }
 
     /// Take back every edit made since `mark` (a gesture cancelled with Escape, #580), merged or
@@ -1175,7 +1202,7 @@ impl Session {
     /// Nothing happens when `mark` has left the history. Returns how many steps were taken back.
     pub fn revert_to(&mut self, mark: UndoMark) -> usize {
         if let UndoMark(Some(p)) = mark
-            && !self.history.undo.iter().any(|u| Arc::as_ptr(&u.1) as usize == p)
+            && !self.history.undo.iter().any(|u| Arc::as_ptr(&u.1.project) as usize == p)
         {
             return 0;
         }
@@ -1187,7 +1214,7 @@ impl Session {
             n += 1;
         }
         if let Some(prev) = earliest {
-            self.project = prev;
+            self.replace_project(prev);
             self.history.merge_key = None;
             self.fix_state();
             self.bump();
@@ -1237,7 +1264,7 @@ impl Session {
     pub fn undo(&mut self) -> Option<String> {
         let (label, prev, origin) = self.history.undo.pop()?;
         self.history.merge_key = None;
-        let cur = std::mem::replace(&mut self.project, prev);
+        let cur = self.replace_project(prev);
         self.history.redo.push((label.clone(), cur, origin));
         self.fix_state();
         self.bump();
@@ -1247,7 +1274,7 @@ impl Session {
     pub fn redo(&mut self) -> Option<String> {
         let (label, next, origin) = self.history.redo.pop()?;
         self.history.merge_key = None;
-        let cur = std::mem::replace(&mut self.project, next);
+        let cur = self.replace_project(next);
         self.history.undo.push((label.clone(), cur, origin));
         self.fix_state();
         self.bump();
