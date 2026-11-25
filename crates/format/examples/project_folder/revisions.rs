@@ -11,8 +11,8 @@ use std::{collections::BTreeMap, io, path::Path};
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Revision {
-    number: u64,
-    parent: String,
+    pub(super) number: u64,
+    pub(super) parent: String,
     bin_edits: BTreeMap<u64, Edit>,
     item_edits: BTreeMap<u64, Edit>,
 }
@@ -52,7 +52,7 @@ pub(in super::super) fn checkout(folder: &Path, destination: &Path) -> io::Resul
     Ok(digest(&bytes))
 }
 
-fn publish(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(super) fn publish(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if path.file_name().is_some_and(|name| name == ROOT) { filmcraft_format::atomic_write(path, bytes) } else { atomic_write_new(path, bytes) }
 }
 
