@@ -28,12 +28,14 @@ pub(crate) struct FolderJournal {
 }
 
 impl FolderJournal {
-    pub(crate) fn start(data: &Path, snapshot: &FolderSnapshot) -> Result<Self> {
+    pub(crate) fn start(data: &Path, snapshot: &FolderSnapshot, host: Option<&AutosaveConfig>) -> Result<Self> {
         let source = Source::capture(snapshot.directory(), snapshot.revision()).map_err(error)?;
         if data.starts_with(snapshot.directory()) {
             return Err(error("choose a data directory outside the project folder"));
         }
-        let worker = Persistence::start_folder(&AutosaveConfig::new(data)).map_err(error)?;
+        let mut config = host.cloned().unwrap_or_else(|| AutosaveConfig::new(data));
+        config.data_dir = data.to_owned();
+        let worker = Persistence::start_folder(&config).map_err(error)?;
         Ok(Self { worker: Some(worker), source, last_sent: None })
     }
 
@@ -252,17 +254,15 @@ impl Session {
             }
             (snapshot, draft)
         };
-        self.flush_folder_recovery()?;
-        let journal = FolderJournal::start(self.folder_recovery.as_ref().ok_or_else(|| error("disabled"))?, &snapshot)?;
+        let loaded = filmcraft_format::decode(&bytes).map_err(error)?;
+        let journal = FolderJournal::start(self.folder_recovery.as_ref().ok_or_else(|| error("disabled"))?, &snapshot, self.mixed_config.as_ref())?;
         if !Source::capture(snapshot.directory(), &c.source.head).map_err(error)?.matches(&c.source) {
             return Err(error(independent));
         }
         let path_text = path.to_str().ok_or_else(|| error("non-UTF-8 project path"))?;
+        self.prepare_document_switch()?;
         let previous = self.editing_folder.take();
-        if let Err(e) = crate::commands::open_bytes(self, path_text, &bytes) {
-            self.editing_folder = previous;
-            return Err(e);
-        }
+        crate::commands::install_loaded(self, path_text, loaded);
         if let Some(mut old) = previous {
             snapshot.inherit_writer(&mut old.snapshot);
         }

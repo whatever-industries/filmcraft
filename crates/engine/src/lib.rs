@@ -528,6 +528,8 @@ pub struct Session {
     #[cfg(not(target_arch = "wasm32"))]
     allow_project_folders: bool,
     #[cfg(not(target_arch = "wasm32"))]
+    mixed_config: Option<autosave::AutosaveConfig>,
+    #[cfg(not(target_arch = "wasm32"))]
     shared_bins: bool,
     #[cfg(not(target_arch = "wasm32"))]
     editing_folder: Option<folder_edit::EditingFolder>,
@@ -656,6 +658,8 @@ mod folder_edit;
 #[cfg(not(target_arch = "wasm32"))]
 mod folder_recovery;
 #[cfg(not(target_arch = "wasm32"))]
+mod mixed_storage;
+#[cfg(not(target_arch = "wasm32"))]
 mod shared_bins;
 
 impl Default for Session {
@@ -679,6 +683,8 @@ impl Session {
             project: Arc::new(Project::new("Untitled")),
             #[cfg(not(target_arch = "wasm32"))]
             allow_project_folders: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            mixed_config: None,
             #[cfg(not(target_arch = "wasm32"))]
             shared_bins: false,
             #[cfg(not(target_arch = "wasm32"))]
@@ -796,6 +802,11 @@ impl Session {
             }
             self.editing_folder.take();
             self.path = None;
+            // The idle standard worker has never received the folder document.
+            if let Some(p) = self.persistence.take() {
+                p.close();
+            }
+            return;
         }
         self.sync_persistence();
         if let Some(p) = self.persistence.take() {
@@ -917,6 +928,7 @@ impl Session {
                     | "file.closeProject"
                     | "file.openDemoProject"
                     | "file.recover"
+                    | "file.discardRecovery"
                     | "file.recoveryList"
                     | "file.autoSaveStatus"
                     | "file.saveCopy"
@@ -926,10 +938,6 @@ impl Session {
             && !commands::reports_only(id, &params)
         {
             return Err(EngineError::Other("project folder is read-only; save an independent copy to edit".into()));
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        if matches!(id, "file.newProject" | "file.openDemoProject" | "file.newProjectFromTemplate" | "file.closeProject") {
-            self.flush_folder_recovery()?;
         }
         // headless sessions (CLI, MCP, control channel) have no UI frame loop calling
         // `poll_persistence`: apply background mask tracking before each command (#3302)

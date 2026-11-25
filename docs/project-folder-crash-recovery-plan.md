@@ -1,5 +1,7 @@
 # Crash recovery for unsaved project-folder edits
 
+This is the original checkpoint design. The [modular roadmap](modular-roadmap.md) tracks implementation, verification and the next milestone.
+
 A crash after a checkpoint should cost at most the edits made since that checkpoint. On restart, the editor can inspect or recover the draft. Other readers continue to open the last manually saved revision. The first milestone runs through the local CLI on a local filesystem.
 
 Folder editing currently supports manual Save, Undo, Redo and standard export. The single-file journal already schedules background writes, discovers abandoned sessions and acknowledges flushes. Its worker serializes a typed project, which can omit extension fields. Folder recovery needs the same lossless merge as manual folder export, including the historical baseline restored by Undo.

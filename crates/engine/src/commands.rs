@@ -1633,6 +1633,8 @@ fn build() -> Vec<CommandSpec> {
         // ================= File =================
         cmd!("file.newProject", "Project…", ["File", "New"], Some("Cmd+Alt+N"), r#"{"name":str}"#, always, |s, p| {
             let name = str_p(p, "name").unwrap_or("Untitled").to_string();
+            #[cfg(not(target_arch = "wasm32"))]
+            s.prepare_document_switch()?;
             crate::masks::discard_jobs(s);
             s.project = std::sync::Arc::new(filmcraft_project::Project::new(&name));
             s.begin_document();
@@ -1649,6 +1651,8 @@ fn build() -> Vec<CommandSpec> {
             Ok(json!({"name": name, "revision": s.revision}))
         }),
         cmd!("file.openDemoProject", "Demo Project", ["File", "New"], None, "{}", always, |s, _| {
+            #[cfg(not(target_arch = "wasm32"))]
+            s.prepare_document_switch()?;
             let (p, seq) = crate::demo::demo_project(&s.media);
             s.project = std::sync::Arc::new(p);
             s.begin_document();
@@ -2043,51 +2047,71 @@ fn build() -> Vec<CommandSpec> {
             let path = str_p(p, "path").ok_or_else(|| bad("file.open", "need `path`"))?.to_string();
             open_project(s, &path)
         }),
-        cmd!("file.recover", "Recover Unsaved Changes…", ["File"], None, r#"{"id":str?,"path":str?}"#, has_recovery, |s, p| {
-            #[cfg(not(target_arch = "wasm32"))]
-            if s.folder_recovery.is_some() {
-                return s.recover_folder_candidate(p);
-            }
-            if p.get("path").is_some() {
-                return Err(bad("file.recover", "an independent recovery path requires folder recovery mode"));
-            }
-            recover(s, str_p(p, "id"))
-        }),
-        cmd!("file.discardRecovery", "Discard Unsaved Changes", [], None, r#"{"id":str?,"all":bool?}"#, has_recovery, |s, p| {
-            #[cfg(not(target_arch = "wasm32"))]
-            if s.folder_recovery.is_some() {
-                return s.discard_folder_candidate(p);
-            }
-            let all = bool_p(p, "all").unwrap_or(false);
-            let id = str_p(p, "id").map(str::to_string);
-            let Some(per) = s.persistence.as_mut() else { return Ok(json!({"discarded": 0})) };
-            let mut n = 0usize;
-            let mut keep = Vec::new();
-            let mut failure = None;
-            for (i, c) in std::mem::take(&mut per.candidates).into_iter().enumerate() {
-                let hit = all || id.as_deref().map_or(i == 0, |want| want == c.id);
-                if hit && failure.is_none() {
-                    match crate::autosave::discard_candidate(&c) {
-                        Ok(()) => n = n.saturating_add(1),
-                        Err(e) => {
-                            failure = Some(EngineError::Other(format!("could not discard recovery session {}: {e}", c.id)));
-                            keep.push(c);
-                        }
-                    }
-                } else {
-                    keep.push(c);
+        cmd!(
+            "file.recover",
+            "Recover Unsaved Changes…",
+            ["File"],
+            None,
+            r#"{"id":str?,"storage":"projectFile|projectFolder"?,"path":str?}"#,
+            has_recovery,
+            |s, p| {
+                #[cfg(not(target_arch = "wasm32"))]
+                if s.use_folder_candidate(p, false)? {
+                    return s.recover_folder_candidate(p);
                 }
+                if p.get("path").is_some() {
+                    return Err(bad("file.recover", "an independent recovery path requires folder recovery mode"));
+                }
+                recover(s, str_p(p, "id"))
             }
-            per.candidates = keep;
-            if let Some(e) = failure {
-                return Err(e);
+        ),
+        cmd!(
+            "file.discardRecovery",
+            "Discard Unsaved Changes",
+            [],
+            None,
+            r#"{"id":str?,"storage":"projectFile|projectFolder"?,"all":bool?}"#,
+            has_recovery,
+            |s, p| {
+                #[cfg(not(target_arch = "wasm32"))]
+                if s.use_folder_candidate(p, true)? {
+                    return s.discard_folder_candidate(p);
+                }
+                let all = bool_p(p, "all").unwrap_or(false);
+                let id = str_p(p, "id").map(str::to_string);
+                let Some(per) = s.persistence.as_mut() else { return Ok(json!({"discarded": 0})) };
+                let mut n = 0usize;
+                let mut keep = Vec::new();
+                let mut failure = None;
+                for (i, c) in std::mem::take(&mut per.candidates).into_iter().enumerate() {
+                    let hit = all || id.as_deref().map_or(i == 0, |want| want == c.id);
+                    if hit && failure.is_none() {
+                        match crate::autosave::discard_candidate(&c) {
+                            Ok(()) => n = n.saturating_add(1),
+                            Err(e) => {
+                                failure = Some(EngineError::Other(format!("could not discard recovery session {}: {e}", c.id)));
+                                keep.push(c);
+                            }
+                        }
+                    } else {
+                        keep.push(c);
+                    }
+                }
+                per.candidates = keep;
+                if let Some(e) = failure {
+                    return Err(e);
+                }
+                if n == 0 {
+                    return Err(bad("file.discardRecovery", "no such recovery session"));
+                }
+                Ok(json!({"discarded": n}))
             }
-            if n == 0 {
-                return Err(bad("file.discardRecovery", "no such recovery session"));
-            }
-            Ok(json!({"discarded": n}))
-        }),
+        ),
         query!("file.recoveryList", "List Recoverable Sessions", "{}", |s, _| {
+            #[cfg(not(target_arch = "wasm32"))]
+            if s.mixed_config.is_some() {
+                return s.mixed_candidates().map(Value::Array);
+            }
             #[cfg(not(target_arch = "wasm32"))]
             if s.folder_recovery.is_some() {
                 return s.folder_candidates();
@@ -2096,7 +2120,7 @@ fn build() -> Vec<CommandSpec> {
         }),
         cmd!("file.autoSaveNow", "Auto Save Now", [], None, "{}", always, |s, _| {
             #[cfg(not(target_arch = "wasm32"))]
-            if s.folder_recovery.is_some() {
+            if s.folder_autosave_active() {
                 if !s.editing_folder.as_ref().is_some_and(|f| f.journal.is_some()) {
                     return Err(bad("file.autoSaveNow", "open a writable project folder to checkpoint its edits"));
                 }
@@ -2109,7 +2133,7 @@ fn build() -> Vec<CommandSpec> {
         }),
         query!("file.autoSaveStatus", "Auto Save Status", "{}", |s, _| {
             #[cfg(not(target_arch = "wasm32"))]
-            if s.folder_recovery.is_some() {
+            if s.folder_autosave_active() {
                 return Ok(s.folder_status());
             }
             let Some(per) = s.persistence.as_ref() else { return Ok(json!({"running": false, "prefs": s.prefs.auto_save})) };
@@ -5408,15 +5432,17 @@ fn write_project(s: &mut Session, path: &str, adopt: bool) -> Result<Value> {
     }
     let t0 = web_time::Instant::now();
     // Save As renames the project after its new file (not an edit: no undo step, not dirty).
-    if adopt
-        && let Some(name) = project_name_for(path)
-        && s.project.name != name
-    {
-        name_project(std::sync::Arc::make_mut(&mut s.project), name);
-    }
-    // what is open (sequence tabs, how each is shown) goes into the file beside the project
+    let renamed = if adopt {
+        project_name_for(path).filter(|name| *name != s.project.name).map(|name| {
+            let mut project = (*s.project).clone();
+            name_project(&mut project, name);
+            project
+        })
+    } else {
+        None
+    };
     let view = s.project_view();
-    let bytes = filmcraft_format::encode_with_view(&s.project, Some(&view), false);
+    let bytes = filmcraft_format::encode_with_view(renamed.as_ref().unwrap_or(&s.project), Some(&view), false);
     let mut backup = None;
     if adopt && s.path.as_deref() == Some(path) && s.loaded_schema < filmcraft_format::SCHEMA_VERSION {
         let b = schema_backup_path(path, s.loaded_schema);
@@ -5429,6 +5455,9 @@ fn write_project(s: &mut Session, path: &str, adopt: bool) -> Result<Value> {
     }
     s.services.write_file(path, &bytes).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     if adopt {
+        if let Some(project) = renamed {
+            s.project = std::sync::Arc::new(project);
+        }
         s.path = Some(path.to_string());
         s.previews_follow_path();
         s.note_recent_project();
@@ -5487,7 +5516,11 @@ pub(crate) fn open_project(s: &mut Session, path: &str) -> Result<Value> {
 pub(crate) fn open_bytes(s: &mut Session, path: &str, bytes: &[u8]) -> Result<Value> {
     let loaded = filmcraft_format::decode(bytes).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     #[cfg(not(target_arch = "wasm32"))]
-    s.flush_folder_recovery()?;
+    s.prepare_document_switch()?;
+    Ok(install_loaded(s, path, loaded))
+}
+
+pub(super) fn install_loaded(s: &mut Session, path: &str, loaded: filmcraft_format::Loaded) -> Value {
     let (from, migrated) = (loaded.schema_version, loaded.migrated());
     crate::masks::discard_jobs(s);
     install_project(s, loaded.project, Some(path.to_string()), true);
@@ -5504,7 +5537,7 @@ pub(crate) fn open_bytes(s: &mut Session, path: &str, bytes: &[u8]) -> Result<Va
         s.toast(format!("Upgraded project from schema v{from} to v{}; the original is kept as a backup when you save", filmcraft_format::SCHEMA_VERSION));
     }
     let missing = crate::relink::on_open(s);
-    Ok(json!({"path": path, "schemaVersion": from, "migrated": migrated, "missingMedia": missing}))
+    json!({"path": path, "schemaVersion": from, "migrated": migrated, "missingMedia": missing})
 }
 
 /// Load a recovery candidate (newest when `id` is None) as the current, unsaved project.
@@ -5515,8 +5548,14 @@ fn recover(s: &mut Session, id: Option<&str>) -> Result<Value> {
         None => 0,
     };
     let c = per.candidates.get(idx).cloned().ok_or_else(|| bad("file.recover", "no recovery session"))?;
+    #[cfg(not(target_arch = "wasm32"))]
+    if s.mixed_config.is_some() && c.meta.project_path.as_deref().is_some_and(crate::folder_edit::manifest) {
+        return Err(bad("file.recover", "standard journal names a project-folder manifest"));
+    }
     let saved_at = per.local_time(c.meta.saved_unix);
     let loaded = crate::autosave::load_candidate(&c).map_err(EngineError::Other)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    s.prepare_document_switch()?;
     install_project(s, loaded.project, c.meta.project_path.clone(), false);
     if let Some(seq) = s.state.active_sequence {
         s.events.push(crate::Event::OpenSequence(seq));
@@ -5538,7 +5577,7 @@ fn recover(s: &mut Session, id: Option<&str>) -> Result<Value> {
             "Recovered project is open and its new recovery copy is confirmed, but the old recovery folder could not be fully removed: {e}. The recovery candidate remains listed; some old files may already be gone. Save the project or use Save As before retrying; if the original recovery copy remains intact, running recovery again can overwrite unsaved edits."
         ))
     })?;
-    per.candidates.remove(idx);
+    per.candidates.retain(|entry| entry.id != c.id);
     s.toast(format!("Recovered unsaved changes to {} from {saved_at}", c.meta.project_name));
     Ok(json!({"id": c.id, "name": c.meta.project_name, "path": c.meta.project_path, "savedAt": saved_at, "revision": c.meta.revision}))
 }

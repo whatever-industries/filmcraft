@@ -55,23 +55,23 @@ impl Session {
     }
 
     pub(crate) fn open_folder(&mut self, path: &str) -> Result<Value> {
-        if !self.allow_project_folders || self.persistence.is_some() {
+        if !self.allow_project_folders || (self.persistence.is_some() && self.mixed_config.is_none()) {
             return Err(EngineError::Other("project folders require a local manual editing session".into()));
         }
         let (mut snapshot, bytes) = (if self.shared_bins { FolderSnapshot::open_shared(Path::new(path)) } else { FolderSnapshot::open(Path::new(path)) })
             .map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
-        self.flush_folder_recovery()?;
+        let loaded = filmcraft_format::decode(&bytes).map_err(|e| EngineError::Other(e.to_string()))?;
         let can_write = snapshot.writable()
             || !snapshot.is_shared() && self.editing_folder.as_ref().is_some_and(|f| f.snapshot.is_manifest(Path::new(path)) && f.snapshot.writable());
-        let journal = self.folder_recovery.as_ref().filter(|_| can_write).map(|d| crate::folder_recovery::FolderJournal::start(d, &snapshot)).transpose()?;
+        let journal = self
+            .folder_recovery
+            .as_ref()
+            .filter(|_| can_write)
+            .map(|d| crate::folder_recovery::FolderJournal::start(d, &snapshot, self.mixed_config.as_ref()))
+            .transpose()?;
+        self.prepare_document_switch()?;
         let previous = self.editing_folder.take();
-        let mut result = match crate::commands::open_bytes(self, path, &bytes) {
-            Ok(result) => result,
-            Err(error) => {
-                self.editing_folder = previous;
-                return Err(error);
-            }
-        };
+        let mut result = crate::commands::install_loaded(self, path, loaded);
         if let Some(mut old) = previous {
             snapshot.inherit_writer(&mut old.snapshot);
         }
@@ -84,6 +84,9 @@ impl Session {
     }
 
     pub(crate) fn save_folder(&mut self, path: &str, adopt: bool) -> Result<Value> {
+        if adopt && !manifest(path) {
+            self.flush_folder_recovery()?;
+        }
         let view = self.project_view();
         let next = filmcraft_format::encode_with_view(&self.project, Some(&view), false);
         let folder = self.editing_folder.as_mut().ok_or_else(|| EngineError::Other("open the folder before saving its manifest".into()))?;

@@ -219,6 +219,8 @@ pub(super) fn close_project(s: &mut Session, p: &Value) -> Result<Value> {
     if s.is_dirty() && !bool_p(p, "force").unwrap_or(false) {
         return Err(EngineError::Other("the project has unsaved changes: save it first, or pass {\"force\": true} to discard them".into()));
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    s.prepare_document_switch()?;
     s.project = std::sync::Arc::new(Project::new("Untitled"));
     s.begin_document();
     s.history = Default::default();

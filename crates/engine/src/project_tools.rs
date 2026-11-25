@@ -677,6 +677,8 @@ fn new_from_template(s: &mut Session, p: &Value) -> Result<Value> {
     let name = str_p(p, "name").unwrap_or("Untitled").to_string();
     proj.name = name.clone();
     proj.root.name = name;
+    #[cfg(not(target_arch = "wasm32"))]
+    s.prepare_document_switch()?;
     s.project = std::sync::Arc::new(proj);
     s.begin_document();
     s.history = Default::default();

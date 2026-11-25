@@ -243,6 +243,30 @@ to write an independent file. Choose an unoccupied destination. The checkpoint p
 project metadata, clip extensions and media references. The media files remain in place.
 `file.discardRecovery` with a candidate ID discards that draft.
 
+### Mixed-format native engine sessions
+
+A native host can opt in with `Session::local_project_editor(AutosaveConfig)`. Pass the
+desktop data directory, local-time callback and debounce interval. The session loads the
+usual preferences. Use `file.open` with either a standard project or a folder's
+`project.fcmod`. Standard files use the ordinary autosave settings. Folder edits go to a
+private checkpoint until `file.save` publishes them. On a busy folder the session opens
+the published revision read-only. `file.saveCopy` exports to a fresh standard file and keeps
+the folder open. `file.saveAs` exports and continues editing the new file.
+
+When switching documents, the engine validates the destination and confirms a dirty
+outgoing draft before releasing ownership. If standard recovery journaling is disabled,
+save a dirty standard file before switching. `file.recoveryList` tags each draft with
+`storage` and `id`. When both stores have candidates, supply both fields to recover or
+discard one draft. For example:
+
+```json
+{"id":"file.recover","params":{"storage":"projectFolder","id":"RECOVERY_ID"}}
+```
+
+Add `path` to export a folder draft when in-place recovery is unsafe. To discard every
+candidate of one kind, pass `storage` and `all: true` to `file.discardRecovery`.
+The desktop buttons and file pickers are a separate milestone.
+
 ### Recover a sequence
 
 Run `project_folder history FOLDER` to list revision numbers and digests, newest first.

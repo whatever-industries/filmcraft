@@ -116,7 +116,7 @@ impl Session {
             let (mut snapshot, mut doc) = FolderSnapshot::open_shared(&manifest).map_err(error)?;
             let journal = if let Some(bin) = selected {
                 doc = snapshot.checkout_bin(bin, None).map_err(error)?;
-                Some(FolderJournal::start(self.folder_recovery.as_ref().ok_or_else(|| error("missing recovery directory"))?, &snapshot)?)
+                Some(FolderJournal::start(self.folder_recovery.as_ref().ok_or_else(|| error("missing recovery directory"))?, &snapshot, None)?)
             } else {
                 None
             };
