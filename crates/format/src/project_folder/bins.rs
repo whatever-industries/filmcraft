@@ -1,7 +1,7 @@
 //! Read a single revision's bin hierarchy. Rescue walks outward from the requested
 //! bin, so an unreadable sibling (or parent) cannot prevent an independent export.
 use super::{RECORD_LIMIT, RecordIndex, checked_bytes, document_at, invalid, load_payload, record_index, recovery};
-use filmcraft_format::{MAX_PROJECT_BYTES, atomic_write_new};
+use crate::{MAX_PROJECT_BYTES, atomic_write_new};
 use filmcraft_project::Project;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -51,7 +51,7 @@ fn path_to<'a>(mut id: u64, root: u64, names: &'a BTreeMap<u64, String>, parents
     None
 }
 
-pub(in super::super) fn list_bins(folder: &Path, revision: &str, mut out: impl Write) -> io::Result<()> {
+pub fn list_bins(folder: &Path, revision: &str, mut out: impl Write) -> io::Result<()> {
     let manifest = recovery::at(folder, revision)?;
     let mut budget = MAX_PROJECT_BYTES;
     let (_, root) = recovery::metadata(folder, &manifest, &mut budget)?;
@@ -119,11 +119,8 @@ fn attachment_name(root: &Value, items: &Value) -> io::Result<String> {
     Err(invalid("no available bin name"))
 }
 
-pub(in super::super) fn rescue_bin(folder: &Path, revision: &str, selected: u64, output: &Path) -> io::Result<()> {
-    let parent = output.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    if parent.canonicalize()?.starts_with(folder.canonicalize()?) {
-        return Err(invalid("choose an export destination outside the project folder"));
-    }
+pub fn rescue_bin(folder: &Path, revision: &str, selected: u64, output: &Path) -> io::Result<()> {
+    super::outside_folder(folder, output)?;
     let manifest = recovery::at(folder, revision)?;
     let mut budget = MAX_PROJECT_BYTES;
     let (envelope, root) = recovery::metadata(folder, &manifest, &mut budget)?;
@@ -160,7 +157,7 @@ pub(in super::super) fn rescue_bin(folder: &Path, revision: &str, selected: u64,
     if !external.is_empty() {
         // The stock reader normalizes stale next_id using every retained track,
         // clip and sidecar. Also reserve IDs of original records omitted here.
-        let mut id = filmcraft_format::decode(&serde_json::to_vec(&doc)?).map_err(invalid)?.project.next_id;
+        let mut id = crate::decode(&serde_json::to_vec(&doc)?).map_err(invalid)?.project.next_id;
         let used: BTreeSet<_> = manifest.items.iter().chain(&manifest.bins).map(|(id, _)| *id).collect();
         while used.contains(&id) && id < Project::MAX_NEXT_ID {
             id += 1;

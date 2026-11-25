@@ -1,5 +1,5 @@
 //! Developer-only project-folder conversion. See docs/project-files.md.
-mod converter;
+use filmcraft_format::project_folder as converter;
 
 use converter::{
     bins::{list_bins, rescue_bin},

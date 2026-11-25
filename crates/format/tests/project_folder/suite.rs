@@ -1,5 +1,4 @@
-#[path = "../../examples/project_folder/converter.rs"]
-mod converter;
+use filmcraft_format::project_folder as converter;
 
 use converter::{ROOT, pack, unpack};
 use filmcraft_format::atomic_write_new;
@@ -474,3 +473,31 @@ fn a_deleted_sequence_recovers_into_the_root_and_corrupt_history_cannot_be_used(
 
 #[path = "bins.rs"]
 mod bin_recovery;
+
+#[test]
+fn an_untouched_record_keeps_its_original_bytes_and_digest() {
+    use sha2::{Digest, Sha256};
+    let tmp = tempdir().unwrap();
+    let folder = tmp.path().join("cut");
+    let src = tmp.path().join("ordinary.fcproj");
+    fs::write(&src, serde_json::to_vec(&current()).unwrap()).unwrap();
+    pack(&src, &folder, atomic_write_new).unwrap();
+    let root = folder.join(ROOT);
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&root).unwrap()).unwrap();
+    let entry = &mut manifest["items"][0];
+    let record: Value = serde_json::from_slice(&fs::read(folder.join(entry[1].as_str().unwrap())).unwrap()).unwrap();
+    let pretty = serde_json::to_vec_pretty(&record).unwrap();
+    let hash = format!("{:x}", Sha256::digest(&pretty));
+    fs::write(folder.join(&hash), &pretty).unwrap();
+    entry[1] = json!(hash);
+    fs::write(&root, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let out = tmp.path().join("checkout.fcproj");
+    let base = checkout(&folder, &out).unwrap();
+    let mut doc: Value = serde_json::from_slice(&fs::read(&out).unwrap()).unwrap();
+    doc["project"]["root"]["name"] = json!("Edited");
+    fs::write(&out, serde_json::to_vec(&doc).unwrap()).unwrap();
+    assert_ne!(save(&folder, &base, &out).unwrap(), base);
+    let next: Value = serde_json::from_slice(&fs::read(root).unwrap()).unwrap();
+    assert_eq!(next["items"], manifest["items"]);
+    assert_eq!(fs::read(folder.join(hash)).unwrap(), pretty);
+}

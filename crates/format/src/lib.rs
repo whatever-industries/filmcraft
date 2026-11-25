@@ -47,6 +47,9 @@
 pub mod atomic;
 pub mod autosave;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod project_folder;
+
 use filmcraft_project::{Project, ProjectView};
 #[cfg(test)]
 use serde_json::Value;

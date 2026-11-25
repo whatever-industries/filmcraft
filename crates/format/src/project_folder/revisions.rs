@@ -1,8 +1,8 @@
 //! Local writer serialization and optimistic revision checks. The manifest rename is the
 //! commit point. Older manifests and payloads stay available by digest.
 use super::{MANIFEST_LIMIT, Manifest, ROOT, assemble, digest, invalid, materialize, read_member, records_from};
+use crate::atomic_write_new;
 use craft_fcproj_format::records::ProjectRecords;
-use filmcraft_format::atomic_write_new;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -33,7 +33,7 @@ fn edits(old: &[(u64, String)], new: &[(u64, String)], previous: Option<&BTreeMa
         .collect()
 }
 
-fn writer(folder: &Path) -> io::Result<File> {
+pub(super) fn writer(folder: &Path) -> io::Result<File> {
     let path = folder.join(".writer.lock");
     match path.symlink_metadata() {
         Ok(meta) if !meta.is_file() => return Err(invalid("project lock must be a regular file")),
@@ -41,11 +41,11 @@ fn writer(folder: &Path) -> io::Result<File> {
         _ => {}
     }
     let file = OpenOptions::new().create(true).truncate(false).read(true).write(true).open(path)?;
-    file.try_lock().map_err(|e| io::Error::other(format!("cannot acquire the project writer lock: {e}")))?;
+    file.try_lock().map_err(|e| io::Error::new(io::Error::from(e).kind(), "cannot acquire the project writer lock"))?;
     Ok(file)
 }
 
-pub(in super::super) fn checkout(folder: &Path, destination: &Path) -> io::Result<String> {
+pub fn checkout(folder: &Path, destination: &Path) -> io::Result<String> {
     let bytes = read_member(&folder.join(ROOT), MANIFEST_LIMIT)?;
     let manifest = serde_json::from_slice(&bytes)?;
     atomic_write_new(destination, &assemble(folder, &manifest, destination)?)?;
@@ -53,20 +53,24 @@ pub(in super::super) fn checkout(folder: &Path, destination: &Path) -> io::Resul
 }
 
 pub(super) fn publish(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if path.file_name().is_some_and(|name| name == ROOT) { filmcraft_format::atomic_write(path, bytes) } else { atomic_write_new(path, bytes) }
+    if path.file_name().is_some_and(|name| name == ROOT) { crate::atomic_write(path, bytes) } else { atomic_write_new(path, bytes) }
 }
 
-pub(in super::super) fn save(folder: &Path, expected: &str, source: &Path) -> io::Result<String> {
+pub fn save(folder: &Path, expected: &str, source: &Path) -> io::Result<String> {
     save_with(folder, expected, records_from(source, folder)?, publish)
 }
 
-pub(in super::super) fn save_with(
+pub fn save_with(folder: &Path, expected: &str, records: ProjectRecords, write: impl FnMut(&Path, &[u8]) -> io::Result<()>) -> io::Result<String> {
+    let _guard = writer(folder)?;
+    save_locked(folder, expected, &records, write)
+}
+
+pub(super) fn save_locked(
     folder: &Path,
     expected: &str,
-    records: ProjectRecords,
+    records: &ProjectRecords,
     mut write: impl FnMut(&Path, &[u8]) -> io::Result<()>,
 ) -> io::Result<String> {
-    let _guard = writer(folder)?;
     let root = folder.join(ROOT);
     let previous_bytes = read_member(&root, MANIFEST_LIMIT)?;
     let base = digest(&previous_bytes);
@@ -74,14 +78,15 @@ pub(in super::super) fn save_with(
         return Err(io::Error::other(format!("stale project revision; current revision is {base}")));
     }
     let previous: Manifest = serde_json::from_slice(&previous_bytes)?;
-    assemble(folder, &previous, &root)?;
-    let mut next = materialize(folder, records, |p, b| {
+    let old = ProjectRecords::split(&assemble(folder, &previous, &root)?).map_err(invalid)?;
+    // Keep even noncanonical JSON bytes when the record itself is unchanged.
+    if records.envelope == old.envelope && records.bins == old.bins && records.items == old.items {
+        return Ok(base);
+    }
+    let mut next = materialize(folder, records, Some((&previous, &old)), |p, b| {
         // All reused bytes are verified by assemble before publishing the candidate.
         if p.try_exists()? { Ok(()) } else { write(p, b) }
     })?;
-    if previous.envelope == next.envelope && previous.items == next.items && previous.bins == next.bins {
-        return Ok(base);
-    }
     let prior = previous.revision.as_ref();
     let number = prior.map_or(0, |r| r.number).checked_add(1).ok_or_else(|| invalid("revision limit reached"))?;
     let edit = Edit { revision: number, utc_ms: i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).map_err(invalid)?.as_millis()).map_err(invalid)? };

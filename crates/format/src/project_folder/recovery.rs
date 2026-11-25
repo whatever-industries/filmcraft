@@ -3,8 +3,8 @@
 use super::{
     MANIFEST_LIMIT, Manifest, ROOT, check_hash, check_manifest, digest, encode_at, invalid, load_payload, read_member, read_records, record_index, revisions,
 };
+use crate::{MAX_PROJECT_BYTES, atomic_write_new};
 use craft_fcproj_format::records::ProjectRecords;
-use filmcraft_format::{MAX_PROJECT_BYTES, atomic_write_new};
 use filmcraft_project::{ItemId, ItemKind, Project, ProjectItem};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -37,7 +37,7 @@ fn walk(folder: &Path, mut visit: impl FnMut(&str, &Manifest) -> io::Result<bool
     }
 }
 
-pub(in super::super) fn history(folder: &Path, mut visit: impl FnMut(u64, &str) -> io::Result<()>) -> io::Result<()> {
+pub fn history(folder: &Path, mut visit: impl FnMut(u64, &str) -> io::Result<()>) -> io::Result<()> {
     walk(folder, |hash, m| {
         visit(m.revision.as_ref().map_or(0, |r| r.number), hash)?;
         Ok(false)
@@ -117,12 +117,12 @@ fn extract(folder: &Path, manifest: &Manifest, sequence: u64) -> io::Result<Proj
     Ok(records)
 }
 
-pub(in super::super) fn rescue(folder: &Path, revision: &str, sequence: u64, output: &Path) -> io::Result<()> {
+pub fn rescue(folder: &Path, revision: &str, sequence: u64, output: &Path) -> io::Result<()> {
     let records = extract(folder, &at(folder, revision)?, sequence)?;
     atomic_write_new(output, &encode_at(folder, records, output)?)
 }
 
-pub(in super::super) fn restore_copy(folder: &Path, expected: &str, historical: &str, sequence: u64) -> io::Result<(u64, String)> {
+pub fn restore_copy(folder: &Path, expected: &str, historical: &str, sequence: u64) -> io::Result<(u64, String)> {
     let root = folder.join(ROOT);
     let current = read_member(&root, MANIFEST_LIMIT)?;
     if digest(&current) != expected {
@@ -145,7 +145,7 @@ pub(in super::super) fn restore_copy(folder: &Path, expected: &str, historical: 
             return Err(invalid(format!("dependency item {id} changed or is missing; use rescue to export the historical sequence")));
         }
     }
-    let project = filmcraft_format::decode(&super::assemble(folder, &manifest, &root)?).map_err(invalid)?.project;
+    let project = crate::decode(&super::assemble(folder, &manifest, &root)?).map_err(invalid)?.project;
     // The standard reader repairs low next_id values. Include this historical cut's
     // internal IDs too, even if they were deleted from the live project.
     let mut item = recovered.items.remove(&sequence).ok_or_else(|| invalid("missing selected sequence"))?;

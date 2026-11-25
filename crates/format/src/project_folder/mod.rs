@@ -1,6 +1,6 @@
-//! Developer-only project-folder conversion. See docs/project-files.md.
+//! Native project-folder storage, editing and recovery. See docs/project-files.md.
+use crate::{MAX_PROJECT_BYTES, atomic_write_new};
 use craft_fcproj_format::records::ProjectRecords;
-use filmcraft_format::{MAX_PROJECT_BYTES, atomic_write_new};
 use filmcraft_media::reader::read_regular_file_bounded;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -10,16 +10,12 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-#[path = "bins.rs"]
-pub(super) mod bins;
-#[path = "paths.rs"]
+pub mod bins;
 mod paths;
-#[path = "recovery.rs"]
-pub(super) mod recovery;
-#[path = "revisions.rs"]
-pub(super) mod revisions;
+pub mod recovery;
+pub mod revisions;
 
-pub(super) const ROOT: &str = "project.fcmod";
+pub const ROOT: &str = "project.fcmod";
 const FORMAT: &str = "filmcraft.project-folder";
 const MANIFEST_LIMIT: u64 = 16 << 20;
 const RECORD_LIMIT: usize = 100_000;
@@ -119,7 +115,7 @@ fn document_at(folder: &Path, mut records: ProjectRecords, destination: &Path) -
 
 fn checked_bytes(document: &Value) -> io::Result<Vec<u8>> {
     let bytes = serde_json::to_vec(document)?;
-    filmcraft_format::decode(&bytes).map_err(invalid)?;
+    crate::decode(&bytes).map_err(invalid)?;
     Ok(bytes)
 }
 
@@ -127,8 +123,8 @@ fn encode_at(folder: &Path, records: ProjectRecords, destination: &Path) -> io::
     checked_bytes(&document_at(folder, records, destination)?)
 }
 
-fn write_payload(folder: &Path, value: Value, write_new: &mut impl FnMut(&Path, &[u8]) -> io::Result<()>) -> io::Result<String> {
-    let bytes = serde_json::to_vec(&value)?;
+fn write_payload(folder: &Path, value: &Value, write_new: &mut impl FnMut(&Path, &[u8]) -> io::Result<()>) -> io::Result<String> {
+    let bytes = serde_json::to_vec(value)?;
     let hash = digest(&bytes);
     let path = folder.join(&hash);
     match write_new(&path, &bytes) {
@@ -143,7 +139,7 @@ fn write_payload(folder: &Path, value: Value, write_new: &mut impl FnMut(&Path, 
 fn records_from(source: &Path, folder: &Path) -> io::Result<ProjectRecords> {
     let mut records = {
         let bytes = read_regular_file_bounded(source, MAX_PROJECT_BYTES)?;
-        filmcraft_format::decode(&bytes).map_err(invalid)?;
+        crate::decode(&bytes).map_err(invalid)?;
         ProjectRecords::split(&bytes).map_err(invalid)?
     };
     if records.bins.len().saturating_add(records.items.len()) > RECORD_LIMIT {
@@ -154,19 +150,43 @@ fn records_from(source: &Path, folder: &Path) -> io::Result<ProjectRecords> {
     Ok(records)
 }
 
-fn materialize(folder: &Path, records: ProjectRecords, mut write_new: impl FnMut(&Path, &[u8]) -> io::Result<()>) -> io::Result<Manifest> {
-    let envelope = write_payload(folder, records.envelope, &mut write_new)?;
-    let mut group = |values: BTreeMap<u64, Value>| -> io::Result<Vec<_>> {
-        values.into_iter().map(|(id, value)| Ok((id, write_payload(folder, value, &mut write_new)?))).collect()
+type PriorGroup<'a> = (&'a [(u64, String)], &'a BTreeMap<u64, Value>);
+
+fn materialize(
+    folder: &Path,
+    records: &ProjectRecords,
+    prior: Option<(&Manifest, &ProjectRecords)>,
+    mut write_new: impl FnMut(&Path, &[u8]) -> io::Result<()>,
+) -> io::Result<Manifest> {
+    let mut payload = |value: &Value, original: Option<(&Value, &String)>| {
+        if let Some((old, hash)) = original
+            && value == old
+        {
+            return Ok(hash.clone());
+        }
+        write_payload(folder, value, &mut write_new)
     };
-    Ok(Manifest { format: FORMAT.to_owned(), layout: 1, revision: None, envelope, bins: group(records.bins)?, items: group(records.items)? })
+    let envelope = payload(&records.envelope, prior.map(|(m, r)| (&r.envelope, &m.envelope)))?;
+    let mut group = |values: &BTreeMap<u64, Value>, prior: Option<PriorGroup<'_>>| -> io::Result<Vec<_>> {
+        let hashes: BTreeMap<_, _> = prior.into_iter().flat_map(|(list, _)| list.iter().map(|(id, h)| (*id, h))).collect();
+        values
+            .iter()
+            .map(|(id, v)| {
+                let original = prior.and_then(|(_, records)| records.get(id)).zip(hashes.get(id).copied());
+                Ok((*id, payload(v, original)?))
+            })
+            .collect()
+    };
+    let bins = group(&records.bins, prior.map(|(m, r)| (m.bins.as_slice(), &r.bins)))?;
+    let items = group(&records.items, prior.map(|(m, r)| (m.items.as_slice(), &r.items)))?;
+    Ok(Manifest { format: FORMAT.to_owned(), layout: 1, revision: None, envelope, bins, items })
 }
 
-pub(super) fn pack(source: &Path, folder: &Path, mut write_new: impl FnMut(&Path, &[u8]) -> io::Result<()>) -> io::Result<()> {
+pub fn pack(source: &Path, folder: &Path, mut write_new: impl FnMut(&Path, &[u8]) -> io::Result<()>) -> io::Result<()> {
     let records = records_from(source, folder)?;
     fs::create_dir(folder)?;
     let root = folder.join(ROOT);
-    let manifest = materialize(folder, records, &mut write_new)?;
+    let manifest = materialize(folder, &records, None, &mut write_new)?;
     let bytes = serde_json::to_vec(&manifest)?;
     if bytes.len() as u64 > MANIFEST_LIMIT {
         return Err(invalid("manifest exceeds the folder layout's size limit"));
@@ -177,7 +197,19 @@ pub(super) fn pack(source: &Path, folder: &Path, mut write_new: impl FnMut(&Path
     write_new(&root, &bytes)
 }
 
-pub(super) fn unpack(folder: &Path, destination: &Path) -> io::Result<()> {
+pub fn unpack(folder: &Path, destination: &Path) -> io::Result<()> {
     let manifest = serde_json::from_slice(&read_member(&folder.join(ROOT), MANIFEST_LIMIT)?)?;
     atomic_write_new(destination, &assemble(folder, &manifest, destination)?)
 }
+
+fn outside_folder(folder: &Path, output: &Path) -> io::Result<()> {
+    let parent = output.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    if parent.canonicalize()?.starts_with(folder.canonicalize()?) {
+        return Err(invalid("choose an export destination outside the project folder"));
+    }
+    Ok(())
+}
+
+mod overlay;
+mod session;
+pub use session::FolderSnapshot;
