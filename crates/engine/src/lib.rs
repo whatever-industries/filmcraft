@@ -517,6 +517,10 @@ pub enum Event {
 }
 
 pub struct Session {
+    #[cfg(not(target_arch = "wasm32"))]
+    allow_project_folders: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    editing_folder: Option<folder_edit::EditingFolder>,
     pub project: Arc<Project>,
     /// Runtime identity of the opened project, stable across edits/undo and renewed on replacement.
     pub project_instance: Arc<()>,
@@ -635,6 +639,9 @@ impl Job {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+mod folder_edit;
+
 impl Default for Session {
     fn default() -> Self {
         Self::new(Arc::new(FsServices))
@@ -642,9 +649,22 @@ impl Default for Session {
 }
 
 impl Session {
+    fn begin_document(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.editing_folder = None;
+        }
+        self.project_instance = Arc::new(());
+        self.document_epoch = self.document_epoch.wrapping_add(1);
+    }
+
     pub fn new(services: Arc<dyn Services>) -> Self {
         Self {
             project: Arc::new(Project::new("Untitled")),
+            #[cfg(not(target_arch = "wasm32"))]
+            allow_project_folders: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            editing_folder: None,
             project_instance: Arc::new(()),
             history: History { limit: 200, ..Default::default() },
             revision: 1,
@@ -726,6 +746,10 @@ impl Session {
     /// the data directory and finds unsaved changes left by sessions that died
     /// ([`Session::recovery_candidates`]).
     pub fn start_autosave(&mut self, cfg: autosave::AutosaveConfig) -> std::io::Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.editing_folder.is_some() {
+            return Err(std::io::Error::other("folder editing uses manual saves"));
+        }
         let prefs_path = cfg.data_dir.join("preferences.json");
         self.prefs = autosave::Preferences::load(&prefs_path);
         // a restart restores the persisted Selection Follows Playhead toggle (#3089)
@@ -745,6 +769,10 @@ impl Session {
     /// Clean shutdown: flush and stop the worker. Unsaved changes stay in the journal (offered on
     /// the next launch); otherwise the session's journal directory is removed.
     pub fn shutdown(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.editing_folder.take().is_some() {
+            self.path = None;
+        }
         self.sync_persistence();
         if let Some(p) = self.persistence.take() {
             p.close();
@@ -758,6 +786,10 @@ impl Session {
     /// Tell the worker about the current project state if it changed (cheap: an `Arc` clone and a
     /// channel send; serialization happens on the worker). Called after every command.
     pub fn sync_persistence(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.editing_folder.is_some() {
+            return;
+        }
         let dirty = self.is_dirty();
         let Some(p) = self.persistence.as_mut() else { return };
         let cur = autosave::Sent { revision: self.revision, saved_revision: self.saved_revision, path: self.path.clone() };
@@ -847,6 +879,24 @@ impl Session {
     /// Run a command by id.
     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
         let spec = commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.editing_folder.as_ref().is_some_and(|f| !f.snapshot.writable())
+            && !matches!(
+                id,
+                "project.inspect"
+                    | "sequence.inspect"
+                    | "file.open"
+                    | "file.newProject"
+                    | "file.closeProject"
+                    | "file.openDemoProject"
+                    | "file.saveCopy"
+                    | "file.saveAs"
+                    | "file.revert"
+            )
+            && !commands::reports_only(id, &params)
+        {
+            return Err(EngineError::Other("project folder is read-only; save an independent copy to edit".into()));
+        }
         // headless sessions (CLI, MCP, control channel) have no UI frame loop calling
         // `poll_persistence`: apply background mask tracking before each command (#3302)
         if self.exec_depth == 0 && !self.mask_jobs.is_empty() {

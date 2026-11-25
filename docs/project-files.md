@@ -149,6 +149,28 @@ an internal UTC edit time and revision number. Imported edit times start unknown
 History accumulates in the folder. Each save still reads and validates the complete project.
 Shared/network filesystem locking requires separate qualification.
 
+### Edit a project folder from the local CLI
+
+Open the manifest with the ordinary CLI commands. For example, inspect the bin IDs,
+then rename one bin and save the edit in a single session:
+
+```sh
+filmcraft-cli --project edit-folder/project.fcmod inspect project
+filmcraft-cli --project edit-folder/project.fcmod --save exec project.renameBin bin=1 name=Interviews
+```
+
+The first local editor holds the writer lock until it closes or switches documents.
+A competing editor reports `readOnly` and the digest it opened in `project.inspect`.
+It can inspect that snapshot or use `file.saveCopy` to export an independent new
+`.fcproj`. `file.saveAs` opens the exported file as an ordinary project. Reopening
+the folder after the writer exits acquires the lock. Folder sessions use manual saves.
+
+Saving retains extra JSON fields on surviving records, including clips moved between
+tracks and markers reordered by time. An edit that makes an extension's owner ambiguous
+reports the affected record and field. The last published revision stays available and
+the edited session can undo or revise the change and retry. The same rules apply to
+standard exports from the folder session.
+
 ### Recover a sequence
 
 Run `project_folder history FOLDER` to list revision numbers and digests, newest first.

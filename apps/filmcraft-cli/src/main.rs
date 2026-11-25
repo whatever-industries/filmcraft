@@ -171,20 +171,25 @@ enum Backend {
 
 impl Backend {
     fn open(a: &Args) -> Self {
+        Self::open_with(a, Session::local_folder_editor)
+    }
+
+    fn open_with(a: &Args, create: fn() -> Session) -> Self {
         if let Some(addr) = a.opt("--bridge") {
             if a.opt("--project").is_some() || a.flag("--demo") {
                 usage("--bridge drives the running app; open projects there (exec file.open path=…)");
             }
             return Backend::Bridge(BridgeClient::new(addr).unwrap_or_else(|e| usage(e)));
         }
-        let mut s = Session::default();
+        let mut s = create();
         // user export presets (and other per-user libraries) from the data directory
         if let Some(dir) = a.opt("--data-dir").map(std::path::PathBuf::from).or_else(filmcraft_engine::autosave::default_data_dir) {
             s.export_presets.set_dir(&dir);
         }
         if let Some(p) = a.opt("--project") {
-            if let Err(e) = s.execute("file.open", json!({"path": p})) {
-                fail(e);
+            let opened = s.execute("file.open", json!({"path":p})).unwrap_or_else(|e| fail(e));
+            if opened["readOnly"] == true {
+                diag(format_args!("filmcraft-cli: project folder opened read-only: {p}"));
             }
         } else if a.flag("--demo") {
             let _ = s.execute("file.openDemoProject", json!({}));
@@ -578,7 +583,7 @@ async fn cli_mcp(a: &Args) {
     }
     let server = match a.opt("--bridge") {
         Some(addr) => filmcraft_automation::FilmcraftMcp::bridge(addr).unwrap_or_else(|e| usage(e)),
-        None => match Backend::open(a) {
+        None => match Backend::open_with(a, Session::default) {
             Backend::Local(s) => filmcraft_automation::FilmcraftMcp::headless(*s),
             Backend::Bridge(_) => usage("mcp: use --bridge ADDR to drive a running app"),
         },

@@ -1617,8 +1617,7 @@ fn build() -> Vec<CommandSpec> {
             let name = str_p(p, "name").unwrap_or("Untitled").to_string();
             crate::masks::discard_jobs(s);
             s.project = std::sync::Arc::new(filmcraft_project::Project::new(&name));
-            s.project_instance = std::sync::Arc::new(());
-            s.document_epoch = s.document_epoch.wrapping_add(1);
+            s.begin_document();
             s.history = Default::default();
             s.history.limit = 200;
             s.state = crate::Session::default().state;
@@ -1634,8 +1633,7 @@ fn build() -> Vec<CommandSpec> {
         cmd!("file.openDemoProject", "Demo Project", ["File", "New"], None, "{}", always, |s, _| {
             let (p, seq) = crate::demo::demo_project(&s.media);
             s.project = std::sync::Arc::new(p);
-            s.project_instance = std::sync::Arc::new(());
-            s.document_epoch = s.document_epoch.wrapping_add(1);
+            s.begin_document();
             s.history = Default::default();
             s.history.limit = 200;
             s.state = crate::Session::default().state;
@@ -5273,7 +5271,7 @@ pub fn inspect_project(s: &Session) -> Value {
             }).collect::<Vec<_>>()
         })
     }
-    json!({
+    let result = json!({
         "name": p.name,
         "path": s.path,
         "dirty": s.is_dirty(),
@@ -5281,7 +5279,16 @@ pub fn inspect_project(s: &Session) -> Value {
         "root": bin(&p.root, p),
         "activeSequence": s.state.active_sequence.map(|i| i.0),
         "sourceItem": s.state.source_item.map(|i| i.0),
-    })
+    });
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(folder) = &s.editing_folder {
+        let mut result = result;
+        result["storage"] = json!("projectFolder");
+        result["readOnly"] = json!(!folder.snapshot.writable());
+        result["folderRevision"] = json!(folder.snapshot.revision());
+        return result;
+    }
+    result
 }
 
 pub fn inspect_sequence(s: &Session, id: ItemId, q: &filmcraft_project::Sequence) -> Value {
@@ -5344,6 +5351,10 @@ fn name_project(p: &mut filmcraft_project::Project, name: String) {
 }
 
 fn write_project(s: &mut Session, path: &str, adopt: bool) -> Result<Value> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if s.editing_folder.is_some() || crate::folder_edit::manifest(path) {
+        return s.save_folder(path, adopt);
+    }
     let t0 = web_time::Instant::now();
     // Save As renames the project after its new file (not an edit: no undo step, not dirty).
     if adopt
@@ -5393,8 +5404,7 @@ pub(crate) fn install_project(s: &mut Session, mut proj: filmcraft_project::Proj
     // unturned size and the anchors baked from it (#4613).
     crate::still_migration::migrate_legacy_still_sizes(&mut proj, &s.media, &*s.services);
     s.project = std::sync::Arc::new(proj);
-    s.project_instance = std::sync::Arc::new(());
-    s.document_epoch = s.document_epoch.wrapping_add(1);
+    s.begin_document();
     s.history = Default::default();
     s.history.limit = 200;
     s.state = crate::Session::default().state;
@@ -5414,9 +5424,17 @@ pub(crate) fn install_project(s: &mut Session, mut proj: filmcraft_project::Proj
     crate::project_tools::warn_untrusted_scratch(s);
 }
 
-fn open_project(s: &mut Session, path: &str) -> Result<Value> {
+pub(crate) fn open_project(s: &mut Session, path: &str) -> Result<Value> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if crate::folder_edit::manifest(path) {
+        return s.open_folder(path);
+    }
     let bytes = s.services.read_file_bounded(path, filmcraft_format::MAX_PROJECT_BYTES).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
-    let loaded = filmcraft_format::decode(&bytes).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+    open_bytes(s, path, &bytes)
+}
+
+pub(crate) fn open_bytes(s: &mut Session, path: &str, bytes: &[u8]) -> Result<Value> {
+    let loaded = filmcraft_format::decode(bytes).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     let (from, migrated) = (loaded.schema_version, loaded.migrated());
     crate::masks::discard_jobs(s);
     install_project(s, loaded.project, Some(path.to_string()), true);

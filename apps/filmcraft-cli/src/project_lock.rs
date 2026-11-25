@@ -74,6 +74,9 @@ fn lock(project: &Path, waiting: impl FnOnce()) -> std::io::Result<File> {
 /// that saving works where it did.
 pub fn for_save(a: &Args) -> Option<File> {
     let project = saved_in_place(a).unwrap_or_else(|e| crate::fail(e))?;
+    if project.file_name().is_some_and(|name| name == "project.fcmod") {
+        return None;
+    }
     let shown = project.display();
     let waiting = || crate::diag(format_args!("filmcraft-cli: waiting for another run saving {shown}"));
     match lock(project, waiting) {
