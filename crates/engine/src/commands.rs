@@ -117,6 +117,10 @@ fn has_saved_path(s: &Session) -> std::result::Result<(), String> {
     if s.path.is_some() { Ok(()) } else { Err("the project has not been saved yet".into()) }
 }
 fn has_recovery(s: &Session) -> std::result::Result<(), String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if s.folder_recovery.is_some() {
+        return Ok(());
+    }
     if s.recovery_candidates().is_empty() { Err("there are no unsaved changes to recover".into()) } else { Ok(()) }
 }
 
@@ -2025,8 +2029,18 @@ fn build() -> Vec<CommandSpec> {
             let path = str_p(p, "path").ok_or_else(|| bad("file.open", "need `path`"))?.to_string();
             open_project(s, &path)
         }),
-        cmd!("file.recover", "Recover Unsaved Changes…", ["File"], None, r#"{"id":str?}"#, has_recovery, |s, p| recover(s, str_p(p, "id"))),
+        cmd!("file.recover", "Recover Unsaved Changes…", ["File"], None, r#"{"id":str?,"path":str?}"#, has_recovery, |s, p| {
+            #[cfg(not(target_arch = "wasm32"))]
+            if s.folder_recovery.is_some() {
+                return s.recover_folder_candidate(p);
+            }
+            recover(s, str_p(p, "id"))
+        }),
         cmd!("file.discardRecovery", "Discard Unsaved Changes", [], None, r#"{"id":str?,"all":bool?}"#, has_recovery, |s, p| {
+            #[cfg(not(target_arch = "wasm32"))]
+            if s.folder_recovery.is_some() {
+                return s.discard_folder_candidate(p);
+            }
             let all = bool_p(p, "all").unwrap_or(false);
             let id = str_p(p, "id").map(str::to_string);
             let Some(per) = s.persistence.as_mut() else { return Ok(json!({"discarded": 0})) };
@@ -2057,15 +2071,27 @@ fn build() -> Vec<CommandSpec> {
             Ok(json!({"discarded": n}))
         }),
         query!("file.recoveryList", "List Recoverable Sessions", "{}", |s, _| {
+            #[cfg(not(target_arch = "wasm32"))]
+            if s.folder_recovery.is_some() {
+                return s.folder_candidates();
+            }
             Ok(s.persistence.as_ref().map(|p| p.candidates_json()).unwrap_or_else(|| json!([])))
         }),
         cmd!("file.autoSaveNow", "Auto Save Now", [], None, "{}", always, |s, _| {
+            #[cfg(not(target_arch = "wasm32"))]
+            if s.folder_recovery.is_some() {
+                return Ok(json!({"checkpointRevision":s.flush_folder_recovery()?}));
+            }
             let per = s.persistence.as_ref().ok_or_else(|| EngineError::Other("auto-save is not running in this session".into()))?;
             let r = per.auto_save_now().map_err(EngineError::Other)?;
             s.poll_persistence();
             Ok(json!({"path": r.map(|p| p.to_string_lossy().into_owned())}))
         }),
         query!("file.autoSaveStatus", "Auto Save Status", "{}", |s, _| {
+            #[cfg(not(target_arch = "wasm32"))]
+            if s.folder_recovery.is_some() {
+                return Ok(s.folder_status());
+            }
             let Some(per) = s.persistence.as_ref() else { return Ok(json!({"running": false, "prefs": s.prefs.auto_save})) };
             Ok(json!({
                 "running": per.is_running(),
@@ -5435,6 +5461,8 @@ pub(crate) fn open_project(s: &mut Session, path: &str) -> Result<Value> {
 
 pub(crate) fn open_bytes(s: &mut Session, path: &str, bytes: &[u8]) -> Result<Value> {
     let loaded = filmcraft_format::decode(bytes).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+    #[cfg(not(target_arch = "wasm32"))]
+    s.flush_folder_recovery()?;
     let (from, migrated) = (loaded.schema_version, loaded.migrated());
     crate::masks::discard_jobs(s);
     install_project(s, loaded.project, Some(path.to_string()), true);

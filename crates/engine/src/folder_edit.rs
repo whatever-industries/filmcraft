@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
 pub(crate) struct EditingFolder {
+    pub(super) journal: Option<crate::folder_recovery::FolderJournal>,
     pub(crate) snapshot: FolderSnapshot,
     pub(super) baseline: Arc<FolderBase>,
 }
@@ -14,8 +15,8 @@ pub(crate) struct EditingFolder {
 #[derive(Debug, PartialEq)]
 pub(super) struct FolderBase {
     pub(super) origin: EditOrigin,
-    project: Arc<filmcraft_project::Project>,
-    view: filmcraft_project::ProjectView,
+    pub(super) project: Arc<filmcraft_project::Project>,
+    pub(super) view: filmcraft_project::ProjectView,
 }
 
 impl FolderBase {
@@ -25,6 +26,20 @@ impl FolderBase {
 
     pub(super) fn typed(&self) -> Vec<u8> {
         filmcraft_format::encode_with_view(&self.project, Some(&self.view), false)
+    }
+}
+
+pub(crate) struct Draft {
+    pub(crate) source: filmcraft_format::project_folder::checkpoint::Source,
+    pub(super) baseline: Arc<FolderBase>,
+    pub(super) view: filmcraft_project::ProjectView,
+}
+
+impl Draft {
+    pub(crate) fn encode(&self, project: &filmcraft_project::Project, directory: &Path) -> std::io::Result<Vec<u8>> {
+        let folder = self.source.manifest.parent().ok_or_else(|| std::io::Error::other("missing source directory"))?;
+        let after = filmcraft_format::encode_with_view(project, Some(&self.view), false);
+        self.baseline.origin.checkpoint(folder, &self.baseline.typed(), &after, &directory.join(filmcraft_format::project_folder::checkpoint::DESCRIPTOR))
     }
 }
 
@@ -44,6 +59,9 @@ impl Session {
             return Err(EngineError::Other("project folders require a local manual editing session".into()));
         }
         let (mut snapshot, bytes) = FolderSnapshot::open(Path::new(path)).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+        self.flush_folder_recovery()?;
+        let can_write = snapshot.writable() || self.editing_folder.as_ref().is_some_and(|f| f.snapshot.is_manifest(Path::new(path)) && f.snapshot.writable());
+        let journal = self.folder_recovery.as_ref().filter(|_| can_write).map(|d| crate::folder_recovery::FolderJournal::start(d, &snapshot)).transpose()?;
         let previous = self.editing_folder.take();
         let mut result = match crate::commands::open_bytes(self, path, &bytes) {
             Ok(result) => result,
@@ -59,7 +77,7 @@ impl Session {
         result["readOnly"] = json!(!snapshot.writable());
         result["folderRevision"] = json!(snapshot.revision());
         let baseline = FolderBase::capture(self, snapshot.revision().to_owned());
-        self.editing_folder = Some(EditingFolder { snapshot, baseline });
+        self.editing_folder = Some(EditingFolder { snapshot, baseline, journal });
         Ok(result)
     }
 

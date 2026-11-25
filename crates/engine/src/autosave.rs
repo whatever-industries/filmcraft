@@ -664,6 +664,8 @@ pub(crate) struct Sent {
 }
 
 struct Snapshot {
+    #[cfg(not(target_arch = "wasm32"))]
+    folder: Option<Box<crate::folder_edit::Draft>>,
     project: Arc<Project>,
     revision: u64,
     path: Option<String>,
@@ -761,6 +763,15 @@ impl Persistence {
     /// Create this session's journal directory (holding its lock), find recovery candidates left by
     /// dead sessions, and start the worker thread.
     pub fn start(cfg: &AutosaveConfig, prefs: AutoSavePrefs) -> io::Result<Self> {
+        Self::start_worker(cfg, prefs, false)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn start_folder(cfg: &AutosaveConfig) -> io::Result<Self> {
+        Self::start_worker(cfg, AutoSavePrefs { enabled: false, ..Default::default() }, true)
+    }
+
+    fn start_worker(cfg: &AutosaveConfig, prefs: AutoSavePrefs, folder_mode: bool) -> io::Result<Self> {
         let root = recovery_root(&cfg.data_dir);
         fs::create_dir_all(&root)?;
         let started = unix_now();
@@ -769,15 +780,22 @@ impl Persistence {
         static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let session_dir = root.join(if seq == 0 { format!("{started}-{pid}") } else { format!("{started}-{pid}-{seq}") });
-        fs::create_dir_all(&session_dir)?;
+        fs::create_dir(&session_dir)?;
         let lock = File::options().create(true).truncate(false).read(true).write(true).open(session_dir.join(LOCK))?;
         // Unsupported locking only weakens stale detection; it must not stop the app.
-        let _ = lock.try_lock();
-        let candidates = scan_candidates(&cfg.data_dir, Some(&session_dir));
+        let candidates = if folder_mode {
+            lock.try_lock().map_err(io::Error::from)?;
+            Vec::new()
+        } else {
+            let _ = lock.try_lock();
+            scan_candidates(&cfg.data_dir, Some(&session_dir))
+        };
         let (tx, rx) = channel();
         let (etx, events) = channel();
         let failure = Arc::new(WorkerFailure { reported: AtomicBool::new(false), events: etx.clone() });
         let mut w = Worker {
+            #[cfg(not(target_arch = "wasm32"))]
+            folder_mode,
             data_dir: cfg.data_dir.clone(),
             session_dir: session_dir.clone(),
             local_offset: cfg.local_offset,
@@ -815,7 +833,18 @@ impl Persistence {
     }
 
     pub(crate) fn send_dirty(&self, project: Arc<Project>, revision: u64, path: Option<String>) {
-        self.send(Msg::Dirty(Snapshot { project, revision, path }));
+        self.send(Msg::Dirty(Snapshot {
+            project,
+            revision,
+            path,
+            #[cfg(not(target_arch = "wasm32"))]
+            folder: None,
+        }));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn send_folder(&self, project: Arc<Project>, revision: u64, draft: crate::folder_edit::Draft) {
+        self.send(Msg::Dirty(Snapshot { project, revision, path: None, folder: Some(Box::new(draft)) }));
     }
 
     pub(crate) fn send_clean(&self) {
@@ -911,6 +940,16 @@ impl Persistence {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn close_folder(mut self) {
+        self.stop_worker();
+        if fs::read_dir(&self.session_dir).is_ok_and(|mut entries| entries.all(|e| e.is_ok_and(|e| e.file_name() == LOCK))) {
+            self.lock.take();
+            let _ = fs::remove_file(self.session_dir.join(LOCK));
+            let _ = fs::remove_dir(&self.session_dir);
+        }
+    }
+
     /// Stop the worker and release the lock *without* cleaning up — what a crash leaves behind.
     #[doc(hidden)]
     pub fn simulate_crash(mut self) {
@@ -954,6 +993,8 @@ impl Drop for Persistence {
 }
 
 struct Worker {
+    #[cfg(not(target_arch = "wasm32"))]
+    folder_mode: bool,
     data_dir: PathBuf,
     session_dir: PathBuf,
     local_offset: fn(i64) -> i32,
@@ -1060,25 +1101,42 @@ impl Worker {
     fn write_journal(&mut self) -> Result<u64, String> {
         let Some(s) = &self.latest else { return Err("no unsaved recovery state to write".into()) };
         let t0 = Instant::now();
-        let bytes = filmcraft_format::encode(&s.project, false);
-        let serialize_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        let t1 = Instant::now();
-        let unix = unix_now();
-        let mut meta = self.meta.clone();
-        meta.saved_unix = unix;
-        meta.revision = s.revision;
-        meta.project_name = s.project.name.clone();
-        meta.project_path = s.path.clone();
-        meta.bytes = bytes.len();
-        // Snapshot first, then the meta that makes it a candidate.
-        let r = filmcraft_format::atomic_write(&self.session_dir.join(SNAPSHOT), &bytes)
-            .and_then(|_| filmcraft_format::atomic_write(&self.session_dir.join(META), &serde_json::to_vec_pretty(&meta).unwrap_or_default()));
-        let write_ms = t1.elapsed().as_secs_f64() * 1000.0;
-        match r {
-            Ok(()) => {
+        let write = (|| -> Result<_, String> {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(folder) = &s.folder {
+                let bytes = folder.encode(&s.project, &self.session_dir).map_err(|e| e.to_string())?;
+                let serialize_ms = t0.elapsed().as_secs_f64() * 1000.0;
+                let t1 = Instant::now();
+                filmcraft_format::project_folder::checkpoint::Checkpoint::publish(
+                    &self.session_dir,
+                    folder.source.clone(),
+                    s.revision,
+                    &s.project.name,
+                    &bytes,
+                )
+                .map_err(|e| e.to_string())?;
+                return Ok((serialize_ms, t1, bytes.len()));
+            }
+            let bytes = filmcraft_format::encode(&s.project, false);
+            let serialize_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            let t1 = Instant::now();
+            let mut meta = self.meta.clone();
+            meta.saved_unix = unix_now();
+            meta.revision = s.revision;
+            meta.project_name = s.project.name.clone();
+            meta.project_path = s.path.clone();
+            meta.bytes = bytes.len();
+            filmcraft_format::atomic_write(&self.session_dir.join(SNAPSHOT), &bytes)
+                .and_then(|_| filmcraft_format::atomic_write(&self.session_dir.join(META), &serde_json::to_vec_pretty(&meta).unwrap_or_default()))
+                .map_err(|e| e.to_string())?;
+            Ok((serialize_ms, t1, bytes.len()))
+        })();
+        match write {
+            Ok((serialize_ms, t1, bytes)) => {
+                let write_ms = t1.elapsed().as_secs_f64() * 1000.0;
                 self.journaled = s.revision;
                 self.first_pending = None;
-                let _ = self.events.send(WorkerEvent::Journaled { revision: s.revision, unix, serialize_ms, write_ms, bytes: bytes.len() });
+                let _ = self.events.send(WorkerEvent::Journaled { revision: s.revision, unix: unix_now(), serialize_ms, write_ms, bytes });
                 Ok(s.revision)
             }
             Err(e) => {
@@ -1093,6 +1151,14 @@ impl Worker {
     }
 
     fn clear_journal(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.folder_mode {
+            if let Err(e) = filmcraft_format::project_folder::checkpoint::Checkpoint::clear(&self.session_dir) {
+                self.error(format!("clearing recovery checkpoint: {e}"));
+            }
+            self.journaled = 0;
+            return;
+        }
         let _ = fs::remove_file(self.session_dir.join(META));
         let _ = fs::remove_file(self.session_dir.join(SNAPSHOT));
         self.journaled = 0;

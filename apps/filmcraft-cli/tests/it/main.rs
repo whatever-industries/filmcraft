@@ -10,3 +10,4 @@ fn filmcraft_command() -> std::process::Command {
 fn cli_executable_is_resolved() {
     assert!(std::path::Path::new(filmcraft_command().get_program()).is_file());
 }
+mod folder_recovery;

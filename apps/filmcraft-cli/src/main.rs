@@ -109,6 +109,7 @@ OPTIONS
                                 project take turns, so each edits what the last one saved
   --save-as <p.fcproj>          save the project to this path when done
   --bridge <127.0.0.1:PORT>     send commands to the running app (`filmcraft --control PORT`)
+  --folder-recovery             Checkpoint local project-folder edits for crash recovery
   --data-dir <dir>              FilmCraft data directory for user export presets (headless;
                                 default: the app's data directory)
   --keep-going                  `run`: report failing lines and continue
@@ -176,7 +177,7 @@ impl Backend {
 
     fn open_with(a: &Args, create: fn() -> Session) -> Self {
         if let Some(addr) = a.opt("--bridge") {
-            if a.opt("--project").is_some() || a.flag("--demo") {
+            if a.opt("--project").is_some() || a.flag("--demo") || a.flag("--folder-recovery") {
                 usage("--bridge drives the running app; open projects there (exec file.open path=…)");
             }
             return Backend::Bridge(BridgeClient::new(addr).unwrap_or_else(|e| usage(e)));
@@ -185,6 +186,11 @@ impl Backend {
         // user export presets (and other per-user libraries) from the data directory
         if let Some(dir) = a.opt("--data-dir").map(std::path::PathBuf::from).or_else(filmcraft_engine::autosave::default_data_dir) {
             s.export_presets.set_dir(&dir);
+            if a.flag("--folder-recovery") {
+                s.enable_folder_recovery(&dir).unwrap_or_else(|e| fail(e));
+            }
+        } else if a.flag("--folder-recovery") {
+            fail("choose a recovery data directory with --data-dir");
         }
         if let Some(p) = a.opt("--project") {
             let opened = s.execute("file.open", json!({"path":p})).unwrap_or_else(|e| fail(e));
@@ -232,6 +238,11 @@ impl Backend {
         };
         if let Some(Err(e)) = r {
             fail(format!("saving: {e}"));
+        }
+        if a.flag("--folder-recovery")
+            && let Self::Local(s) = self
+        {
+            s.flush_folder_recovery().unwrap_or_else(|e| fail(e));
         }
     }
 }
@@ -432,16 +443,24 @@ async fn cli_exec(a: &Args) {
 
 async fn cli_run(a: &Args) {
     let script = a.pos(1).unwrap_or_else(|| usage("run <script.jsonl | ->"));
-    let text = if script == "-" {
-        std::io::read_to_string(std::io::stdin()).unwrap_or_else(|e| fail(e))
+    use std::io::BufRead;
+    // Allow a local recovery client to synchronize with a live editor over stdin.
+    let input: Box<dyn BufRead> = if script == "-" && a.flag("--folder-recovery") {
+        Box::new(std::io::BufReader::new(std::io::stdin()))
     } else {
-        read_text(script).await.unwrap_or_else(|e| fail(format!("{script}: {e}")))
+        let text =
+            if script == "-" { std::io::read_to_string(std::io::stdin()) } else { read_text(script).await }.unwrap_or_else(|e| fail(format!("{script}: {e}")));
+        Box::new(std::io::Cursor::new(text))
     };
     let _lock = project_lock::for_save(a);
     let mut b = Backend::open(a);
     let mut failed = 0;
-    for (n, line) in text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty() && !l.trim_start().starts_with('#')) {
-        let v: Value = serde_json::from_str(line).unwrap_or_else(|e| usage(format!("line {}: {e}", n + 1)));
+    for (n, line) in input.lines().enumerate() {
+        let line = line.unwrap_or_else(|e| fail(format!("reading {script}: {e}")));
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        let v: Value = serde_json::from_str(&line).unwrap_or_else(|e| usage(format!("line {}: {e}", n + 1)));
         let id = v["id"].as_str().unwrap_or_else(|| usage(format!("line {}: missing \"id\"", n + 1)));
         match b.exec(id, v.get("params").cloned().unwrap_or(json!({}))).await {
             Ok(r) => outln!("{}", json!({"line": n + 1, "id": id, "ok": true, "result": r})),

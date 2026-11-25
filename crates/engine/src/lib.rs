@@ -529,6 +529,8 @@ pub struct Session {
     allow_project_folders: bool,
     #[cfg(not(target_arch = "wasm32"))]
     editing_folder: Option<folder_edit::EditingFolder>,
+    #[cfg(not(target_arch = "wasm32"))]
+    folder_recovery: Option<std::path::PathBuf>,
     pub project: Arc<Project>,
     /// Runtime identity of the opened project, stable across edits/undo and renewed on replacement.
     pub project_instance: Arc<()>,
@@ -649,6 +651,8 @@ impl Job {
 
 #[cfg(not(target_arch = "wasm32"))]
 mod folder_edit;
+#[cfg(not(target_arch = "wasm32"))]
+mod folder_recovery;
 
 impl Default for Session {
     fn default() -> Self {
@@ -673,6 +677,8 @@ impl Session {
             allow_project_folders: false,
             #[cfg(not(target_arch = "wasm32"))]
             editing_folder: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            folder_recovery: None,
             project_instance: Arc::new(()),
             history: History { limit: 200, ..Default::default() },
             revision: 1,
@@ -778,7 +784,11 @@ impl Session {
     /// the next launch); otherwise the session's journal directory is removed.
     pub fn shutdown(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
-        if self.editing_folder.take().is_some() {
+        if self.editing_folder.is_some() {
+            if let Err(e) = self.flush_folder_recovery() {
+                log::warn!("{e}");
+            }
+            self.editing_folder.take();
             self.path = None;
         }
         self.sync_persistence();
@@ -796,6 +806,7 @@ impl Session {
     pub fn sync_persistence(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         if self.editing_folder.is_some() {
+            self.sync_folder_recovery();
             return;
         }
         let dirty = self.is_dirty();
@@ -897,6 +908,9 @@ impl Session {
                     | "file.newProject"
                     | "file.closeProject"
                     | "file.openDemoProject"
+                    | "file.recover"
+                    | "file.recoveryList"
+                    | "file.autoSaveStatus"
                     | "file.saveCopy"
                     | "file.saveAs"
                     | "file.revert"
@@ -904,6 +918,10 @@ impl Session {
             && !commands::reports_only(id, &params)
         {
             return Err(EngineError::Other("project folder is read-only; save an independent copy to edit".into()));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if matches!(id, "file.newProject" | "file.openDemoProject" | "file.newProjectFromTemplate" | "file.closeProject") {
+            self.flush_folder_recovery()?;
         }
         // headless sessions (CLI, MCP, control channel) have no UI frame loop calling
         // `poll_persistence`: apply background mask tracking before each command (#3302)

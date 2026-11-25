@@ -2942,6 +2942,7 @@ dependencies = [
  "filmcraft-codecs",
  "filmcraft-engine",
  "filmcraft-export",
+ "filmcraft-format",
  "filmcraft-gpu",
  "filmcraft-media",
  "filmcraft-platform",
