@@ -214,3 +214,6 @@ mod overlay;
 mod session;
 pub use session::{EditOrigin, FolderSnapshot, relocate_document};
 pub mod checkpoint;
+
+mod shared;
+pub use shared::BinScope;

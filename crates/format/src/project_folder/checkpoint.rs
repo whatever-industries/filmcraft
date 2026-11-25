@@ -15,6 +15,10 @@ pub struct Source {
     pub manifest: PathBuf,
     pub head: String,
     identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<super::BinScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<u64>,
 }
 
 impl Source {
@@ -27,11 +31,11 @@ impl Source {
         };
         #[cfg(not(unix))]
         let identity = metadata.created().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|t| t.as_nanos().to_string());
-        Ok(Self { manifest: directory.join(ROOT), head: head.to_owned(), identity })
+        Ok(Self { manifest: directory.join(ROOT), head: head.to_owned(), identity, scope: None, cursor: None })
     }
 
     pub fn matches(&self, other: &Self) -> bool {
-        self.identity.is_some() && self == other
+        self.identity.is_some() && self.identity == other.identity && self.manifest == other.manifest && self.head == other.head
     }
 }
 

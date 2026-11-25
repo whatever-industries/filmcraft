@@ -23,6 +23,12 @@ struct Edit {
     revision: u64,
 }
 
+impl Revision {
+    pub(super) fn stamp(&self, bin: bool, id: u64) -> Option<u64> {
+        (if bin { &self.bin_edits } else { &self.item_edits }).get(&id).map(|e| e.revision)
+    }
+}
+
 fn edits(old: &[(u64, String)], new: &[(u64, String)], previous: Option<&BTreeMap<u64, Edit>>, edit: Edit) -> BTreeMap<u64, Edit> {
     let old: BTreeMap<_, _> = old.iter().map(|(id, hash)| (*id, hash)).collect();
     new.iter()
@@ -34,14 +40,18 @@ fn edits(old: &[(u64, String)], new: &[(u64, String)], previous: Option<&BTreeMa
 }
 
 pub(super) fn writer(folder: &Path) -> io::Result<File> {
-    let path = folder.join(".writer.lock");
+    let file = lock_file(&folder.join(".writer.lock"))?;
+    file.try_lock().map_err(|e| io::Error::new(io::Error::from(e).kind(), "cannot acquire the project writer lock"))?;
+    Ok(file)
+}
+
+pub(super) fn lock_file(path: &Path) -> io::Result<File> {
     match path.symlink_metadata() {
         Ok(meta) if !meta.is_file() => return Err(invalid("project lock must be a regular file")),
         Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
         _ => {}
     }
     let file = OpenOptions::new().create(true).truncate(false).read(true).write(true).open(path)?;
-    file.try_lock().map_err(|e| io::Error::new(io::Error::from(e).kind(), "cannot acquire the project writer lock"))?;
     Ok(file)
 }
 
