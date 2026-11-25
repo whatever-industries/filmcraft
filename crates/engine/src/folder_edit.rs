@@ -1,6 +1,6 @@
 //! Manual project-folder editing for a local headless session.
 use crate::{EngineError, Result, Session};
-use filmcraft_format::project_folder::{FolderSnapshot, ROOT};
+use filmcraft_format::project_folder::{EditOrigin, FolderSnapshot, ROOT};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
@@ -13,17 +13,17 @@ pub(crate) struct EditingFolder {
 /// immutable raw records stay in the folder. The project snapshot shares the engine's Arcs.
 #[derive(Debug, PartialEq)]
 pub(super) struct FolderBase {
-    revision: String,
+    pub(super) origin: EditOrigin,
     project: Arc<filmcraft_project::Project>,
     view: filmcraft_project::ProjectView,
 }
 
 impl FolderBase {
     fn capture(s: &Session, revision: String) -> Arc<Self> {
-        Arc::new(Self { revision, project: s.project.clone(), view: s.project_view() })
+        Arc::new(Self { origin: EditOrigin::Revision(revision), project: s.project.clone(), view: s.project_view() })
     }
 
-    fn typed(&self) -> Vec<u8> {
+    pub(super) fn typed(&self) -> Vec<u8> {
         filmcraft_format::encode_with_view(&self.project, Some(&self.view), false)
     }
 }
@@ -71,14 +71,14 @@ impl Session {
             if !adopt || !folder.snapshot.is_manifest(Path::new(path)) {
                 return Err(EngineError::Other("a folder can only publish to its open manifest".into()));
             }
-            folder.snapshot.save_from(&folder.baseline.revision, &folder.baseline.typed(), &next).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
-            folder.baseline = Arc::new(FolderBase { revision: folder.snapshot.revision().to_owned(), project: self.project.clone(), view });
+            folder.snapshot.save_edit(&folder.baseline.origin, &folder.baseline.typed(), &next).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+            folder.baseline = Arc::new(FolderBase { origin: EditOrigin::Revision(folder.snapshot.revision().to_owned()), project: self.project.clone(), view });
             self.saved_revision = self.revision;
             return Ok(json!({"path":path,"folderRevision":folder.snapshot.revision(),"readOnly":false}));
         }
         folder
             .snapshot
-            .export_from(&folder.baseline.revision, &folder.baseline.typed(), &next, Path::new(path))
+            .export_edit(&folder.baseline.origin, &folder.baseline.typed(), &next, Path::new(path))
             .map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
         if adopt {
             // Reinstall the stock document so offline references use the exported location.

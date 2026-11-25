@@ -212,4 +212,5 @@ fn outside_folder(folder: &Path, output: &Path) -> io::Result<()> {
 
 mod overlay;
 mod session;
-pub use session::FolderSnapshot;
+pub use session::{EditOrigin, FolderSnapshot, relocate_document};
+pub mod checkpoint;
