@@ -166,6 +166,31 @@ history chain, envelope and required item payloads must still be readable. Unrel
 and items can be missing. This command leaves the damaged folder available for further
 recovery. Keep a separate backup for loss of the underlying volume.
 
+### Find and rescue a saved bin
+
+Use a digest from `project_folder history FOLDER`. To find a bin that has since
+been renamed or deleted, choose a revision from before the change.
+
+```sh
+project_folder list-bins FOLDER REVISION
+project_folder rescue-bin FOLDER REVISION BIN_ID NEW.fcproj
+```
+
+The listing prints one JSON object per line. Each readable bin has an `id`,
+a `name`, and a `path` array from the root through that bin. Use the ID when
+names repeat. An unreadable bin has an ID and an error. A readable bin can
+have a null path if its ancestry cannot be verified. An incomplete listing
+exits unsuccessfully and still prints the entries it could read.
+
+Rescue writes a new standard project outside the source folder. The selected
+bin appears at the top level with its original child order, empty sub-bins,
+and item IDs. Selecting the root retains it as the root. Sources used outside
+the recovered hierarchy appear once under **Referenced Items**; a numbered
+suffix distinguishes an existing name. Offline media and proxies keep pointing
+to their original locations. The command reads the selected subtree and its
+required records, so a damaged sibling or parent can be bypassed using the bin
+ID. A missing required record stops the export before the destination is created.
+
 ## Saving is atomic
 
 Every write of a project file, auto-save, recovery snapshot or preferences file goes through

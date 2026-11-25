@@ -10,6 +10,8 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+#[path = "bins.rs"]
+pub(super) mod bins;
 #[path = "paths.rs"]
 mod paths;
 #[path = "recovery.rs"]
@@ -59,11 +61,21 @@ fn check_hash(hash: &str) -> io::Result<()> {
 fn load_payload(folder: &Path, hash: &str, remaining: &mut u64) -> io::Result<Value> {
     check_hash(hash)?;
     let bytes = read_member(&folder.join(hash), *remaining)?;
+    *remaining -= bytes.len() as u64;
     if digest(&bytes) != hash {
         return Err(invalid("SHA-256 mismatch"));
     }
-    *remaining -= bytes.len() as u64;
     Ok(serde_json::from_slice(&bytes)?)
+}
+
+pub(super) type RecordIndex<'a> = BTreeMap<u64, Option<&'a str>>;
+
+pub(super) fn record_index(entries: &[(u64, String)]) -> RecordIndex<'_> {
+    let mut ids = BTreeMap::new();
+    for (id, hash) in entries {
+        ids.entry(*id).and_modify(|entry| *entry = None).or_insert(Some(hash.as_str()));
+    }
+    ids
 }
 
 fn load_group(folder: &Path, kind: &str, entries: &[(u64, String)], budget: &mut u64) -> io::Result<BTreeMap<u64, Value>> {
@@ -100,11 +112,19 @@ fn assemble(folder: &Path, manifest: &Manifest, destination: &Path) -> io::Resul
     encode_at(folder, read_records(folder, manifest)?, destination)
 }
 
-fn encode_at(folder: &Path, mut records: ProjectRecords, destination: &Path) -> io::Result<Vec<u8>> {
+fn document_at(folder: &Path, mut records: ProjectRecords, destination: &Path) -> io::Result<Value> {
     paths::rebase(&mut records, &folder.join(ROOT), destination)?;
-    let bytes = serde_json::to_vec(&records.into_document().map_err(invalid)?)?;
+    records.into_document().map_err(invalid)
+}
+
+fn checked_bytes(document: &Value) -> io::Result<Vec<u8>> {
+    let bytes = serde_json::to_vec(document)?;
     filmcraft_format::decode(&bytes).map_err(invalid)?;
     Ok(bytes)
+}
+
+fn encode_at(folder: &Path, records: ProjectRecords, destination: &Path) -> io::Result<Vec<u8>> {
+    checked_bytes(&document_at(folder, records, destination)?)
 }
 
 fn write_payload(folder: &Path, value: Value, write_new: &mut impl FnMut(&Path, &[u8]) -> io::Result<()>) -> io::Result<String> {

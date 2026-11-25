@@ -471,3 +471,6 @@ fn a_deleted_sequence_recovers_into_the_root_and_corrupt_history_cannot_be_used(
     assert!(error.to_string().contains("damaged archived manifest"));
     assert_eq!(fs::read(folder.join(ROOT)).unwrap(), root);
 }
+
+#[path = "bins.rs"]
+mod bin_recovery;

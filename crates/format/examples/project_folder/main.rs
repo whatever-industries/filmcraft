@@ -2,6 +2,7 @@
 mod converter;
 
 use converter::{
+    bins::{list_bins, rescue_bin},
     pack,
     recovery::{history, rescue, restore_copy},
     revisions::{checkout, save},
@@ -40,6 +41,12 @@ fn run() -> io::Result<()> {
             writeln!(io::stdout().lock(), "{number} {hash}")
         });
     }
+    if let [command, folder, revision] = args.as_slice()
+        && command == "list-bins"
+        && let Some(revision) = revision.to_str()
+    {
+        return list_bins(Path::new(folder), revision, io::stdout().lock());
+    }
     if let [command, folder, base, revision, id] = args.as_slice()
         && command == "restore-copy"
         && let (Some(base), Some(revision), Some(id)) = (base.to_str(), revision.to_str(), id.to_str().and_then(|s| s.parse().ok()))
@@ -49,14 +56,17 @@ fn run() -> io::Result<()> {
         return Ok(());
     }
     if let [command, folder, revision, id, out] = args.as_slice()
-        && command == "rescue"
+        && (command == "rescue" || command == "rescue-bin")
         && let (Some(revision), Some(id)) = (revision.to_str(), id.to_str().and_then(|s| s.parse().ok()))
     {
+        if command == "rescue-bin" {
+            return rescue_bin(Path::new(folder), revision, id, Path::new(out));
+        }
         return rescue(Path::new(folder), revision, id, Path::new(out));
     }
     Err(io::Error::new(
         io::ErrorKind::InvalidInput,
-        "usage: project_folder pack SOURCE.fcproj NEW_FOLDER | unpack FOLDER NEW_FILE.fcproj | checkout FOLDER NEW_FILE.fcproj | save FOLDER BASE_REVISION EDITED.fcproj | history FOLDER | restore-copy FOLDER BASE_REVISION HISTORICAL_REVISION SEQUENCE_ID | rescue FOLDER REVISION SEQUENCE_ID NEW_FILE.fcproj",
+        "usage: project_folder pack SOURCE.fcproj NEW_FOLDER | unpack FOLDER NEW_FILE.fcproj | checkout FOLDER NEW_FILE.fcproj | save FOLDER BASE_REVISION EDITED.fcproj | history FOLDER | restore-copy FOLDER BASE_REVISION HISTORICAL_REVISION SEQUENCE_ID | rescue FOLDER REVISION SEQUENCE_ID NEW_FILE.fcproj | list-bins FOLDER REVISION | rescue-bin FOLDER REVISION BIN_ID NEW.fcproj",
     ))
 }
 

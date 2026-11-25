@@ -1,6 +1,8 @@
 //! History is reachable from a single snapshot of the root. Rescue reads only the
 //! envelope and the selected sequence's transitive project-item dependencies.
-use super::{MANIFEST_LIMIT, Manifest, ROOT, check_hash, check_manifest, digest, encode_at, invalid, load_payload, read_member, read_records, revisions};
+use super::{
+    MANIFEST_LIMIT, Manifest, ROOT, check_hash, check_manifest, digest, encode_at, invalid, load_payload, read_member, read_records, record_index, revisions,
+};
 use craft_fcproj_format::records::ProjectRecords;
 use filmcraft_format::{MAX_PROJECT_BYTES, atomic_write_new};
 use filmcraft_project::{ItemId, ItemKind, Project, ProjectItem};
@@ -43,7 +45,7 @@ pub(in super::super) fn history(folder: &Path, mut visit: impl FnMut(u64, &str) 
     Ok(())
 }
 
-fn at(folder: &Path, requested: &str) -> io::Result<Manifest> {
+pub(super) fn at(folder: &Path, requested: &str) -> io::Result<Manifest> {
     check_hash(requested)?;
     walk(folder, |hash, _| Ok(requested == hash))?.ok_or_else(|| invalid("selected revision is outside the current project history"))
 }
@@ -60,35 +62,32 @@ fn references(item: &ProjectItem, pending: &mut Vec<u64>) {
     }
 }
 
-fn extract(folder: &Path, manifest: &Manifest, sequence: u64) -> io::Result<ProjectRecords> {
-    let mut budget = MAX_PROJECT_BYTES;
-    let mut envelope = load_payload(folder, &manifest.envelope, &mut budget)?;
+pub(super) fn metadata(folder: &Path, manifest: &Manifest, budget: &mut u64) -> io::Result<(Value, u64)> {
+    let envelope = load_payload(folder, &manifest.envelope, budget).map_err(|e| invalid(format!("project metadata: {e}")))?;
+    craft_fcproj_format::detect_version(&envelope).and_then(craft_fcproj_format::check_supported).map_err(invalid)?;
+    let root = envelope.pointer("/project/root").and_then(Value::as_u64).ok_or_else(|| invalid("missing root bin id"))?;
+    Ok((envelope, root))
+}
+
+pub(super) fn extract_items(folder: &Path, manifest: &Manifest, mut envelope: Value, budget: &mut u64, mut pending: Vec<u64>) -> io::Result<ProjectRecords> {
     let project = envelope.get_mut("project").and_then(Value::as_object_mut).ok_or_else(|| invalid("missing project metadata"))?;
-    let root = project.get("root").and_then(Value::as_u64).ok_or_else(|| invalid("missing root bin id"))?;
     let inventory: Vec<u64> = serde_json::from_value(project.get("items").ok_or_else(|| invalid("missing item inventory"))?.clone())?;
     let inventory_len = inventory.len();
     let inventory: BTreeSet<_> = inventory.into_iter().collect();
     if inventory.len() != inventory_len {
         return Err(invalid("duplicate item in project inventory"));
     }
-    let hashes: BTreeMap<_, _> = manifest.items.iter().map(|(id, hash)| (*id, hash)).collect();
-    if hashes.len() != manifest.items.len() {
-        return Err(invalid("duplicate item in manifest"));
-    }
+    let hashes = record_index(&manifest.items);
     let mut items = BTreeMap::new();
-    let mut pending = vec![sequence];
     while let Some(id) = pending.pop() {
         if items.contains_key(&id) {
             continue;
         }
-        let hash = hashes.get(&id).filter(|_| inventory.contains(&id)).ok_or_else(|| invalid(format!("missing item {id}")))?;
-        let value = load_payload(folder, hash, &mut budget).map_err(|e| invalid(format!("item {id}: {e}")))?;
-        let item: ProjectItem = serde_json::from_value(value.clone()).map_err(|e| invalid(format!("item {id}: {e}")))?;
+        let hash = hashes.get(&id).copied().flatten().filter(|_| inventory.contains(&id)).ok_or_else(|| invalid(format!("missing or repeated item {id}")))?;
+        let value = load_payload(folder, hash, budget).map_err(|e| invalid(format!("item {id}: {e}")))?;
+        let item: ProjectItem = serde::Deserialize::deserialize(&value).map_err(|e| invalid(format!("item {id}: {e}")))?;
         if item.id.0 != id {
             return Err(invalid(format!("mismatched item {id}")));
-        }
-        if id == sequence && item.as_sequence().is_none() {
-            return Err(invalid(format!("item {id} is not a sequence")));
         }
         references(&item, &mut pending);
         items.insert(id, value);
@@ -101,10 +100,21 @@ fn extract(folder: &Path, manifest: &Manifest, sequence: u64) -> io::Result<Proj
     let ids: Vec<_> = items.keys().copied().collect();
     project.insert("items".into(), json!(ids));
     project.remove("search_bins");
-    envelope["view"] = json!({"open_sequences":[sequence], "active_sequence":sequence});
-    let entries: Vec<_> = ids.iter().map(|id| json!({"Item":id})).collect();
-    let bin = json!({"id":root,"name":"Recovered","children":entries});
-    Ok(ProjectRecords { envelope, bins: BTreeMap::from([(root, bin)]), items })
+    envelope.as_object_mut().ok_or_else(|| invalid("missing envelope"))?.remove("view");
+    Ok(ProjectRecords { envelope, bins: BTreeMap::new(), items })
+}
+
+fn extract(folder: &Path, manifest: &Manifest, sequence: u64) -> io::Result<ProjectRecords> {
+    let mut budget = MAX_PROJECT_BYTES;
+    let (envelope, root) = metadata(folder, manifest, &mut budget)?;
+    let mut records = extract_items(folder, manifest, envelope, &mut budget, vec![sequence])?;
+    if !records.items.get(&sequence).is_some_and(|item| item.pointer("/kind/Sequence").is_some()) {
+        return Err(invalid(format!("item {sequence} is not a sequence")));
+    }
+    records.envelope["view"] = json!({"open_sequences":[sequence], "active_sequence":sequence});
+    let entries: Vec<_> = records.items.keys().map(|id| json!({"Item":id})).collect();
+    records.bins.insert(root, json!({"id":root,"name":"Recovered","children":entries}));
+    Ok(records)
 }
 
 pub(in super::super) fn rescue(folder: &Path, revision: &str, sequence: u64, output: &Path) -> io::Result<()> {
