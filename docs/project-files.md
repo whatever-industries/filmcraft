@@ -91,6 +91,19 @@ Reading it partially and saving it back would silently drop whatever the newer v
 
 ## Developer project-folder converter
 
+To try the modular fork from a fresh checkout:
+
+```sh
+git clone --branch modular-integration https://github.com/whatever-industries/filmcraft.git
+cd filmcraft
+cargo test --locked -p filmcraft-format
+cargo run --locked -p filmcraft-format --example project_folder -- pack crates/format/tests/fixtures/v1-edit.fcproj edit-folder
+cargo run --locked -p filmcraft-format --example project_folder -- unpack edit-folder restored.fcproj
+```
+
+The fork pins the schema-17 record library to an exact Git commit. Stock FilmCraft can open
+the exported standard project. Keep builds on your preferred volume with `CARGO_TARGET_DIR`.
+
 Use the native `project_folder` example to split a saved project into a new directory or
 rebuild a standard project file from that directory. Both destination parents must exist.
 
