@@ -12,6 +12,8 @@ use std::path::Path;
 
 #[path = "paths.rs"]
 mod paths;
+#[path = "revisions.rs"]
+pub(super) mod revisions;
 
 pub(super) const ROOT: &str = "project.fcmod";
 const FORMAT: &str = "filmcraft.project-folder";
@@ -23,6 +25,8 @@ const RECORD_LIMIT: usize = 100_000;
 struct Manifest {
     format: String,
     layout: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revision: Option<revisions::Revision>,
     envelope: String,
     bins: Vec<(u64, String)>,
     items: Vec<(u64, String)>,
@@ -67,7 +71,7 @@ fn load_group(folder: &Path, kind: &str, entries: &[(u64, String)], budget: &mut
 }
 
 fn assemble(folder: &Path, manifest: &Manifest, destination: &Path) -> io::Result<Vec<u8>> {
-    if manifest.format != FORMAT || manifest.layout != 1 {
+    if manifest.format != FORMAT || !matches!((manifest.layout, &manifest.revision), (1, None) | (2, Some(_))) {
         return Err(invalid(format!("unsupported project folder format {:?}, layout {}", manifest.format, manifest.layout)));
     }
     if manifest.bins.len().saturating_add(manifest.items.len()) > RECORD_LIMIT {
@@ -97,7 +101,7 @@ fn write_payload(folder: &Path, value: Value, write_new: &mut impl FnMut(&Path, 
     Ok(hash)
 }
 
-pub(super) fn pack(source: &Path, folder: &Path, mut write_new: impl FnMut(&Path, &[u8]) -> io::Result<()>) -> io::Result<()> {
+fn records_from(source: &Path, folder: &Path) -> io::Result<ProjectRecords> {
     let mut records = {
         let bytes = read_regular_file_bounded(source, MAX_PROJECT_BYTES)?;
         filmcraft_format::decode(&bytes).map_err(invalid)?;
@@ -108,12 +112,22 @@ pub(super) fn pack(source: &Path, folder: &Path, mut write_new: impl FnMut(&Path
     }
     let root = folder.join(ROOT);
     paths::rebase(&mut records, source, &root)?;
-    fs::create_dir(folder)?; // Exclusively reserve a fresh destination. Never adopt an existing directory.
+    Ok(records)
+}
+
+fn materialize(folder: &Path, records: ProjectRecords, mut write_new: impl FnMut(&Path, &[u8]) -> io::Result<()>) -> io::Result<Manifest> {
     let envelope = write_payload(folder, records.envelope, &mut write_new)?;
     let mut group = |values: BTreeMap<u64, Value>| -> io::Result<Vec<_>> {
         values.into_iter().map(|(id, value)| Ok((id, write_payload(folder, value, &mut write_new)?))).collect()
     };
-    let manifest = Manifest { format: FORMAT.to_owned(), layout: 1, envelope, bins: group(records.bins)?, items: group(records.items)? };
+    Ok(Manifest { format: FORMAT.to_owned(), layout: 1, revision: None, envelope, bins: group(records.bins)?, items: group(records.items)? })
+}
+
+pub(super) fn pack(source: &Path, folder: &Path, mut write_new: impl FnMut(&Path, &[u8]) -> io::Result<()>) -> io::Result<()> {
+    let records = records_from(source, folder)?;
+    fs::create_dir(folder)?;
+    let root = folder.join(ROOT);
+    let manifest = materialize(folder, records, &mut write_new)?;
     let bytes = serde_json::to_vec(&manifest)?;
     if bytes.len() as u64 > MANIFEST_LIMIT {
         return Err(invalid("manifest exceeds the folder layout's size limit"));
