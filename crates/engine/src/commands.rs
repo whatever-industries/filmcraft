@@ -113,6 +113,11 @@ fn has_edit_points(s: &Session) -> std::result::Result<(), String> {
     if s.state.edit_points.is_empty() { Err("no edit points selected".into()) } else { Ok(()) }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn shared_folder(s: &Session) -> std::result::Result<(), String> {
+    if s.editing_folder.as_ref().is_some_and(|f| f.snapshot.is_shared()) { Ok(()) } else { Err("open a project folder with --shared-bins".into()) }
+}
+
 fn has_saved_path(s: &Session) -> std::result::Result<(), String> {
     if s.path.is_some() { Ok(()) } else { Err("the project has not been saved yet".into()) }
 }
@@ -1616,6 +1621,15 @@ fn marker_list_mut(s: &mut Session) -> Result<(ItemId, Tick)> {
 /// Builds the command registry shared by the UI, CLI and control interfaces.
 fn build() -> Vec<CommandSpec> {
     let mut v = vec![
+        #[cfg(not(target_arch = "wasm32"))]
+        cmd!("project.checkoutBin", "Check Out Bin", [], None, r#"{"bin":binId,"discard":bool?}"#, shared_folder, |s, p| s
+            .change_checkout("project.checkoutBin", p)),
+        #[cfg(not(target_arch = "wasm32"))]
+        cmd!("project.releaseBin", "Release Bin", [], None, r#"{"discard":bool?}"#, shared_folder, |s, p| s.change_checkout("project.releaseBin", p)),
+        #[cfg(not(target_arch = "wasm32"))]
+        cmd!("project.refresh", "Refresh Project Folder", [], None, "{}", shared_folder, |s, p| s.change_checkout("project.refresh", p)),
+        #[cfg(not(target_arch = "wasm32"))]
+        cmd!("project.reorderBin", "Reorder Bin", [], None, r#"{"bin":binId,"order":[id]}"#, shared_folder, |s, p| s.reorder_bin(p)),
         // ================= File =================
         cmd!("file.newProject", "Project…", ["File", "New"], Some("Cmd+Alt+N"), r#"{"name":str}"#, always, |s, p| {
             let name = str_p(p, "name").unwrap_or("Untitled").to_string();
@@ -5318,6 +5332,11 @@ pub fn inspect_project(s: &Session) -> Value {
         result["storage"] = json!("projectFolder");
         result["readOnly"] = json!(!folder.snapshot.writable());
         result["folderRevision"] = json!(folder.snapshot.revision());
+        if folder.snapshot.is_shared() {
+            result["sharedBins"] = json!(true);
+            result["checkedOutBin"] = json!(folder.snapshot.scope().map(|s| s.bin));
+            result["checkedOutSequences"] = json!(folder.snapshot.scope().into_iter().flat_map(|s| &s.sequences).collect::<Vec<_>>());
+        }
         return result;
     }
     result

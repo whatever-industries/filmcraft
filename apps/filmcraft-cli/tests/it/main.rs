@@ -11,3 +11,4 @@ fn cli_executable_is_resolved() {
     assert!(std::path::Path::new(filmcraft_command().get_program()).is_file());
 }
 mod folder_recovery;
+mod shared_bins;

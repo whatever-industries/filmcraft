@@ -37,6 +37,14 @@ impl FolderJournal {
         Ok(Self { worker: Some(worker), source, last_sent: None })
     }
 
+    pub(super) fn clear(&self) -> Result<()> {
+        if let Some(w) = &self.worker {
+            w.send_clean();
+            w.flush().map_err(error)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn verify_location(&self, folder: &FolderSnapshot) -> Result<()> {
         let current = Source::capture(folder.directory(), &self.source.head).map_err(error)?;
         if current != self.source {
@@ -103,6 +111,8 @@ impl Session {
         let draft = state.1.then(|| {
             let mut source = journal.source.clone();
             source.head = folder.snapshot.revision().into();
+            source.scope = folder.snapshot.scope().cloned();
+            source.cursor = source.scope.as_ref().map(|_| folder.snapshot.cursor());
             crate::folder_edit::Draft { source, baseline: folder.baseline.clone(), view: self.project_view() }
         });
         if let Some(journal) = self.editing_folder.as_mut().and_then(|f| f.journal.as_mut())
@@ -222,15 +232,29 @@ impl Session {
         if !identity.matches(&c.source) {
             return Err(error(independent));
         }
-        let (mut snapshot, _) = FolderSnapshot::open(&path).map_err(|e| error(format!("{e}; {independent}")))?;
-        let can_transfer = self.editing_folder.as_ref().is_some_and(|f| f.snapshot.is_manifest(&path) && f.snapshot.writable());
-        if (!snapshot.writable() && !can_transfer) || snapshot.revision() != c.source.head {
-            return Err(error(independent));
-        }
-        let bytes = c.document_at(&candidate.dir, &path).map_err(error)?;
+        let draft = c.document_at(&candidate.dir, &path).map_err(error)?;
+        let (mut snapshot, bytes) = if let Some(scope) = &c.source.scope {
+            if !self.shared_bins {
+                return Err(error(format!("use --shared-bins or {independent}")));
+            }
+            let (mut snapshot, _) = FolderSnapshot::open_shared(&path).map_err(error)?;
+            let cursor = c.source.cursor.ok_or_else(|| error(independent))?;
+            let bytes = snapshot.checkout_bin(scope.bin, Some((&c.source.head, scope, &draft, cursor))).map_err(|e| error(format!("{e}; {independent}")))?;
+            (snapshot, bytes)
+        } else {
+            if self.shared_bins {
+                return Err(error(format!("use whole-project recovery or {independent}")));
+            }
+            let (snapshot, _) = FolderSnapshot::open(&path).map_err(|e| error(format!("{e}; {independent}")))?;
+            let can_transfer = self.editing_folder.as_ref().is_some_and(|f| f.snapshot.is_manifest(&path) && f.snapshot.writable());
+            if (!snapshot.writable() && !can_transfer) || snapshot.revision() != c.source.head {
+                return Err(error(independent));
+            }
+            (snapshot, draft)
+        };
         self.flush_folder_recovery()?;
         let journal = FolderJournal::start(self.folder_recovery.as_ref().ok_or_else(|| error("disabled"))?, &snapshot)?;
-        if !journal.source.matches(&c.source) {
+        if !Source::capture(snapshot.directory(), &c.source.head).map_err(error)?.matches(&c.source) {
             return Err(error(independent));
         }
         let path_text = path.to_str().ok_or_else(|| error("non-UTF-8 project path"))?;
@@ -241,6 +265,9 @@ impl Session {
         }
         if let Some(mut old) = previous {
             snapshot.inherit_writer(&mut old.snapshot);
+        }
+        if snapshot.scope().is_some() {
+            Arc::make_mut(&mut self.project).next_id = snapshot.cursor();
         }
         let baseline = Arc::new(FolderBase { origin: EditOrigin::Recovered(bytes.into()), project: self.project.clone(), view: self.project_view() });
         self.editing_folder = Some(EditingFolder { snapshot, baseline, journal: Some(journal) });

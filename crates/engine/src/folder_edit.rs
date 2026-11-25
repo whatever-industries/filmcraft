@@ -58,9 +58,11 @@ impl Session {
         if !self.allow_project_folders || self.persistence.is_some() {
             return Err(EngineError::Other("project folders require a local manual editing session".into()));
         }
-        let (mut snapshot, bytes) = FolderSnapshot::open(Path::new(path)).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+        let (mut snapshot, bytes) = (if self.shared_bins { FolderSnapshot::open_shared(Path::new(path)) } else { FolderSnapshot::open(Path::new(path)) })
+            .map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
         self.flush_folder_recovery()?;
-        let can_write = snapshot.writable() || self.editing_folder.as_ref().is_some_and(|f| f.snapshot.is_manifest(Path::new(path)) && f.snapshot.writable());
+        let can_write = snapshot.writable()
+            || !snapshot.is_shared() && self.editing_folder.as_ref().is_some_and(|f| f.snapshot.is_manifest(Path::new(path)) && f.snapshot.writable());
         let journal = self.folder_recovery.as_ref().filter(|_| can_write).map(|d| crate::folder_recovery::FolderJournal::start(d, &snapshot)).transpose()?;
         let previous = self.editing_folder.take();
         let mut result = match crate::commands::open_bytes(self, path, &bytes) {
@@ -92,8 +94,11 @@ impl Session {
             if let Some(journal) = &folder.journal {
                 journal.verify_location(&folder.snapshot)?;
             }
-            folder.snapshot.save_edit(&folder.baseline.origin, &folder.baseline.typed(), &next).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
-            folder.baseline = Arc::new(FolderBase { origin: EditOrigin::Revision(folder.snapshot.revision().to_owned()), project: self.project.clone(), view });
+            let origin = folder
+                .snapshot
+                .save_edit_with_origin(&folder.baseline.origin, &folder.baseline.typed(), &next)
+                .map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+            folder.baseline = Arc::new(FolderBase { origin, project: self.project.clone(), view });
             self.saved_revision = self.revision;
             return Ok(json!({"path":path,"folderRevision":folder.snapshot.revision(),"readOnly":false}));
         }

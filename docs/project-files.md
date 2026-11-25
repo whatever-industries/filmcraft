@@ -173,6 +173,47 @@ standard exports from the folder session. Undoing a saved deletion restores the 
 extra fields along with its timing and edits. Saving again records that restoration as
 a new revision. Redo in the same session can remove the clip again.
 
+### Edit different bins in two local CLI sessions
+
+Run one process per editor, with a separate data directory for each editor's drafts.
+Both processes can open the same manifest on a local disk.
+
+```sh
+filmcraft-cli --shared-bins --data-dir ./editor-a --project edit-folder/project.fcmod run -
+```
+
+Use `project.inspect` to find bin and sequence IDs. For a bin with ID 70 containing
+sequence 21, send these commands, one per line:
+
+```jsonl
+{"id":"project.checkoutBin","params":{"bin":70}}
+{"id":"sequence.open","params":{"item":21}}
+{"id":"project.renameBin","params":{"bin":70,"name":"Interviews"}}
+{"id":"file.save"}
+{"id":"project.releaseBin"}
+```
+
+Checkout locks the selected non-root bin and its directly filed sequences until release,
+a successful switch, or process exit. A second editor can check out a different bin,
+including a child bin. Whole-project writers require all checkouts to be released.
+Each editor can rename the checked-out bin, reorder its existing entries with
+`project.reorderBin`, and place, move, trim, split or delete clips in its sequences.
+Project-wide changes and transferring items between bins require the whole-project editor.
+
+Save publishes the owned records against the latest manifest. This preserves other editors'
+completed saves. `project.refresh` loads their changes into a clean session and resets Undo
+history. Undo and Redo work within the current checkout, including across manual saves.
+A dirty session must save before switching bins or explicitly release with `{"discard":true}`.
+Each checkout reserves a distinct range of project IDs. Gaps after Undo or release are expected.
+
+Shared mode enables private crash checkpoints. After a crash, start with `--shared-bins`
+and the same data directory. Use `file.recoveryList` and `file.recover` as described below.
+Recovery can reopen the draft over a newer save to another bin. If the bin is busy, wait
+for release. If an owned record changed or reserved IDs now conflict, export the draft
+to a new `.fcproj`. Manual publication still requires an explicit save.
+The multi-process tests cover local filesystems. Network-volume locking and desktop
+collaboration are separate milestones.
+
 ### Recover unsaved project-folder edits
 
 Start a local CLI session with recovery enabled. The data directory holds private checkpoints and should live outside the project folder.

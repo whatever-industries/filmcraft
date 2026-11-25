@@ -528,6 +528,8 @@ pub struct Session {
     #[cfg(not(target_arch = "wasm32"))]
     allow_project_folders: bool,
     #[cfg(not(target_arch = "wasm32"))]
+    shared_bins: bool,
+    #[cfg(not(target_arch = "wasm32"))]
     editing_folder: Option<folder_edit::EditingFolder>,
     #[cfg(not(target_arch = "wasm32"))]
     folder_recovery: Option<std::path::PathBuf>,
@@ -653,6 +655,8 @@ impl Job {
 mod folder_edit;
 #[cfg(not(target_arch = "wasm32"))]
 mod folder_recovery;
+#[cfg(not(target_arch = "wasm32"))]
+mod shared_bins;
 
 impl Default for Session {
     fn default() -> Self {
@@ -675,6 +679,8 @@ impl Session {
             project: Arc::new(Project::new("Untitled")),
             #[cfg(not(target_arch = "wasm32"))]
             allow_project_folders: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            shared_bins: false,
             #[cfg(not(target_arch = "wasm32"))]
             editing_folder: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -899,7 +905,9 @@ impl Session {
     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
         let spec = commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
         #[cfg(not(target_arch = "wasm32"))]
-        if self.editing_folder.as_ref().is_some_and(|f| !f.snapshot.writable())
+        self.shared_command(id, &params)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.editing_folder.as_ref().is_some_and(|f| !f.snapshot.is_shared() && !f.snapshot.writable())
             && !matches!(
                 id,
                 "project.inspect"
@@ -1130,10 +1138,14 @@ impl Session {
     /// Apply an undoable project edit. The closure gets a mutable copy; on error nothing changes.
     pub fn edit<R>(&mut self, label: &str, f: impl FnOnce(&mut Project, &mut EditorState) -> Result<R>) -> Result<R> {
         let mut p = (*self.project).clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.prepare_scoped_edit(&mut p);
         let mut st = self.state.clone();
         let r = f(&mut p, &mut st)?;
         self.refuse_self_nesting(&p)?;
         self.drop_orphan_transitions(&mut p);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.validate_scoped_edit(&p)?;
         let old = self.capture_project();
         self.project = Arc::new(p);
         self.history.undo.push((label.to_string(), old, self.command_origin.clone()));
@@ -1158,10 +1170,14 @@ impl Session {
             return Ok(r);
         }
         let mut p = (*self.project).clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.prepare_scoped_edit(&mut p);
         let mut st = self.state.clone();
         let r = f(&mut p, &mut st)?;
         self.refuse_self_nesting(&p)?;
         self.drop_orphan_transitions(&mut p);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.validate_scoped_edit(&p)?;
         self.project = Arc::new(p);
         self.state = st;
         self.drop_stale_gap();

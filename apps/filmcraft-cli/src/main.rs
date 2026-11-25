@@ -109,6 +109,7 @@ OPTIONS
                                 project take turns, so each edits what the last one saved
   --save-as <p.fcproj>          save the project to this path when done
   --bridge <127.0.0.1:PORT>     send commands to the running app (`filmcraft --control PORT`)
+  --shared-bins                 Check out one bin for local collaborative editing (includes recovery)
   --folder-recovery             Checkpoint local project-folder edits for crash recovery
   --data-dir <dir>              FilmCraft data directory for user export presets (headless;
                                 default: the app's data directory)
@@ -177,7 +178,7 @@ impl Backend {
 
     fn open_with(a: &Args, create: fn() -> Session) -> Self {
         if let Some(addr) = a.opt("--bridge") {
-            if a.opt("--project").is_some() || a.flag("--demo") || a.flag("--folder-recovery") {
+            if a.opt("--project").is_some() || a.flag("--demo") || (a.flag("--folder-recovery") || a.flag("--shared-bins")) {
                 usage("--bridge drives the running app; open projects there (exec file.open path=…)");
             }
             return Backend::Bridge(BridgeClient::new(addr).unwrap_or_else(|e| usage(e)));
@@ -186,10 +187,12 @@ impl Backend {
         // user export presets (and other per-user libraries) from the data directory
         if let Some(dir) = a.opt("--data-dir").map(std::path::PathBuf::from).or_else(filmcraft_engine::autosave::default_data_dir) {
             s.export_presets.set_dir(&dir);
-            if a.flag("--folder-recovery") {
+            if a.flag("--shared-bins") {
+                s.enable_shared_bins(&dir).unwrap_or_else(|e| fail(e));
+            } else if a.flag("--folder-recovery") {
                 s.enable_folder_recovery(&dir).unwrap_or_else(|e| fail(e));
             }
-        } else if a.flag("--folder-recovery") {
+        } else if a.flag("--folder-recovery") || a.flag("--shared-bins") {
             fail("choose a recovery data directory with --data-dir");
         }
         if let Some(p) = a.opt("--project") {
@@ -239,7 +242,7 @@ impl Backend {
         if let Some(Err(e)) = r {
             fail(format!("saving: {e}"));
         }
-        if a.flag("--folder-recovery")
+        if (a.flag("--folder-recovery") || a.flag("--shared-bins"))
             && let Self::Local(s) = self
         {
             s.flush_folder_recovery().unwrap_or_else(|e| fail(e));
@@ -445,7 +448,7 @@ async fn cli_run(a: &Args) {
     let script = a.pos(1).unwrap_or_else(|| usage("run <script.jsonl | ->"));
     use std::io::BufRead;
     // Allow a local recovery client to synchronize with a live editor over stdin.
-    let input: Box<dyn BufRead> = if script == "-" && a.flag("--folder-recovery") {
+    let input: Box<dyn BufRead> = if script == "-" && (a.flag("--folder-recovery") || a.flag("--shared-bins")) {
         Box::new(std::io::BufReader::new(std::io::stdin()))
     } else {
         let text =
