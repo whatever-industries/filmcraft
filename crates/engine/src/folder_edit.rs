@@ -89,6 +89,9 @@ impl Session {
             if !adopt || !folder.snapshot.is_manifest(Path::new(path)) {
                 return Err(EngineError::Other("a folder can only publish to its open manifest".into()));
             }
+            if let Some(journal) = &folder.journal {
+                journal.verify_location(&folder.snapshot)?;
+            }
             folder.snapshot.save_edit(&folder.baseline.origin, &folder.baseline.typed(), &next).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
             folder.baseline = Arc::new(FolderBase { origin: EditOrigin::Revision(folder.snapshot.revision().to_owned()), project: self.project.clone(), view });
             self.saved_revision = self.revision;
@@ -263,6 +266,122 @@ mod tests {
         fs::rename(held, archive).unwrap();
         writer.execute("file.save", json!({})).unwrap();
         assert!(!writer.is_dirty() && writer.history.can_redo());
+    }
+
+    #[test]
+    fn dirty_switch_requires_a_checkpoint_and_isolates_same_named_projects() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let data = root.join("data");
+        let a = root.join("a");
+        let b = root.join("b");
+        fs::create_dir(&a).unwrap();
+        fs::create_dir(&b).unwrap();
+        let first = fixture(&a);
+        let second = fixture(&b);
+        let b_head = fs::read(&second).unwrap();
+        let mut editor = Session::local_folder_editor();
+        editor.enable_folder_recovery(&data).unwrap();
+        editor.execute("file.open", json!({"path":first})).unwrap();
+        let active = editor.execute("file.autoSaveStatus", json!({})).unwrap();
+        let journal = PathBuf::from(active["sessionDir"].as_str().unwrap());
+        let descriptor = journal.join(filmcraft_format::project_folder::checkpoint::DESCRIPTOR);
+        // A failed descriptor publication leaves A open and its lock held.
+        fs::create_dir(&descriptor).unwrap();
+        editor.execute("project.renameBin", json!({"bin":1,"name":"Only in A"})).unwrap();
+        assert!(editor.execute("file.open", json!({"path":second})).is_err());
+        assert!(editor.is_dirty());
+        let mut peer = Session::local_folder_editor();
+        peer.enable_folder_recovery(&data).unwrap();
+        assert_eq!(peer.execute("file.open", json!({"path":first})).unwrap()["readOnly"], true);
+        assert!(peer.execute("file.recoveryList", json!({})).unwrap().as_array().unwrap().is_empty());
+        fs::remove_dir(&descriptor).unwrap();
+        editor.execute("file.open", json!({"path":second})).unwrap();
+        assert!(!editor.is_dirty());
+        let candidates = editor.execute("file.recoveryList", json!({})).unwrap();
+        assert_eq!(candidates.as_array().unwrap().len(), 1);
+        assert_eq!(Path::new(candidates[0]["projectPath"].as_str().unwrap()), first.canonicalize().unwrap());
+        editor.execute("project.renameBin", json!({"bin":1,"name":"Only in B"})).unwrap();
+        editor.execute("file.open", json!({"path":b.join("opening.fcproj")})).unwrap();
+        assert_eq!(fs::read(second).unwrap(), b_head);
+        let candidates = editor.execute("file.recoveryList", json!({})).unwrap();
+        assert_eq!(candidates.as_array().unwrap().len(), 2);
+        for (n, c) in candidates.as_array().unwrap().iter().enumerate() {
+            let out = root.join(format!("{n}.fcproj"));
+            editor.execute("file.recover", json!({"id":c["id"],"path":out})).unwrap();
+            let p = filmcraft_format::decode(&fs::read(out).unwrap()).unwrap().project;
+            let name = if Path::new(c["projectPath"].as_str().unwrap()) == first.canonicalize().unwrap() { "Only in A" } else { "Only in B" };
+            assert_eq!(p.root.find_bin(filmcraft_project::BinId(1)).unwrap().name, name);
+        }
+    }
+
+    #[test]
+    fn worker_checkpoints_without_an_explicit_flush_and_preserves_edits_after_save() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = fixture(tmp.path());
+        let data = tmp.path().join("data");
+        let mut s = Session::local_folder_editor();
+        s.enable_folder_recovery(&data).unwrap();
+        s.execute("file.open", json!({"path":path})).unwrap();
+        s.execute("project.renameBin", json!({"bin":1,"name":"Manual save"})).unwrap();
+        s.execute("file.save", json!({})).unwrap();
+        let manual = fs::read(&path).unwrap();
+        s.execute("project.renameBin", json!({"bin":1,"name":"After manual save"})).unwrap();
+        let expected = s.revision;
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let status = s.execute("file.autoSaveStatus", json!({})).unwrap();
+            if status["status"]["journaledRevision"] == expected {
+                break;
+            }
+            assert!(Instant::now() < deadline, "{status}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(s.is_dirty());
+        assert_eq!(fs::read(&path).unwrap(), manual);
+        drop(s);
+        let mut fresh = Session::local_folder_editor();
+        fresh.enable_folder_recovery(&data).unwrap();
+        fresh.execute("file.recover", json!({})).unwrap();
+        assert_eq!(fresh.project.root.find_bin(filmcraft_project::BinId(1)).unwrap().name, "After manual save");
+        assert!(fresh.is_dirty());
+        assert_eq!(fs::read(&path).unwrap(), manual);
+    }
+
+    #[test]
+    fn busy_changed_and_missing_folders_allow_independent_recovery() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let path = fixture(root);
+        let data = root.join("data");
+        let mut s = Session::local_folder_editor();
+        s.enable_folder_recovery(&data).unwrap();
+        s.execute("file.open", json!({"path":path})).unwrap();
+        s.execute("project.renameBin", json!({"bin":1,"name":"Unsaved name"})).unwrap();
+        s.execute("file.open", json!({"path":root.join("opening.fcproj")})).unwrap();
+        let candidate = s.execute("file.recoveryList", json!({})).unwrap()[0]["id"].clone();
+        let mut other = Session::local_folder_editor();
+        other.execute("file.open", json!({"path":path})).unwrap();
+        assert!(s.execute("file.recover", json!({"id":candidate})).is_err());
+        other.execute("project.renameBin", json!({"bin":1,"name":"New head"})).unwrap();
+        other.execute("file.save", json!({})).unwrap();
+        drop(other);
+        let new_head = fs::read(&path).unwrap();
+        assert!(s.execute("file.recover", json!({"id":candidate})).is_err());
+        assert_eq!(fs::read(&path).unwrap(), new_head);
+        fs::rename(path.parent().unwrap(), root.join("moved")).unwrap();
+        assert!(s.execute("file.recover", json!({"id":candidate})).is_err());
+        let dest = root.join("copy.fcproj");
+        fs::write(&dest, b"occupied").unwrap();
+        assert!(s.execute("file.recover", json!({"id":candidate,"path":dest})).is_err());
+        assert_eq!(fs::read(&dest).unwrap(), b"occupied");
+        fs::remove_file(&dest).unwrap();
+        s.execute("file.recover", json!({"id":candidate,"path":dest})).unwrap();
+        assert_eq!(
+            filmcraft_format::decode(&fs::read(dest).unwrap()).unwrap().project.root.find_bin(filmcraft_project::BinId(1)).unwrap().name,
+            "Unsaved name"
+        );
+        assert!(s.execute("file.recoveryList", json!({})).unwrap().as_array().unwrap().is_empty());
     }
 
     #[test]

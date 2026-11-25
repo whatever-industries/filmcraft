@@ -87,7 +87,12 @@ impl Checkpoint {
             return Err(invalid("recovery descriptor is too large"));
         }
         crate::atomic_write_no_follow(&dir.join(&next.payload), bytes)?;
-        commit(&dir.join(DESCRIPTOR), &descriptor)?;
+        if let Err(e) = commit(&dir.join(DESCRIPTOR), &descriptor) {
+            if prior.as_ref().is_none_or(|old| old.payload != next.payload) {
+                let _ = fs::remove_file(dir.join(&next.payload));
+            }
+            return Err(e);
+        }
         if let Some(old) = prior
             && old.payload != next.payload
         {
@@ -111,6 +116,52 @@ impl Checkpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn killed_between_payload_and_descriptor_recovers_previous_generation() {
+        use std::process::{Command, Stdio};
+        const CHILD: &str = "FILMCRAFT_TEST_INTERRUPTED_FOLDER_CHECKPOINT";
+        if let Some(dir) = std::env::var_os(CHILD) {
+            let dir = PathBuf::from(dir);
+            let old = Checkpoint::read(&dir).unwrap();
+            let bytes = crate::encode(&filmcraft_project::Project::new("Unpublished"), false);
+            Checkpoint::publish_with(&dir, old.source, 2, "Unpublished", &bytes, |_, _| {
+                fs::write(dir.join("payload-synced"), b"ready")?;
+                let mut release = String::new();
+                std::io::stdin().read_line(&mut release)?;
+                Err(io::Error::other("parent terminated"))
+            })
+            .unwrap_err();
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let source = Source::capture(dir, &digest(b"manual save")).unwrap();
+        let bytes = crate::encode(&filmcraft_project::Project::new("Acknowledged"), false);
+        Checkpoint::publish(dir, source, 1, "Acknowledged", &bytes).unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "project_folder::checkpoint::tests::killed_between_payload_and_descriptor_recovers_previous_generation"])
+            .env(CHILD, dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let start = std::time::Instant::now();
+        while !dir.join("payload-synced").exists() {
+            if start.elapsed() > std::time::Duration::from_secs(60) || child.try_wait().unwrap().is_some() {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("worker failed to reach descriptor publication");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let recovered = Checkpoint::read(dir).unwrap();
+        assert_eq!(recovered.generation, 1);
+        let bytes = recovered.document_at(dir, &dir.join("out.fcproj")).unwrap();
+        assert_eq!(crate::decode(&bytes).unwrap().project.name, "Acknowledged");
+    }
 
     #[test]
     fn interrupted_publication_keeps_previous_document_until_retry() {

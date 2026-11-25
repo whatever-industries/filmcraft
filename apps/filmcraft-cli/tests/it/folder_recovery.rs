@@ -23,8 +23,55 @@ fn batch(data: &Path, project: Option<&Path>, script: &[(&str, Value)]) -> Vec<V
     String::from_utf8(out.stdout).unwrap().lines().map(|l| serde_json::from_str::<Value>(l).unwrap()["result"].clone()).collect()
 }
 
+fn kill_after_checkpoints(data: &Path, manifest: &Path, commands: &[(&str, Value)]) {
+    let mut writer = super::filmcraft_command()
+        .args(["--folder-recovery", "--data-dir"])
+        .arg(data)
+        .arg("--project")
+        .arg(manifest)
+        .args(["run", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = writer.stdin.take().unwrap();
+    for (id, params) in commands {
+        writeln!(input, "{}", json!({"id":id,"params":params})).unwrap();
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stdout = writer.stdout.take().unwrap();
+    let count = commands.len();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().take(count) {
+            if tx.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    let mut responses = Vec::new();
+    for _ in commands {
+        match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(line) => responses.push(serde_json::from_str::<Value>(&line).unwrap()),
+            Err(_) => break,
+        }
+    }
+    writer.kill().ok();
+    writer.wait().unwrap();
+    assert!(responses.iter().all(|v| v["ok"] == true) && responses.len() == count, "{responses:?}");
+    assert!(responses.last().unwrap()["result"]["checkpointRevision"].is_u64());
+}
+
 #[test]
 fn killed_folder_writer_recovers_clip_in_fresh_cli_without_publishing_it() {
+    crash_case(false);
+}
+
+#[test]
+fn killed_writer_restores_saved_deletion_after_undo() {
+    crash_case(true);
+}
+
+fn crash_case(undo_delete: bool) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let data = root.join("user");
@@ -37,45 +84,31 @@ fn killed_folder_writer_recovers_clip_in_fresh_cli_without_publishing_it() {
     let clip = doc.pointer_mut(track).unwrap();
     clip["extension"] = json!({"nested":[null,{"camera":4}]});
     let original = clip.clone();
+    let time = original["duration"].as_i64().unwrap();
+    let seq = &mut doc["project"]["items"]["21"]["kind"]["Sequence"]["video_tracks"][0];
+    let track_id = seq["id"].clone();
+    let mut neighbor = original.clone();
+    neighbor["id"] = 810001.into();
+    neighbor["start"] = (time * 3).into();
+    neighbor["extension"] = json!({"owner":"neighbor"});
+    seq["items"].as_array_mut().unwrap().push(neighbor.clone());
+    doc["project"]["next_id"] = 820000.into();
+    let media = &mut doc["project"]["items"]["5"]["kind"]["Media"];
+    media["media"] = json!({"File":{"path":"offline/shot.mov"}});
+    media["proxy"] = json!({"File":{"path":"offline/shot-proxy.mov"}});
     fs::write(&stock, serde_json::to_vec(&doc).unwrap()).unwrap();
     filmcraft_format::project_folder::pack(&stock, &folder, filmcraft_format::atomic_write_new).unwrap();
     let manual = fs::read(&manifest).unwrap();
-    let mut writer = super::filmcraft_command()
-        .args(["--folder-recovery", "--data-dir"])
-        .arg(&data)
-        .arg("--project")
-        .arg(&manifest)
-        .args(["run", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut input = writer.stdin.take().unwrap();
-    let track_id = &doc["project"]["items"]["21"]["kind"]["Sequence"]["video_tracks"][0]["id"];
-    let time = original["duration"].as_i64().unwrap();
-    for (id, params) in
-        [("timeline.move", json!({"moves":[{"clip":original["id"],"track":track_id,"time":time}],"linked":false})), ("file.autoSaveNow", json!({}))]
-    {
-        writeln!(input, "{}", json!({"id":id,"params":params})).unwrap();
+    let mut commands = if undo_delete {
+        vec![("timeline.delete", json!({"clip":original["id"]})), ("file.save", json!({})), ("edit.undo", json!({}))]
+    } else {
+        vec![("timeline.move", json!({"moves":[{"clip":original["id"],"track":track_id,"time":time}],"linked":false}))]
+    };
+    commands.push(("file.autoSaveNow", json!({})));
+    kill_after_checkpoints(&data, &manifest, &commands);
+    if !undo_delete {
+        assert_eq!(fs::read(&manifest).unwrap(), manual);
     }
-    // A bounded acknowledgement from the actual command stream, then kill without shutdown.
-    let (tx, rx) = std::sync::mpsc::channel();
-    let stdout = writer.stdout.take().unwrap();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().take(2) {
-            if tx.send(line.unwrap()).is_err() {
-                break;
-            }
-        }
-    });
-    let ack = (0..2).map(|_| rx.recv_timeout(std::time::Duration::from_secs(20))).collect::<Result<Vec<_>, _>>();
-    writer.kill().ok();
-    writer.wait().unwrap();
-    drop(input);
-    for line in ack.expect("writer did not acknowledge checkpoint before termination") {
-        assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["ok"], true, "{line}");
-    }
-    assert_eq!(fs::read(&manifest).unwrap(), manual);
     let before = root.join("reader.fcproj");
     batch(&data, Some(&manifest), &[("file.saveCopy", json!({"path":before}))]);
     let read = |p: &Path| -> Value {
@@ -83,15 +116,31 @@ fn killed_folder_writer_recovers_clip_in_fresh_cli_without_publishing_it() {
         filmcraft_format::decode(&b).unwrap();
         serde_json::from_slice(&b).unwrap()
     };
-    assert_eq!(read(&before).pointer(track).unwrap(), &original);
+    assert_eq!(read(&before).pointer(track).unwrap(), if undo_delete { &neighbor } else { &original });
     let list = batch(&data, None, &[("file.recoveryList", json!({}))]);
     assert_eq!(list[0].as_array().unwrap().len(), 1);
     let recovered = root.join("recovered.fcproj");
-    batch(&data, None, &[("file.recover", json!({"id":list[0][0]["id"]})), ("file.saveCopy", json!({"path":recovered})), ("file.save", json!({}))]);
+    batch(
+        &data,
+        None,
+        &[
+            ("file.recover", json!({"id":list[0][0]["id"]})),
+            ("project.renameBin", json!({"bin":1,"name":"Recovered edit"})),
+            ("file.saveCopy", json!({"path":recovered})),
+            ("file.save", json!({})),
+        ],
+    );
     let mut moved = original;
-    moved["start"] = time.into();
+    if !undo_delete {
+        moved["start"] = time.into();
+    }
     assert_eq!(read(&recovered).pointer(track).unwrap(), &moved);
     let reopened = root.join("reopened.fcproj");
     batch(&data, Some(&manifest), &[("file.saveCopy", json!({"path":reopened}))]);
-    assert_eq!(read(&reopened).pointer(track).unwrap(), &moved);
+    let checked = read(&reopened);
+    assert_eq!(checked.pointer(track).unwrap(), &moved);
+    assert_eq!(checked["project"]["items"]["21"]["kind"]["Sequence"]["video_tracks"][0]["items"][1], neighbor);
+    for key in ["media", "proxy"] {
+        assert_eq!(checked["project"]["items"]["5"]["kind"]["Media"][key], doc["project"]["items"]["5"]["kind"]["Media"][key]);
+    }
 }

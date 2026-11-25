@@ -37,17 +37,12 @@ impl FolderJournal {
         Ok(Self { worker: Some(worker), source, last_sent: None })
     }
 
-    fn sync(&mut self, draft: super::folder_edit::Draft, project: Arc<filmcraft_project::Project>, revision: u64, dirty: bool) {
-        let Some(worker) = &mut self.worker else { return };
-        if self.last_sent == Some((revision, dirty)) {
-            return;
+    pub(super) fn verify_location(&self, folder: &FolderSnapshot) -> Result<()> {
+        let current = Source::capture(folder.directory(), &self.source.head).map_err(error)?;
+        if current != self.source {
+            return Err(error("the open project folder has been replaced"));
         }
-        if dirty {
-            worker.send_folder(project, revision, draft);
-        } else {
-            worker.send_clean();
-        }
-        self.last_sent = Some((revision, dirty));
+        Ok(())
     }
 }
 
@@ -99,17 +94,27 @@ impl Session {
     }
 
     pub(super) fn sync_folder_recovery(&mut self) {
-        let dirty = self.is_dirty();
-        let Some(f) = self.editing_folder.as_ref() else { return };
-        let Some(j) = &f.journal else { return };
-        if j.last_sent == Some((self.revision, dirty)) {
+        let state = (self.revision, self.is_dirty());
+        let Some(folder) = self.editing_folder.as_ref() else { return };
+        let Some(journal) = &folder.journal else { return };
+        if journal.last_sent == Some(state) {
             return;
         }
-        let mut source = j.source.clone();
-        source.head = f.snapshot.revision().into();
-        let draft = crate::folder_edit::Draft { source, baseline: f.baseline.clone(), view: self.project_view() };
-        if let Some(j) = self.editing_folder.as_mut().and_then(|f| f.journal.as_mut()) {
-            j.sync(draft, self.project.clone(), self.revision, dirty);
+        let draft = state.1.then(|| {
+            let mut source = journal.source.clone();
+            source.head = folder.snapshot.revision().into();
+            crate::folder_edit::Draft { source, baseline: folder.baseline.clone(), view: self.project_view() }
+        });
+        if let Some(journal) = self.editing_folder.as_mut().and_then(|f| f.journal.as_mut())
+            && let Some(worker) = &mut journal.worker
+        {
+            worker.drain_events();
+            if let Some(draft) = draft {
+                worker.send_folder(self.project.clone(), self.revision, draft);
+            } else {
+                worker.send_clean();
+            }
+            journal.last_sent = Some(state);
         }
     }
 
@@ -145,15 +150,22 @@ impl Session {
                 continue;
             }
             let id = dir.file_name().and_then(|s| s.to_str());
+            let saved = dir
+                .join(DESCRIPTOR)
+                .symlink_metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis());
             match claim(&dir) {
                 Ok(c) => entries.push(
-                    json!({"id":id,"projectPath":c.checkpoint.source.manifest,"projectName":c.checkpoint.project_name,"revision":c.checkpoint.generation}),
+                    json!({"id":id,"savedUnixMs":saved,"projectPath":c.checkpoint.source.manifest,"projectName":c.checkpoint.project_name,"revision":c.checkpoint.generation}),
                 ),
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::NotFound => continue,
                 Err(e) => entries.push(json!({"id":id,"error":e.to_string()})),
             }
         }
-        entries.sort_by(|a, b| b["id"].as_str().cmp(&a["id"].as_str()));
+        entries.sort_by(|a, b| b["savedUnixMs"].as_u64().cmp(&a["savedUnixMs"].as_u64()).then_with(|| b["id"].as_str().cmp(&a["id"].as_str())));
         Ok(json!(entries))
     }
 
@@ -218,6 +230,9 @@ impl Session {
         let bytes = c.document_at(&candidate.dir, &path).map_err(error)?;
         self.flush_folder_recovery()?;
         let journal = FolderJournal::start(self.folder_recovery.as_ref().ok_or_else(|| error("disabled"))?, &snapshot)?;
+        if !journal.source.matches(&c.source) {
+            return Err(error(independent));
+        }
         let path_text = path.to_str().ok_or_else(|| error("non-UTF-8 project path"))?;
         let previous = self.editing_folder.take();
         if let Err(e) = crate::commands::open_bytes(self, path_text, &bytes) {

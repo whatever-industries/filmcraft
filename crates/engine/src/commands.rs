@@ -2034,6 +2034,9 @@ fn build() -> Vec<CommandSpec> {
             if s.folder_recovery.is_some() {
                 return s.recover_folder_candidate(p);
             }
+            if p.get("path").is_some() {
+                return Err(bad("file.recover", "an independent recovery path requires folder recovery mode"));
+            }
             recover(s, str_p(p, "id"))
         }),
         cmd!("file.discardRecovery", "Discard Unsaved Changes", [], None, r#"{"id":str?,"all":bool?}"#, has_recovery, |s, p| {
@@ -2080,6 +2083,9 @@ fn build() -> Vec<CommandSpec> {
         cmd!("file.autoSaveNow", "Auto Save Now", [], None, "{}", always, |s, _| {
             #[cfg(not(target_arch = "wasm32"))]
             if s.folder_recovery.is_some() {
+                if !s.editing_folder.as_ref().is_some_and(|f| f.journal.is_some()) {
+                    return Err(bad("file.autoSaveNow", "open a writable project folder to checkpoint its edits"));
+                }
                 return Ok(json!({"checkpointRevision":s.flush_folder_recovery()?}));
             }
             let per = s.persistence.as_ref().ok_or_else(|| EngineError::Other("auto-save is not running in this session".into()))?;

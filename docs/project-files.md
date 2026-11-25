@@ -173,6 +173,33 @@ standard exports from the folder session. Undoing a saved deletion restores the 
 extra fields along with its timing and edits. Saving again records that restoration as
 a new revision. Redo in the same session can remove the clip again.
 
+### Recover unsaved project-folder edits
+
+Start a local CLI session with recovery enabled. The data directory holds private checkpoints and should live outside the project folder.
+
+```sh
+filmcraft-cli --folder-recovery --data-dir ./editor-data --project edit-folder/project.fcmod run -
+```
+
+Send one JSON command per line. The background worker periodically checkpoints unsaved edits.
+`{"id":"file.autoSaveNow"}` waits for the current folder checkpoint and returns its edit revision.
+Other readers see the last manual save until you run `file.save`. A writable folder owns its
+own journal, including when two projects have the same name.
+
+After an interruption, use the same data directory to find and recover the draft:
+
+```sh
+filmcraft-cli --folder-recovery --data-dir ./editor-data exec file.recoveryList
+filmcraft-cli --folder-recovery --data-dir ./editor-data run -
+```
+
+In the second session, send `{"id":"file.recover","params":{"id":"RECOVERY_ID"}}` to open
+a dirty draft and `{"id":"file.save"}` to publish it. If the original folder moved, has a
+newer save, or has another writer, add `"path":"rescued.fcproj"` to the recovery parameters
+to write an independent file. Choose an unoccupied destination. The checkpoint preserves
+project metadata, clip extensions and media references. The media files remain in place.
+`file.discardRecovery` with a candidate ID discards that draft.
+
 ### Recover a sequence
 
 Run `project_folder history FOLDER` to list revision numbers and digests, newest first.
