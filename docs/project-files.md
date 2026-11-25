@@ -134,6 +134,21 @@ Folder layout version 1 accepts at most 100,000 bin and item records, a 16 MiB m
 and 256 MiB of combined record data. A standard input or export must also fit FilmCraft's
 ordinary project size limit.
 
+### Incremental saves in the modular fork
+
+`project_folder checkout FOLDER NEW_FILE.fcproj` exports the current snapshot and prints
+its revision digest. Edit the exported file, then run
+`project_folder save FOLDER BASE_REVISION EDITED.fcproj` with that digest. A successful
+save prints the next digest. An unchanged save returns the same digest. A stale or busy
+writer gets an error and retains its edited file.
+
+On a local filesystem the writer holds an OS lock across the revision check and commit.
+Changed records and the previous manifest are written first. Replacing the current manifest
+commits the entire edit, including moves between bins. Changed bin and item records acquire
+an internal UTC edit time and revision number. Imported edit times start unknown.
+History accumulates in the folder. Each save still reads and validates the complete project.
+Shared/network filesystem locking requires separate qualification.
+
 ## Saving is atomic
 
 Every write of a project file, auto-save, recovery snapshot or preferences file goes through
