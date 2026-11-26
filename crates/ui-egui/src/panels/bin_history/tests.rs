@@ -71,3 +71,29 @@ fn pending_comparison_allows_back_close_and_switching_bins() {
     assert!(h.query_by_label("To · 1 New first").is_none());
     assert!(h.state().ui.project_panel.history_clipboard.is_none());
 }
+
+#[test]
+fn project_history_runs_retention_preview_with_the_open_reader() {
+    let temp = tempfile::tempdir().unwrap();
+    let stock = temp.path().join("source.fcproj");
+    let folder = temp.path().join("folder");
+    std::fs::write(&stock, include_bytes!("../../../../format/tests/fixtures/v1-edit.fcproj")).unwrap();
+    pack(&stock, &folder, filmcraft_format::atomic_write_new).unwrap();
+    let mut session = Session::desktop_project_editor(AutosaveConfig::new(temp.path().join("profile"))).unwrap();
+    session.execute("file.open", json!({"path":folder.join("project.fcmod")})).unwrap();
+    let mut app = FilmcraftApp::new(session);
+    open(&mut app, None);
+    let mut h = Harness::builder().with_size(egui::vec2(1000.0, 700.0)).build_ui_state(|ui, app| show(app, ui.ctx()), app);
+    h.run_steps(3);
+    h.get_by_label("Preview History Retention").click();
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while h.query_by_label("Confirmed reclaimable").is_none() {
+        assert!(std::time::Instant::now() < deadline);
+        h.run_steps(1);
+        std::thread::yield_now();
+    }
+    h.get_by_label("Back to Project History").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Preview History Retention").is_some());
+    assert!(h.query_by_label("Confirmed reclaimable").is_none());
+}

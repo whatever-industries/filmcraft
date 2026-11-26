@@ -95,6 +95,12 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             crate::bin_history::find_saved_item_uses,
         ),
         #[cfg(not(target_arch = "wasm32"))]
+        query("project.retentionPreview", "Preview History Retention", &[], None, r#"{"keepLatest":int}"#, always, |s, p| {
+            let keep = serde_json::from_value(p["keepLatest"].clone()).map_err(|_| bad("project.retentionPreview", "keepLatest must be a positive integer"))?;
+            let report = s.prepare_retention_preview(keep)?()?;
+            serde_json::to_value(report).map_err(|e| crate::EngineError::Other(e.to_string()))
+        }),
+        #[cfg(not(target_arch = "wasm32"))]
         query("project.binHistory", "Bin History", &[], None, r#"{"revision":digest?,"bin":id?}"#, always, crate::bin_history::browse),
         #[cfg(not(target_arch = "wasm32"))]
         query(

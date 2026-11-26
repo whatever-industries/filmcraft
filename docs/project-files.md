@@ -361,7 +361,11 @@ Pins live in `revision-pins.json` alongside the project manifest. A separate loc
 
 ### Preview history retention
 
-Run `project_folder retention-preview FOLDER KEEP_LATEST` to see what depends on each stored record. Use a positive number of recent saves, including the current one. Milestones are included automatically. Add `--reader REVISION` for each known reader or checkout base and `--draft SESSION_DIRECTORY` for each known private checkpoint. Both options are repeatable. The command checks each supplied draft descriptor against the original project folder’s identity.
+In a modular project's Project panel, open **Project History → Preview History Retention**. The first preview keeps the latest save plus pins and local dependencies. Adjust **Recent saves to keep** and choose **Run preview** to try another policy. The scan runs in the background. The report counts distinct revision bases held by the current editor, open bins and Undo/Redo, and matching checkpoints in the current recovery profile, including journals left by an interrupted session. Other computers, profiles, and unsaved work in other editors can have additional dependencies.
+
+The desktop engine query `project.retentionPreview` accepts `{"keepLatest":1}` and returns the per-save and per-file report. It uses the active project and profile. A checkpoint with unreadable metadata can prevent the scan from completing because the editor cannot establish which project it belongs to.
+
+For a standalone inspection, run `project_folder retention-preview FOLDER KEEP_LATEST` to see what depends on each stored record. Use a positive number of recent saves, including the current one. Milestones are included automatically. Add `--reader REVISION` for each known reader or checkout base and `--draft SESSION_DIRECTORY` for each known private checkpoint. Both options are repeatable. The command checks each supplied draft descriptor against the original project folder’s identity.
 
 The JSON lists saves newest first, their pin labels, and why each would be kept. For each stored member it reports the logical size, how many saves share it as a payload, whether it belongs to the manifest chain, and which holds apply. Each file counts once toward these totals:
 

@@ -312,3 +312,36 @@ fn read_only_editor_can_find_saved_uses_while_the_writer_has_a_draft() {
     reader.shutdown();
     writer.shutdown();
 }
+
+#[test]
+fn retention_preview_finds_local_crash_base_after_new_save_and_excludes_other_projects() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let mut child = start_writer(root);
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    let manifest = root.join("folder").join(ROOT);
+    let mut s = editor(root);
+    let reports = |s: &mut Session| s.execute("project.retentionPreview", json!({"keepLatest":1})).unwrap();
+    let base = open(&mut s, &manifest)["folderRevision"].as_str().unwrap().to_owned();
+    rename(&mut s, "New published revision");
+    s.execute("file.save", json!({})).unwrap();
+    let mut reader = editor(root);
+    assert_eq!(open(&mut reader, &manifest)["readOnly"], true);
+    let writer_report = reports(&mut s);
+    assert!(writer_report["saves"].as_array().unwrap().iter().any(|r| r["revision"] == base && r["holds"]["supplied_reader"] == true));
+    let before = reader.execute("file.recoveryList", json!({})).unwrap();
+    let report = reports(&mut reader);
+    assert_eq!(report["saves"][0]["holds"]["supplied_reader"], true);
+    let draft = report["saves"].as_array().unwrap().iter().find(|r| r["revision"] == base).unwrap();
+    assert_eq!(draft["holds"]["supplied_draft"], true);
+    assert_eq!(draft["holds"]["supplied_reader"], false);
+    assert_eq!(before, reader.execute("file.recoveryList", json!({})).unwrap());
+    assert!(reader.execute("project.retentionPreview", json!({"keepLatest":0})).is_err());
+    let backup = root.join("other-folder");
+    project_folder::backup::published_history(manifest.parent().unwrap(), &backup).unwrap();
+    open(&mut reader, &backup.join(ROOT));
+    assert!(reports(&mut reader)["saves"].as_array().unwrap().iter().all(|r| r["holds"]["supplied_draft"] == false));
+    open(&mut reader, &root.join("standard.fcproj"));
+    assert!(reader.execute("project.retentionPreview", json!({"keepLatest":1})).is_err());
+}

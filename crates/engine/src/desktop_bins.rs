@@ -1,5 +1,7 @@
 //! A local desktop holds one lease, Undo history and recovery worker per writable bin.
 //! The active bin uses the existing editor fields. Parking it keeps its lease and worker alive.
+mod retention;
+
 use crate::{
     EngineError, History, Result, Session,
     autosave::AutosaveConfig,

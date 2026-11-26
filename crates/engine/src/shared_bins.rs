@@ -63,6 +63,7 @@ impl Session {
             | "project.view.get"
             | "project.view.set"
             | "project.referenceClips"
+            | "project.retentionPreview"
             | "project.binHistory"
             | "project.compareBinVersions"
             | "project.previewExternalBin"

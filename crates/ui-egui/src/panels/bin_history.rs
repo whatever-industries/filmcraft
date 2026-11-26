@@ -1,6 +1,8 @@
 //! A pinned historical view, separate from the live bin selection and checkout.
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) mod exchange;
+#[cfg(not(target_arch = "wasm32"))]
+mod retention;
 mod uses;
 mod versions;
 mod worker;
@@ -42,6 +44,8 @@ pub struct Browser {
     live_revision: u64,
     comparison: Option<versions::Comparison>,
     uses: Option<uses::Uses>,
+    #[cfg(not(target_arch = "wasm32"))]
+    retention: Option<retention::Retention>,
     usage_index: Option<uses::Cache>,
     focus_item: Option<u64>,
     revision: Option<String>,
@@ -75,6 +79,8 @@ pub fn open(app: &mut FilmcraftApp, bin: Option<u64>) {
             live_revision: app.session.revision,
             comparison: None,
             uses: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            retention: None,
             usage_index: None,
             focus_item: None,
             revision: None,
@@ -116,6 +122,19 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
     .show(ctx, |ui| {
         if button(app, ui, "binHistory.close", tl!("Close")) || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             close = true;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(view) = &mut b.retention {
+            if button(app, ui, "retention.back", tl!("Back to Project History")) {
+                b.retention = None;
+            } else {
+                ui.heading(tl!("History Retention"));
+                view.show(app, ui, b.page["revisions"].as_array().map_or(1, Vec::len));
+            }
+            return;
+        } else if b.initial_bin.is_none() && b.page["revisions"].is_array() && button(app, ui, "binHistory.retention", tl!("Preview History Retention")) {
+            b.retention = Some(retention::Retention::open(app, ctx));
+            return;
         }
         if let (Some(uses), Some(revision)) = (&mut b.uses, &b.revision) {
             if button(app, ui, "binHistory.back", tl!("Back to Bin History")) {

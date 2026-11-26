@@ -674,3 +674,26 @@ fn compare_bin_versions_and_recover_five_frame_trim_after_reopen() {
     assert!(frame(&mut s, rescued, 7) == old_tail);
     assert!(frame(&mut s, cut, 7) != old_tail);
 }
+
+#[test]
+fn retention_preview_includes_parked_reader_after_publishing_from_another_bin() {
+    let temp = tempfile::tempdir().unwrap();
+    let manifest = fixture(temp.path());
+    let mut s = editor(temp.path());
+    open(&mut s, &manifest);
+    let base = s.editing_folder.as_ref().unwrap().snapshot.revision().to_owned();
+    rename(&mut s, 70, "First publish");
+    s.execute("file.save", json!({})).unwrap();
+    let first = s.editing_folder.as_ref().unwrap().snapshot.revision().to_owned();
+    rename(&mut s, 71, "Second publish");
+    s.execute("file.save", json!({})).unwrap();
+    let focus = s.focused_bin();
+    let report = s.execute("project.retentionPreview", json!({"keepLatest":1})).unwrap();
+    let rows = report["saves"].as_array().unwrap();
+    assert_ne!(report["head"], first);
+    for revision in [base, first] {
+        assert!(rows.iter().any(|r| r["revision"] == revision && r["holds"]["supplied_reader"] == true));
+    }
+    assert_eq!(s.focused_bin(), focus);
+    assert!(!s.is_dirty());
+}
