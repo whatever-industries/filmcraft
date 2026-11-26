@@ -292,6 +292,27 @@ The supported edits include renaming and reordering a checked-out bin and editin
 its directly filed sequences. Source records and project-wide structure have
 separate ownership requirements.
 
+#### Two-editor desktop trial
+
+On a single Mac with a local APFS volume, two native desktop instances with separate
+profiles edited different cuts in the same folder. The smaller fixture had two bins
+and two clips. The larger had 48 bins, one sequence per bin, and 1,152 clips sharing
+one offline source and proxy. The fork revision was `1a346037`. The independent
+reader was an unmodified FilmCraft 0.20.1 desktop built from `2d1d1b69`.
+
+| Exercise | Verified result |
+| --- | --- |
+| Trim different cuts, save A then B, and reverse the save order on the larger fixture | The standard export contained both trims and preserved every other clip. |
+| Open A’s bin in B, try a trim, then release in A and reopen in B | B showed **Read-only** and refused the trim. After handoff it showed **Writable** and edited the previously saved cut. |
+| Checkpoint A, kill its process, and save another cut in B | Restarting A recovered its private edit. B continued to see the published version until A explicitly saved. Both cuts then appeared in the export. |
+| Have B acquire the crashed editor’s bin before recovery | In-place recovery refused the busy bin. Recovery to a new file reproduced the draft at checkpoint time. The shared project kept B’s later edit. |
+| Open the published and recovered files in stock FilmCraft | Stock reported the expected clip and source IDs, starts, durations and source in-points. Original and proxy references still resolved to the same offline locations in a separate stock save. |
+
+The modular exports retained the fixture’s unknown clip fields. Stock FilmCraft
+0.20.1 omitted those fields when it wrote its own copy. Keep the modular project
+or its original export when those fields matter. Network leases, multi-machine
+reconnect and simultaneous edits within a sequence need separate trials.
+
 ### Recover a sequence
 
 Run `project_folder history FOLDER` to list revision numbers and digests, newest first.
