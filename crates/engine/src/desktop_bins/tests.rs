@@ -597,3 +597,80 @@ fn historical_batch_paste_plays_both_trims_and_preserves_proxy_after_reopen() {
         assert_ne!(s.project.item(alternate_source).unwrap().metadata.get("Comments"), s.project.item(saved_source).unwrap().metadata.get("Comments"));
     }
 }
+
+#[test]
+fn compare_bin_versions_and_recover_five_frame_trim_after_reopen() {
+    use crate::media_test_util::{make_movie, session_with};
+    use filmcraft_media::DemoScene;
+    let dir = tempfile::tempdir().unwrap();
+    let movie = dir.path().join("Interview.mov");
+    make_movie(&movie, DemoScene::Aurora, 160, 96, 12);
+    let (mut setup, sources, cut) = session_with(&[&movie]);
+    let source = sources[0];
+    let project = Arc::make_mut(&mut setup.project);
+    let cuts = project.add_bin("Cuts", None);
+    let recovered = project.add_bin("Recovered", None);
+    project.move_to_bin(&[cut], Some(cuts)).unwrap();
+    let stock = dir.path().join("draft.fcproj");
+    setup.execute("file.saveAs", json!({"path":stock})).unwrap();
+    let folder = dir.path().join("folder");
+    pack(&stock, &folder, filmcraft_format::atomic_write_new).unwrap();
+    let path = folder.join(ROOT);
+    let rate = setup.sequence_rate();
+    let frame = |s: &mut Session, id, n| {
+        s.execute("sequence.open", json!({"item":id})).unwrap();
+        let (img, offline) = s.try_render_program_with_offline_at(1.0, rate.tick_of(n)).unwrap();
+        assert!(offline.is_empty());
+        img.over_black_rgba8()
+    };
+    let last_shared = frame(&mut setup, cut, 6);
+    let old_tail = frame(&mut setup, cut, 7);
+    drop(setup);
+    let (mut snapshot, before) = filmcraft_format::project_folder::FolderSnapshot::open(&path).unwrap();
+    let mut project = filmcraft_format::decode(&before).unwrap().project;
+    project.root.find_bin_mut(cuts).unwrap().name = "Fine cuts".into();
+    let seq = project.sequence_mut(cut).unwrap();
+    for track in [&mut seq.video_tracks[0], &mut seq.audio_tracks[0]] {
+        assert_eq!(rate.frame_at(track.items[0].duration), 12);
+        track.items[0].duration = rate.tick_of(7);
+    }
+    snapshot.save(&before, &filmcraft_format::encode(&project, false)).unwrap();
+    drop(snapshot);
+    let mut s = editor(dir.path());
+    open(&mut s, &path);
+    let revs = s.execute("project.binHistory", json!({})).unwrap()["revisions"].clone();
+    let undo_depth = s.history.undo.len();
+    let revision = s.revision;
+    let summary = s.execute("project.compareBinVersions", json!({"bin":cuts,"to":revs[0][1]})).unwrap();
+    assert_eq!(summary["from"], revs[1][1]);
+    assert_eq!(summary["report"]["before_name"], "Cuts");
+    assert_eq!(summary["report"]["after_name"], "Fine cuts");
+    let report = s.execute("project.compareBinVersions", json!({"bin":cuts,"sequence":cut,"from":summary["from"],"to":summary["to"]})).unwrap();
+    let rows = report["report"]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|r| r["changes"] == json!(["trimmed"]) && r["before"]["durationFrames"] == 12 && r["after"]["durationFrames"] == 7));
+    assert_eq!((s.revision, s.history.undo.len()), (revision, undo_depth));
+    assert!(rows.iter().all(|r| ["track", "start", "sourceIn", "source"].iter().all(|k| r["before"][*k] == r["after"][*k])));
+    s.open_desktop_bin(recovered.0).unwrap();
+    let copy = s.execute("project.pasteFromHistory", json!({"epoch":s.document_epoch,"revision":report["from"],"bin":recovered,"items":[cut]})).unwrap();
+    let rescued: ItemId = serde_json::from_value(copy["items"][0].clone()).unwrap();
+    assert_ne!(rescued, cut);
+    let second = s.execute("project.pasteFromHistory", json!({"epoch":s.document_epoch,"revision":report["to"],"bin":recovered,"items":[cut]})).unwrap();
+    let short: ItemId = serde_json::from_value(second["items"][0].clone()).unwrap();
+    assert!(short != cut && short != rescued);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(s.project.item(short).is_none() && s.project.item(rescued).is_some());
+    s.execute("edit.redo", json!({})).unwrap();
+    s.execute("file.save", json!({})).unwrap();
+    drop(s);
+    let mut s = editor(dir.path());
+    open(&mut s, &path);
+    for (id, length) in [(cut, 7), (short, 7), (rescued, 12)] {
+        let clip = &s.project.sequence(id).unwrap().video_tracks[0].items[0];
+        assert_eq!(clip.item, source);
+        assert_eq!(rate.frame_at(clip.duration), length);
+        assert!(frame(&mut s, id, 6) == last_shared);
+    }
+    assert!(frame(&mut s, rescued, 7) == old_tail);
+    assert!(frame(&mut s, cut, 7) != old_tail);
+}

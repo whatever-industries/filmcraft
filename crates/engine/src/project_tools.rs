@@ -75,6 +75,16 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             new_search_bin,
         ),
         #[cfg(not(target_arch = "wasm32"))]
+        query(
+            "project.compareBinVersions",
+            "Compare Versions",
+            &[],
+            None,
+            r#"{"bin":id,"to":digest,"from":digest?,"sequence":id?}"#,
+            always,
+            crate::bin_history::compare_versions,
+        ),
+        #[cfg(not(target_arch = "wasm32"))]
         query("project.binHistory", "Bin History", &[], None, r#"{"revision":digest?,"bin":id?}"#, always, crate::bin_history::browse),
         #[cfg(not(target_arch = "wasm32"))]
         spec(

@@ -64,6 +64,7 @@ impl Session {
             | "project.view.set"
             | "project.referenceClips"
             | "project.binHistory"
+            | "project.compareBinVersions"
             | "sequence.inspect"
             | "source.inspect"
             | "sequence.open"
