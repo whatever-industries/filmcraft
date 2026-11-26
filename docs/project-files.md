@@ -364,7 +364,9 @@ recovery. Keep a separate backup for loss of the underlying volume.
 
 ### Find sequences that use a saved item
 
-Choose a revision digest from `project_folder history FOLDER` and the project item ID of the clip, subclip or sequence.
+In **Bin History**, right-click an item and choose **Find Uses**, or select one row and use the **Find Uses** button. Each result names a sequence that uses the item directly or indirectly. Choose its bin path to select the sequence in that same saved revision. From there, **Copy Selected Items** uses the ordinary history clipboard. If some records are unreadable, the panel flags the search as incomplete and shows the matches it could verify.
+
+For the command line, choose a revision digest from `project_folder history FOLDER` and the project item ID of the clip, subclip or sequence.
 
 ```sh
 project_folder find-uses FOLDER REVISION ITEM_ID

@@ -30,7 +30,7 @@ fn pending_comparison_allows_back_close_and_switching_bins() {
     let ctx = h.ctx.clone();
     let _blocker = h
         .state_mut()
-        .comparison_worker
+        .bin_history_worker
         .submit(&ctx, move || {
             gate.recv_timeout(Duration::from_secs(60)).map_err(|e| e.to_string())?;
             Ok(Value::Null)

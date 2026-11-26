@@ -1,24 +1,24 @@
-//! One read-only comparison worker per editor. A reply belongs only to its requesting view.
+//! One read-only bin history worker per editor. A reply belongs only to its requesting view.
 use serde_json::Value;
 use std::sync::{Arc, Mutex, mpsc};
 
-type Reply = Result<Value, String>;
+type Reply<T> = Result<T, String>;
 
 #[derive(Clone, Debug)]
-pub(super) struct Pending(Arc<Mutex<mpsc::Receiver<Reply>>>);
+pub(super) struct Pending<T = Value>(Arc<Mutex<mpsc::Receiver<Reply<T>>>>);
 
-impl PartialEq for Pending {
+impl<T> PartialEq for Pending<T> {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
-impl Pending {
-    pub fn poll(&self) -> Option<Reply> {
+impl<T> Pending<T> {
+    pub fn poll(&self) -> Option<Reply<T>> {
         match self.0.lock().unwrap_or_else(|e| e.into_inner()).try_recv() {
             Ok(reply) => Some(reply),
             Err(mpsc::TryRecvError::Empty) => None,
-            Err(mpsc::TryRecvError::Disconnected) => Some(Err(tl!("Comparison worker stopped").to_owned())),
+            Err(mpsc::TryRecvError::Disconnected) => Some(Err(tl!("Bin history worker stopped").to_owned())),
         }
     }
 }
@@ -34,11 +34,11 @@ pub(crate) struct Worker {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Worker {
-    pub(super) fn submit(&mut self, ctx: &egui::Context, read: impl FnOnce() -> Reply + Send + 'static) -> Result<Pending, String> {
+    pub(super) fn submit<T: Send + 'static>(&mut self, ctx: &egui::Context, read: impl FnOnce() -> Reply<T> + Send + 'static) -> Result<Pending<T>, String> {
         if self.jobs.is_none() {
             let (tx, rx) = mpsc::channel::<Job>();
             std::thread::Builder::new()
-                .name("bin-comparison".into())
+                .name("bin-history".into())
                 .spawn(move || {
                     for job in rx {
                         job();
@@ -60,7 +60,7 @@ impl Worker {
             Ok(pending)
         } else {
             self.jobs = None;
-            Err(tl!("Comparison worker stopped").to_owned())
+            Err(tl!("Bin history worker stopped").to_owned())
         }
     }
 }
@@ -80,7 +80,7 @@ mod tests {
             .submit(&ctx, move || {
                 started.send(()).unwrap();
                 gate.recv_timeout(Duration::from_secs(30)).unwrap();
-                Err("old bin is damaged".into())
+                Err::<Value, _>("old bin is damaged".into())
             })
             .unwrap();
         running.recv_timeout(Duration::from_secs(30)).unwrap();

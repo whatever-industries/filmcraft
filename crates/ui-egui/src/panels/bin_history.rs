@@ -1,4 +1,5 @@
 //! A pinned historical view, separate from the live bin selection and checkout.
+mod uses;
 mod versions;
 mod worker;
 use crate::FilmcraftApp;
@@ -38,6 +39,8 @@ pub struct Browser {
     initial_bin: Option<u64>,
     live_revision: u64,
     comparison: Option<versions::Comparison>,
+    uses: Option<uses::Uses>,
+    focus_item: Option<u64>,
     revision: Option<String>,
     page: Value,
     selected: BTreeSet<u64>,
@@ -68,6 +71,8 @@ pub fn open(app: &mut FilmcraftApp, bin: Option<u64>) {
             initial_bin: bin,
             live_revision: app.session.revision,
             comparison: None,
+            uses: None,
+            focus_item: None,
             revision: None,
             page,
             selected: BTreeSet::new(),
@@ -82,6 +87,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
         return;
     }
     if b.comparison.is_none()
+        && b.uses.is_none()
         && b.live_revision != app.session.revision
         && let (Some(hash), Some(bin)) = (&b.revision, b.page["bin"].as_u64())
         && let Some(page) = query(app, json!({"revision":hash,"bin":bin}))
@@ -92,7 +98,9 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
     let mut visible = true;
     let mut next = None;
     let mut close = false;
-    let response = egui::Window::new(if b.comparison.is_some() {
+    let response = egui::Window::new(if b.uses.is_some() {
+        tl!("Find Uses")
+    } else if b.comparison.is_some() {
         tl!("Compare Versions")
     } else if b.initial_bin.is_some() {
         tl!("Bin History")
@@ -104,6 +112,24 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
     .show(ctx, |ui| {
         if button(app, ui, "binHistory.close", tl!("Close")) || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             close = true;
+        }
+        if let (Some(uses), Some(revision)) = (&mut b.uses, &b.revision) {
+            if button(app, ui, "binHistory.back", tl!("Back to Bin History")) {
+                b.uses = None;
+            } else if let Some((bin, item)) = uses.show(app, ui, revision) {
+                match app.session.execute("project.binHistory", json!({"revision":revision,"bin":bin})) {
+                    Ok(page) if page["rows"].as_array().is_some_and(|rows| rows.iter().any(|row| row["item"].as_u64() == Some(item))) => {
+                        b.page = page;
+                        b.live_revision = app.session.revision;
+                        b.selected = BTreeSet::from([item]);
+                        b.focus_item = Some(item);
+                        b.uses = None;
+                    }
+                    Ok(_) => uses.error = Some(tl!("Sequence unavailable in this saved bin").to_owned()),
+                    Err(e) => uses.error = Some(e.to_string()),
+                }
+            }
+            return;
         }
         if let Some(comparison) = &mut b.comparison {
             if button(app, ui, "binHistory.back", tl!("Back to Bin History")) {
@@ -199,6 +225,19 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                             let mut selected = b.selected.contains(&id);
                             let r = ui.checkbox(&mut selected, &label);
                             app.auto.add(&format!("binHistory.item.{id}"), r.rect, &label);
+                            if b.focus_item == Some(id) {
+                                r.request_focus();
+                                r.scroll_to_me(Some(egui::Align::Center));
+                                b.focus_item = None;
+                            }
+                            r.context_menu(|ui| {
+                                if button(app, ui, &format!("binHistory.findUses.{id}"), tl!("Find Uses"))
+                                    && let Some(revision) = &b.revision
+                                {
+                                    b.uses = Some(uses::Uses::open(app, ctx, revision, id, name));
+                                    ui.close();
+                                }
+                            });
                             if r.changed() {
                                 if selected {
                                     b.selected.insert(id);
@@ -224,6 +263,13 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                 .filter_map(|row| row["item"].as_u64())
                 .filter(|id| b.selected.contains(id))
                 .collect();
+            if let [id] = selected.as_slice()
+                && button(app, ui, "binHistory.findSelectedUses", tl!("Find Uses"))
+                && let Some(revision) = &b.revision
+                && let Some(row) = rows.iter().find(|row| row["item"].as_u64() == Some(*id))
+            {
+                b.uses = Some(uses::Uses::open(app, ctx, revision, *id, row["name"].as_str().unwrap_or_default()));
+            }
             let r = ui.add_enabled(!selected.is_empty(), egui::Button::new(tl!("Copy Selected Items")));
             app.auto.add("binHistory.copy", r.rect, tl!("Copy Selected Items"));
             if r.clicked()

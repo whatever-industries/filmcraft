@@ -95,10 +95,10 @@ pub(super) fn paste(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 pub(super) fn find_saved_item_uses(s: &mut Session, p: &Value) -> Result<Value> {
-    let folder = s.history_folder()?;
     let revision = p["revision"].as_str().ok_or_else(|| error("expected a saved revision"))?;
     let item = p["item"].as_u64().ok_or_else(|| error("expected an item ID"))?;
-    let usage = filmcraft_format::project_folder::usage::find_uses(folder, revision, item).map_err(error)?;
+    let read = s.prepare_saved_item_uses(revision, item)?;
+    let usage = read()?;
     serde_json::to_value(usage).map_err(error)
 }
 
@@ -109,6 +109,17 @@ pub(super) fn compare_versions(s: &mut Session, p: &Value) -> Result<Value> {
 impl Session {
     fn history_folder(&self) -> Result<&std::path::Path> {
         Ok(self.editing_folder.as_ref().ok_or_else(|| error("open a modular project first"))?.snapshot.directory())
+    }
+
+    /// Pin the search to this document and save before handing it to a worker.
+    pub fn prepare_saved_item_uses(
+        &self,
+        revision: &str,
+        item: u64,
+    ) -> Result<impl FnOnce() -> Result<filmcraft_format::project_folder::usage::Usage> + Send + 'static + use<>> {
+        let folder = self.history_folder()?.to_owned();
+        let revision = revision.to_owned();
+        Ok(move || filmcraft_format::project_folder::usage::find_uses(&folder, &revision, item).map_err(error))
     }
 
     /// Capture this document's location so a background reader never borrows the live session.

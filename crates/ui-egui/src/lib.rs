@@ -227,7 +227,7 @@ pub struct FilmcraftApp {
     pub hooks: HostHooks,
     pub dialog: Option<Dialog>,
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) comparison_worker: panels::bin_history::Worker,
+    pub(crate) bin_history_worker: panels::bin_history::Worker,
     pub(crate) updates_rt: updates_ui::Runtime,
     pub file_dialogs: panels::file_dialogs::FileDialogState,
     /// The native file dialog the host is showing ([`Self::pick`]).

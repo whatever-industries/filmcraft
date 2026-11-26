@@ -1965,3 +1965,69 @@ fn compare_versions_browses_live_fields_and_pastes_pinned_source() {
     assert_eq!(old.metadata["Unit"], "West");
     assert_eq!(project.item(source).unwrap().name, "Interview B");
 }
+
+#[test]
+fn find_uses_jumps_to_the_filed_cut_in_the_pinned_save() {
+    use filmcraft_format::project_folder::pack;
+    use filmcraft_project::BinId;
+    let temp = tempfile::tempdir().unwrap();
+    let mut project = filmcraft_format::decode(include_bytes!("../../../format/tests/fixtures/v1-edit.fcproj")).unwrap().project;
+    let cuts = project.add_bin("Original Cuts", None);
+    project.move_to_bin(&[ItemId(21)], Some(cuts)).unwrap();
+    let cut_name = project.item(ItemId(21)).unwrap().name.clone();
+    let source = project.item(ItemId(5)).unwrap().clone();
+    let unused = project.add_item("Independent copy", source.label, source.kind, Some(BinId(1)));
+    let stock = temp.path().join("source.fcproj");
+    let folder = temp.path().join("folder");
+    std::fs::write(&stock, filmcraft_format::encode(&project, false)).unwrap();
+    pack(&stock, &folder, filmcraft_format::atomic_write_new).unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(folder.join("project.fcmod")).unwrap()).unwrap();
+    let saved_cut_bin = manifest["bins"].as_array().unwrap().iter().find(|row| row[0] == cuts.0).unwrap()[1].as_str().unwrap();
+    let mut session = Session::desktop_project_editor(filmcraft_engine::autosave::AutosaveConfig::new(temp.path().join("profile"))).unwrap();
+    session.execute("file.open", json!({"path":folder.join("project.fcmod")})).unwrap();
+    let mut d = Driver::with(session);
+    d.ok("ui.panel.show", json!({"panel":"Project"}));
+    d.ok("ui.set", json!({"focused":"Project"}));
+    d.ok("ui.menu.invoke", json!({"id":"window.maximizeFrame"}));
+    d.frames(2);
+    d.ok("ui.click", json!({"id":"project.bin.1","button":"right"}));
+    d.click("project.binMenu.history");
+    d.click("binHistory.revision.0");
+    d.click(&format!("binHistory.item.{}", unused.0));
+    d.click("binHistory.findSelectedUses");
+    d.wait_for("binHistory.noUses");
+    assert_eq!(d.label("binHistory.noUses"), "No sequences use this item in this save");
+    d.click("binHistory.back");
+
+    // The context command belongs to the clicked row, even with a different clip selected.
+    d.ok("ui.click", json!({"id":"binHistory.item.5","button":"right"}));
+    d.click("binHistory.findUses.5");
+    d.exec("project.renameBin", json!({"bin":cuts,"name":"Current Cuts"}));
+    d.exec("file.save", json!({}));
+    let revision = d.app().session.revision;
+    let sequence = d.app().session.state.active_sequence;
+    let jump = format!("binHistory.use.21.{}", cuts.0);
+    d.wait_for(&jump);
+    assert!(d.label(&jump).contains("Original Cuts"));
+    assert!(d.parts().0.query_by_label(&format!("{cut_name} #21 · Direct use")).is_some());
+    d.snapshot("saved-clip-find-uses", None);
+    d.click(&jump);
+    assert_eq!(d.label("binHistory.item.21"), cut_name);
+    assert!(d.has("binHistory.findSelectedUses"), "the matching cut is selected");
+    assert!(!d.has("binHistory.item.5"));
+    d.click("binHistory.bins");
+    assert!(d.label(&format!("binHistory.bin.{}", cuts.0)).contains("Original Cuts"));
+    assert_eq!(d.app().session.project.root.find_bin(cuts).unwrap().name, "Current Cuts");
+    assert_eq!(d.app().session.state.active_sequence, sequence);
+    assert_eq!(d.app().session.revision, revision);
+    assert!(!d.app().session.is_dirty());
+
+    // Damage only the older revision's cut-bin record. An incomplete scan cannot prove absence.
+    std::fs::remove_file(folder.join(saved_cut_bin)).unwrap();
+    d.click("binHistory.bin.1");
+    d.click(&format!("binHistory.item.{}", unused.0));
+    d.click("binHistory.findSelectedUses");
+    d.wait_for("binHistory.noUses");
+    assert_eq!(d.label("binHistory.noUses"), "No verified matches");
+    assert!(d.parts().0.query_by_label("Search incomplete").is_some());
+}

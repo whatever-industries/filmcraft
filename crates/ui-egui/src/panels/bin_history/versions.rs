@@ -117,7 +117,7 @@ impl Comparison {
                 params["sequence"] = seq.into();
             }
             let work = app.session.prepare_bin_comparison(params).map_err(|e| e.to_string());
-            match work.and_then(|read| app.comparison_worker.submit(ctx, move || read().map_err(|e| e.to_string()))) {
+            match work.and_then(|read| app.bin_history_worker.submit(ctx, move || read().map_err(|e| e.to_string()))) {
                 Ok(pending) => self.pending = Some(pending),
                 Err(e) => self.error = Some(e),
             }
