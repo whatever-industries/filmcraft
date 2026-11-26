@@ -1,9 +1,13 @@
 //! Select the save which introduced the preceding distinct state of this bin.
 use super::{Selection, Snapshot};
-use crate::project_folder::{bins::Entry, check_hash, digest, invalid, recovery};
-use std::{io, path::Path};
+use crate::project_folder::{bins::Entry, check_hash, invalid, recovery};
+use sha2::{Digest, Sha256};
+use std::{
+    io::{self, Write},
+    path::Path,
+};
 
-fn signature(mut snapshot: Snapshot) -> io::Result<String> {
+fn signature(mut snapshot: Snapshot) -> io::Result<[u8; 32]> {
     if let Some((key, message)) = snapshot.errors.first() {
         return Err(invalid(format!("{key:?}: {message}")));
     }
@@ -19,8 +23,14 @@ fn signature(mut snapshot: Snapshot) -> io::Result<String> {
             }
         }
     }
-    let records: Vec<_> = snapshot.records.into_iter().collect();
-    Ok(digest(&serde_json::to_vec(&(records, snapshot.sidecars))?))
+    let records: Vec<_> = snapshot.records.iter().collect();
+    let mut digest = Sha256::new();
+    {
+        let mut writer = io::BufWriter::new(&mut digest);
+        serde_json::to_writer(&mut writer, &(records, &snapshot.sidecars))?;
+        writer.flush()?;
+    }
+    Ok(digest.finalize().into())
 }
 
 pub fn previous(folder: &Path, selected: &str, bin: u64) -> io::Result<Option<String>> {
@@ -43,7 +53,7 @@ pub fn previous(folder: &Path, selected: &str, bin: u64) -> io::Result<Option<St
         let state = Snapshot::read(folder, manifest, Selection::Bin(bin))
             .and_then(signature)
             .map_err(|e| invalid(format!("Cannot establish bin history at {hash}: {e}")))?;
-        let selected_state = current.get_or_insert_with(|| state.clone());
+        let selected_state = current.get_or_insert(state);
         if previous.is_none() && *selected_state == state {
             return Ok(false);
         }

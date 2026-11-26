@@ -1,5 +1,4 @@
 //! Compare clip identity across all tracks. Retain unrecognized fields for fallback reporting.
-use super::without;
 use crate::project_folder::invalid;
 use filmcraft_project::SequenceSettings;
 use filmcraft_time::{Tick, format_timecode_frames};
@@ -20,9 +19,18 @@ pub(super) struct Cut {
     order: BTreeMap<u64, Vec<u64>>,
     other: Value,
 }
+fn without(mut value: Value, keys: &[&str]) -> Value {
+    if let Some(fields) = value.as_object_mut() {
+        for key in keys {
+            fields.remove(*key);
+        }
+    }
+    value
+}
+
 impl Cut {
     pub(super) fn read(item: &Value) -> io::Result<Self> {
-        let mut other = without(item, &["name"]);
+        let mut other = without(item.clone(), &["name"]);
         let seq = other.pointer_mut("/kind/Sequence").ok_or_else(|| invalid("expected a sequence"))?;
         let settings: SequenceSettings = serde::Deserialize::deserialize(&seq["settings"])?;
         settings.validate().map_err(invalid)?;
@@ -46,7 +54,7 @@ impl Cut {
                     let start_frame = rate.frame_at(Tick(start)).checked_add(origin).ok_or_else(|| invalid(format!("clip {id}: timecode overflow")))?;
                     let detail = json!({"track":track_id,"source":raw["item"],"start":start,"duration":duration,"sourceIn":source,
                         "startTimecode":tc(start_frame),"durationFrames":rate.frame_at(Tick(duration)), "rate":rate,"durationTimecode":tc(rate.frame_at(Tick(duration))),"sourceInAtSequenceRate":tc(rate.frame_at(Tick(source)))});
-                    let extra = without(&raw, &["id", "item", "start", "duration", "source_in"]);
+                    let extra = without(raw, &["id", "item", "start", "duration", "source_in"]);
                     if clips.insert(id, Clip { track: track_id, detail, extra }).is_some() {
                         return Err(invalid(format!("duplicate clip {id}")));
                     }

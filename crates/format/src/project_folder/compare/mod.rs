@@ -27,14 +27,10 @@ impl Selection {
     }
 }
 
-fn without(value: &Value, fields: &[&str]) -> Value {
-    let mut copy = value.clone();
-    if let Some(obj) = copy.as_object_mut() {
-        for field in fields {
-            obj.remove(*field);
-        }
-    }
-    copy
+fn without_children(bin: &Value) -> Value {
+    // The membership comparison already reports children, including their order.
+    let Some(fields) = bin.as_object() else { return bin.clone() };
+    Value::Object(fields.iter().filter(|(key, _)| *key != "children").map(|(key, value)| (key.clone(), value.clone())).collect())
 }
 
 fn same_except(left: &Value, right: &Value, fields: &[&str]) -> bool {
@@ -98,7 +94,7 @@ fn changes(a: &Snapshot, b: &Snapshot, selection: Selection, rows: &mut Vec<Valu
             if let (Some(left), Some(right)) = (old, new) {
                 // Bin membership and relative ordering have dedicated rows.
                 if let Entry::Bin(_) = key {
-                    row["fields"] = fields::details(Some(&without(left, &["children"])), Some(&without(right, &["children"])));
+                    row["fields"] = fields::details(Some(&without_children(left)), Some(&without_children(right)));
                 } else {
                     row["fields"] = fields::details(Some(left), Some(right));
                 }

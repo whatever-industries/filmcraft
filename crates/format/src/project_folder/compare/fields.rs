@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 pub(super) fn details(before: Option<&Value>, after: Option<&Value>) -> Value {
     let mut rows = Vec::new();
     walk("", before, after, &mut rows);
-    json!(rows)
+    Value::Array(rows)
 }
 
 fn display(v: &Value) -> Value {
