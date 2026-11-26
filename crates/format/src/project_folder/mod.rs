@@ -17,6 +17,7 @@ pub mod compare;
 pub mod exchange;
 mod history_luts;
 pub mod history_paste;
+pub mod media_availability;
 mod paths;
 pub mod recovery;
 pub mod revisions;

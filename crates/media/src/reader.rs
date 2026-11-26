@@ -61,6 +61,20 @@ fn open_nonblocking(path: &std::path::Path) -> io::Result<std::fs::File> {
     o.open(path)
 }
 
+/// Open a regular file read-only and return its length from the checked handle.
+pub fn open_regular_file(path: &std::path::Path) -> io::Result<(std::fs::File, u64)> {
+    let not_regular = || io::Error::new(io::ErrorKind::InvalidInput, format!("{} is not a regular file", path.display()));
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(not_regular());
+    }
+    let file = open_nonblocking(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(not_regular());
+    }
+    Ok((file, meta.len()))
+}
+
 /// Read a whole regular file. A FIFO, device or folder is refused, checked before opening (a named
 /// pipe with no writer would block the open) and again on the open handle, and at most the length
 /// the handle reports is read: a link to an endless source cannot fill memory, and a file that
@@ -72,16 +86,7 @@ pub fn read_regular_file(path: &std::path::Path) -> io::Result<Vec<u8>> {
 /// [`read_regular_file`], refusing a file larger than `max` bytes before it is read.
 pub fn read_regular_file_bounded(path: &std::path::Path, max: u64) -> io::Result<Vec<u8>> {
     use std::io::Read;
-    let not_regular = || io::Error::new(io::ErrorKind::InvalidInput, format!("{} is not a regular file", path.display()));
-    if !std::fs::metadata(path)?.is_file() {
-        return Err(not_regular());
-    }
-    let file = open_nonblocking(path)?;
-    let meta = file.metadata()?;
-    if !meta.is_file() {
-        return Err(not_regular());
-    }
-    let len = meta.len();
+    let (file, len) = open_regular_file(path)?;
     if len > max {
         return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{}: {len} bytes is over the {max} byte limit", path.display())));
     }

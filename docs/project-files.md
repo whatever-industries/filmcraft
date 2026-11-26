@@ -361,6 +361,14 @@ The resulting folder opens directly as a modular project. It retains revision ID
 
 Choose an unused destination outside the source folder. An error identifying a historical item can mean that an older save is damaged even when the current project still opens. If the process is interrupted, a destination without `project.fcmod` is incomplete. Retry with a fresh folder.
 
+### Check originals and proxies after restore
+
+Run `project_folder media-availability FOLDER REVISION` with a digest from `history`. The JSON report lists each media item once by ID, including unfiled sources. Its counts summarize which originals could be opened for reading, which items have only a readable proxy, which need relinking, which need inspection, and which are generated. Each row includes the saved paths and the editor’s Make Offline flag. An intentionally offline clip can still have a readable original.
+
+Paths are checked on this computer relative to the selected folder. A missing file, a path FilmCraft refuses to follow, and an access error have separate details. The check opens files read-only without decoding, fingerprinting or relinking them. For an image sequence it checks the stored frame path only. Media availability can change between runs on the same revision.
+
+Missing media is a valid result. If an item record is damaged, the command prints the readable rows and errors by item ID, then exits unsuccessfully. An unreadable revision or project envelope prevents the inventory from starting.
+
 ### Recover a sequence
 
 Run `project_folder history FOLDER` to list revision numbers and digests, newest first.

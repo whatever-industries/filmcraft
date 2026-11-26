@@ -585,3 +585,66 @@ fn backup_rejects_an_occupied_destination_and_damage_unique_to_an_older_save() {
     assert!(!fresh.exists());
     assert_eq!(fs::read(root).unwrap(), latest);
 }
+
+#[test]
+fn availability_follows_the_selected_save_and_the_restored_folder() {
+    use converter::media_availability::{Availability::*, inspect};
+    let tmp = tempdir().unwrap();
+    let original = tmp.path().join("production");
+    let restored = tmp.path().join("restored");
+    fs::create_dir(&original).unwrap();
+    fs::create_dir(&restored).unwrap();
+    let edit = original.join("edit.fcproj");
+    let folder = original.join("folder");
+    let backup = restored.join("folder");
+    let mut doc = current();
+    let media = &mut doc["project"]["items"]["5"]["kind"]["Media"];
+    media["media"] = json!({"File":{"path":"take.mov"}});
+    media["proxy"] = json!({"File":{"path":"proxy.mov"}});
+    media["offline"] = true.into();
+    write_doc(&edit, &doc);
+    fs::write(original.join("take.mov"), b"original").unwrap();
+    pack(&edit, &folder, atomic_write_new).unwrap();
+    let base = checkout(&folder, &original.join("checkout.fcproj")).unwrap();
+    doc["project"]["items"]["5"]["kind"]["Media"]["media"]["File"]["path"] = "later.mov".into();
+    write_doc(&edit, &doc);
+    let head = save(&folder, &base, &edit).unwrap();
+    assert_eq!(converter::backup::published_history(&folder, &backup).unwrap(), head);
+    let before = inspect(&folder, &base).unwrap();
+    assert!(before.item_errors.is_empty());
+    assert_eq!(before.sources.iter().map(|s| (s.id, s.availability)).collect::<Vec<_>>(), [(5, OriginalAvailable), (74, Generated)]);
+    assert!(before.sources[0].marked_offline);
+    assert_eq!(inspect(&folder, &head).unwrap().sources[0].availability, NeedsRelink);
+    assert_eq!(inspect(&backup, &base).unwrap().sources[0].availability, NeedsRelink);
+    fs::write(restored.join("proxy.mov"), b"proxy").unwrap();
+    assert_eq!(inspect(&backup, &base).unwrap().counts[&ProxyOnly], 1);
+    fs::write(restored.join("take.mov"), b"restored take").unwrap();
+    assert_eq!(inspect(&backup, &base).unwrap().sources[0].availability, OriginalAvailable);
+    assert_eq!(inspect(&backup, &head).unwrap().sources[0].availability, ProxyOnly);
+}
+
+#[test]
+fn availability_reports_refused_paths_and_reads_around_damaged_items() {
+    use converter::media_availability::{Availability::*, Probe, inspect};
+    let tmp = tempdir().unwrap();
+    let edit = tmp.path().join("edit.fcproj");
+    let folder = tmp.path().join("folder");
+    let mut doc = current();
+    let media = &mut doc["project"]["items"]["5"]["kind"]["Media"];
+    media["media"] = json!({"File":{"path":"https://example.invalid/shot.mov"}});
+    media["proxy"] = json!({"File":{"path":"directory"}});
+    fs::create_dir(tmp.path().join("directory")).unwrap();
+    write_doc(&edit, &doc);
+    pack(&edit, &folder, atomic_write_new).unwrap();
+    let base = checkout(&folder, &tmp.path().join("checkout.fcproj")).unwrap();
+    let manifest: Value = serde_json::from_slice(&fs::read(folder.join(ROOT)).unwrap()).unwrap();
+    let broken = manifest["items"].as_array().unwrap().iter().find(|entry| entry[0] == 74).unwrap();
+    fs::write(folder.join(broken[1].as_str().unwrap()), b"corrupt").unwrap();
+    let report = inspect(&folder, &base).unwrap();
+    assert_eq!(report.item_errors.keys().copied().collect::<Vec<_>>(), [74]);
+    assert_eq!(report.sources.len(), 1);
+    let source = &report.sources[0];
+    assert_eq!((source.id, source.availability), (5, NeedsInspection));
+    assert!(matches!(&source.original, Probe::Refused { path, .. } if path.starts_with("https:")));
+    assert!(matches!(&source.proxy, Some(Probe::Inaccessible { reason, .. }) if reason.contains("regular file")));
+}
