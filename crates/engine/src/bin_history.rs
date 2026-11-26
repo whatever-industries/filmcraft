@@ -11,11 +11,13 @@ pub(super) fn browse(s: &mut Session, p: &Value) -> Result<Value> {
     let folder = s.editing_folder.as_ref().ok_or_else(|| error("open a modular project first"))?.snapshot.directory();
     let bin = p.get("bin").map(|v| v.as_u64().ok_or_else(|| error("expected a bin ID"))).transpose()?;
     let Some(revision) = p.get("revision") else {
-        return Ok(json!({"revisions":bin_history::revisions(folder,bin).map_err(error)?}));
+        return Ok(json!({"epoch":s.document_epoch,"revisions":bin_history::revisions(folder,bin).map_err(error)?}));
     };
     let revision = revision.as_str().ok_or_else(|| error("expected revision digest"))?;
     let Some(bin) = bin else {
-        return serde_json::to_value(bins::saved_bins(folder, revision).map_err(error)?).map_err(error);
+        let mut listing = serde_json::to_value(bins::saved_bins(folder, revision).map_err(error)?).map_err(error)?;
+        listing["epoch"] = s.document_epoch.into();
+        return Ok(listing);
     };
     let project = bin_history::projection(folder, revision, bin).map_err(error)?;
     let columns: Vec<_> = s.prefs.project_panel.view.columns.iter().map(|c| &c.name).collect();
@@ -34,5 +36,45 @@ pub(super) fn browse(s: &mut Session, p: &Value) -> Result<Value> {
     }
     rows.extend(project.root.filed_sources.iter().filter_map(|id| item_row(*id, false)));
     rows.extend(project_panel::reference_clips(&project, &project.root).into_iter().filter_map(|id| item_row(id, true)));
-    Ok(json!({"revision":revision,"bin":bin,"name":project.root.name,"columns":columns,"rows":rows}))
+    Ok(json!({"epoch":s.document_epoch,"revision":revision,"bin":bin,"name":project.root.name,"columns":columns,"rows":rows}))
+}
+
+pub(super) fn paste(s: &mut Session, p: &Value) -> Result<Value> {
+    use crate::folder_edit::FolderBase;
+    use filmcraft_format::project_folder::{EditOrigin, ROOT, history_paste};
+    use std::sync::Arc;
+    let bin = p["bin"].as_u64().ok_or_else(|| error("choose a destination bin"))?;
+    let revision = p["revision"].as_str().ok_or_else(|| error("expected a saved revision"))?;
+    let ids: Vec<u64> = serde::Deserialize::deserialize(&p["items"]).map_err(error)?;
+    if p["epoch"].as_u64() != Some(s.document_epoch) {
+        return Err(error("the copied items belong to a different document session"));
+    }
+    let view = s.project_view();
+    let f = s.editing_folder.as_ref().ok_or_else(|| error("open a modular project first"))?;
+    if !f.snapshot.writable() || f.snapshot.scope().is_some_and(|scope| scope.bin != bin) {
+        return Err(error("open the destination bin for writing before pasting"));
+    }
+    let directory = f.snapshot.directory();
+    let current = filmcraft_format::encode_with_view(&s.project, Some(&view), false);
+    let raw = f.baseline.origin.checkpoint(directory, &f.baseline.typed(), &current, &directory.join(ROOT)).map_err(error)?;
+    let raw = s.history_document(raw, &current)?;
+    let next = if f.snapshot.is_shared() { f.snapshot.cursor() } else { s.project.next_id };
+    let paste = history_paste::prepare(directory, revision, &ids, bin, &raw, next).map_err(error)?;
+    let mut project = filmcraft_format::decode(&paste.document).map_err(error)?.project;
+    // The stock reader advances its allocator past all visible IDs. A bin writer
+    // must continue inside its own reservation even when a peer has higher IDs.
+    if f.snapshot.scope().is_some() {
+        project.next_id = paste.next_id;
+    }
+    if project != *s.project {
+        s.edit("Paste from Bin History", |p, _| {
+            *p = project;
+            Ok(())
+        })?;
+        let base = FolderBase { origin: EditOrigin::Recovered(paste.document.into()), project: s.project.clone(), view };
+        if let Some(folder) = &mut s.editing_folder {
+            folder.baseline = Arc::new(base);
+        }
+    }
+    Ok(json!({"items":paste.selected}))
 }

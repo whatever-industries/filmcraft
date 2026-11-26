@@ -76,6 +76,16 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
         ),
         #[cfg(not(target_arch = "wasm32"))]
         query("project.binHistory", "Bin History", &[], None, r#"{"revision":digest?,"bin":id?}"#, always, crate::bin_history::browse),
+        #[cfg(not(target_arch = "wasm32"))]
+        spec(
+            "project.pasteFromHistory",
+            "Paste from Bin History",
+            &[],
+            None,
+            r#"{"epoch":number,"revision":digest,"items":[id],"bin":id}"#,
+            always,
+            crate::bin_history::paste,
+        ),
         spec("project.fileInBin", "File in This Bin", &[], None, r#"{"bin":id,"item":id}"#, always, file_in_bin),
         spec("project.removeFromBin", "Remove from Bin", &[], None, r#"{"bin":id,"items":[id]?,"bins":[id]?}"#, always, remove_from_bin),
         query("project.searchBinItems", "Search Bin Contents", &[], None, r#"{"bin":id}"#, always, search_bin_items),

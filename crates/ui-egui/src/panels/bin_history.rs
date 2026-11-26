@@ -4,6 +4,31 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct Clipboard {
+    epoch: u64,
+    revision: String,
+    items: Vec<u64>,
+}
+
+pub(super) fn paste_button(app: &mut FilmcraftApp, ui: &mut egui::Ui, bin: u64) -> bool {
+    let Some(clip) = app.ui.project_panel.history_clipboard.as_ref().filter(|clip| clip.epoch == app.session.document_epoch) else {
+        return false;
+    };
+    let enabled = !app.session.editing_bins() || app.session.bin_access(bin) == Some(true);
+    let response = ui.add_enabled(enabled, egui::Button::new(tl!("Paste from Bin History")));
+    app.auto.add("binHistory.paste", response.rect, tl!("Paste from Bin History"));
+    if response.clicked() {
+        let p = json!({"epoch":clip.epoch,"revision":clip.revision,"items":clip.items,"bin":bin});
+        match app.session.execute("project.pasteFromHistory", p) {
+            Ok(_) => app.ui.status = tl!("Pasted from Bin History").to_owned(),
+            Err(e) => app.ui.status = e.to_string(),
+        }
+        return true;
+    }
+    false
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Browser {
     epoch: u64,
     initial_bin: Option<u64>,
@@ -51,7 +76,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
     let mut visible = true;
     let mut next = None;
     let mut close = false;
-    egui::Window::new(if b.initial_bin.is_some() { tl!("Bin History") } else { tl!("Project History") })
+    let response = egui::Window::new(if b.initial_bin.is_some() { tl!("Bin History") } else { tl!("Project History") })
         .id(egui::Id::unique("saved-bin-browser"))
         .open(&mut visible)
         .show(ctx, |ui| {
@@ -63,7 +88,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                     if ui.button(tl!("Revisions")).clicked() {
                         next = Some(b.initial_bin.map_or(json!({}), |id| json!({"bin":id})));
                     }
-                    if b.page["rows"].is_array() && ui.button(tl!("Browse Bins")).clicked() {
+                    if b.page["rows"].is_array() && button(app, ui, "binHistory.bins", tl!("Browse Bins")) {
                         next = Some(json!({"revision":revision}));
                     }
                     ui.label(&revision[..8]);
@@ -138,6 +163,23 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                     });
                 }
             });
+            if let Some(rows) = b.page["rows"].as_array() {
+                let selected: Vec<_> = rows
+                    .iter()
+                    .filter(|row| b.show_references || row["reference"] != true)
+                    .filter_map(|row| row["item"].as_u64())
+                    .filter(|id| b.selected.contains(id))
+                    .collect();
+                let r = ui.add_enabled(!selected.is_empty(), egui::Button::new(tl!("Copy Selected Items")));
+                app.auto.add("binHistory.copy", r.rect, tl!("Copy Selected Items"));
+                if r.clicked()
+                    && let Some(revision) = &b.revision
+                {
+                    app.ui.project_panel.history_clipboard = Some(Clipboard { epoch: b.epoch, revision: revision.clone(), items: selected });
+                    app.ui.status = tl!("Copied from Bin History").to_owned();
+                    close = true;
+                }
+            }
         });
     if let Some(params) = next
         && let Some(page) = query(app, params.clone())
@@ -146,7 +188,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
         b.page = page;
         b.selected.clear();
     }
-    if visible && !close {
+    if visible && !close && !response.is_some_and(|r| r.response.should_close()) {
         app.ui.project_panel.history_browser = Some(b);
     }
 }

@@ -153,6 +153,13 @@ impl Session {
         if !self.editing_bins() {
             return Ok(());
         }
+        if id == "project.pasteFromHistory"
+            && p["epoch"].as_u64() == Some(self.document_epoch)
+            && let Some(bin) = p["bin"].as_u64()
+            && self.bin_access(bin) == Some(true)
+        {
+            return self.focus_open_bin(Some(bin));
+        }
         let owner = if matches!(
             id,
             "project.renameBin" | "project.reorderBin" | "project.removeFromBin" | "project.fileInBin" | "metadata.set" | "edit.label" | "edit.duplicate"
@@ -197,7 +204,9 @@ impl Session {
         {
             dirty.push(bin);
         }
-        dirty.sort_unstable();
+        if dirty.len() > 1 {
+            (dirty, _) = self.compose_bins()?;
+        }
         let result = dirty.iter().try_for_each(|bin| {
             self.focus_open_bin(Some(*bin))?;
             self.save_active_bin()
@@ -219,15 +228,54 @@ impl Session {
         Ok(json!({"closedBin":bin}))
     }
 
-    pub(super) fn export_bins(&self, path: &Path) -> Result<Value> {
+    pub(super) fn history_document(&self, mut document: Vec<u8>, typed: &[u8]) -> Result<Vec<u8>> {
+        for parked in self.bin_editors.parked.values().filter(|slot| slot.folder.snapshot.scope().is_some()) {
+            let f = &parked.folder;
+            document = f.snapshot.overlay_history_details(&document, &f.baseline.origin, &f.baseline.typed(), typed).map_err(error)?;
+        }
+        Ok(document)
+    }
+
+    // An unpublished sequence can use a source created by a different checkout.
+    // Determine a valid publication order against one snapshot before saving any bin.
+    fn compose_bins(&self) -> Result<(Vec<u64>, Vec<u8>)> {
         let active = self.editing_folder.as_ref().ok_or_else(|| error("open a project folder"))?;
         let (_, mut doc) = FolderSnapshot::open_shared(&active.snapshot.directory().join(ROOT)).map_err(error)?;
         let view = self.project_view();
-        for f in self.bin_editors.parked.values().filter(|b| b.dirty).map(|b| &b.folder).chain(self.editing_folder.iter().filter(|_| self.is_dirty())) {
+        let mut pending = BTreeMap::new();
+        for f in self
+            .bin_editors
+            .parked
+            .values()
+            .filter(|b| b.dirty || b.folder.journal.as_ref().is_some_and(|j| j.pending_cleanup))
+            .map(|b| &b.folder)
+            .chain(self.editing_folder.iter().filter(|f| self.is_dirty() || f.journal.as_ref().is_some_and(|j| j.pending_cleanup)))
+        {
+            let bin = f.snapshot.scope().ok_or_else(|| error("expected a bin checkout"))?.bin;
             let scoped = f.scoped_project(&self.project)?;
-            let after = filmcraft_format::encode_with_view(&scoped, Some(&view), false);
-            doc = f.snapshot.overlay_checkout(&doc, &f.baseline.origin, &f.baseline.typed(), &after).map_err(error)?;
+            pending.insert(bin, (f, f.baseline.typed(), filmcraft_format::encode_with_view(&scoped, Some(&view), false)));
         }
+        let mut order = Vec::new();
+        while !pending.is_empty() {
+            let mut problem = None;
+            let ready = pending.iter().find_map(|(&id, (f, before, after))| match f.snapshot.overlay_checkout(&doc, &f.baseline.origin, before, after) {
+                Ok(next) => Some((id, next)),
+                Err(e) => {
+                    problem.get_or_insert_with(|| error(format!("Bin {id}: {e}")));
+                    None
+                }
+            });
+            let (id, next) = ready.ok_or_else(|| problem.unwrap_or_else(|| error("could not compose bin edits")))?;
+            pending.remove(&id);
+            order.push(id);
+            doc = next;
+        }
+        Ok((order, doc))
+    }
+
+    pub(super) fn export_bins(&self, path: &Path) -> Result<Value> {
+        let active = self.editing_folder.as_ref().ok_or_else(|| error("open a project folder"))?;
+        let (_, doc) = self.compose_bins()?;
         active.snapshot.export_document(&doc, path).map_err(error)?;
         Ok(json!({"path":path}))
     }

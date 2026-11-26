@@ -203,6 +203,28 @@ impl FolderSnapshot {
         Ok((origin, published))
     }
 
+    /// Restore raw records owned by a parked checkout. Its visible items are already
+    /// present in the typed session, but their extension fields and recovery origins
+    /// may exist only in this bin's unsaved edit baseline.
+    pub fn overlay_history_details(&self, current: &[u8], origin: &EditOrigin, before: &[u8], typed: &[u8]) -> io::Result<Vec<u8>> {
+        let scope = self.scope().ok_or_else(|| invalid("expected a bin checkout"))?;
+        let mut visible = ProjectRecords::split(current).map_err(invalid)?;
+        let draft = origin.merge(&self.folder, Some((&self.revision, &self.raw)), before, typed)?;
+        for (id, raw) in draft.items {
+            if ((scope.start..scope.end).contains(&id) || scope.sequences.contains(&id))
+                && let Some(record) = visible.items.get_mut(&id)
+            {
+                *record = raw;
+                for key in super::recovery::SIDECARS {
+                    if let Some(value) = draft.envelope["project"][key].get(id.to_string()) {
+                        visible.envelope["project"][key][id.to_string()] = value.clone();
+                    }
+                }
+            }
+        }
+        encode_at(&self.folder, visible, &self.folder.join(ROOT))
+    }
+
     /// Apply one locked bin to an in-memory export. Each overlay is validated against
     /// the same pinned project plus the preceding overlays, including reference and ID checks.
     pub fn overlay_checkout(&self, current: &[u8], origin: &EditOrigin, before: &[u8], after: &[u8]) -> io::Result<Vec<u8>> {

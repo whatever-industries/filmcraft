@@ -775,3 +775,11 @@ Markers may store an optional `url` independently of their name and notes. Older
 load with an empty URL. Schema v17 prevents older builds from silently dropping links
 on save. Changing marker type retains the address. Project loading never opens it; the
 Edit Marker dialog offers explicit HTTP(S) browser opening for Web Link markers.
+
+### Copy items from a saved bin
+
+In the Project panel menu, choose **Project History**, select a saved revision and open a bin. This includes bins deleted after that save. Right-click a current bin and choose **Bin History** to follow that bin across renames. The historical window shows saved values. **Show Reference Clips** reveals the sources used by its cuts alongside explicitly filed rows.
+
+Select items, choose **Copy Selected Items**, open a writable destination bin and choose **Paste from Bin History** in its menu. Each selected sequence receives a fresh ID. An unchanged source can be shared. When its historical metadata differs, paste creates a separate source linked to the same media. Pasting another cut from the same revision can reuse that recovered source, including after reopening, while an edit to the recovered source preserves it as an independent version. Copying a reference row explicitly files it in the destination. Sources brought along only by a cut remain reference rows.
+
+Each paste is one Undo step. Save publishes it. The automation equivalents are `project.binHistory` for revision, bin and row listings and `project.pasteFromHistory` for pasting selected item IDs into a writable bin in the same document session. Pass the listing’s `epoch` together with the saved `revision`, destination `bin`, and selected `items`.

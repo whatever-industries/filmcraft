@@ -126,6 +126,21 @@ fn file_reference_from_list_row_keeps_both_filings() {
     assert_eq!(d.app().session.project.root.parent_of(ItemId(id)), Some(home));
 }
 
+fn click_project_option(d: &mut Driver, option: &str) {
+    d.click("panel.menu.Project");
+    for _ in 0..12 {
+        let [_, y, _, h] = d.rect(option);
+        let [_, top, _, height] = d.rect("panel.menu.scroll");
+        if y >= top && y + h <= top + height {
+            d.click(option);
+            return;
+        }
+        d.ok("ui.scroll", json!({"id":"panel.menu.scroll","dy":(top + height / 2.0 - y).clamp(-150.0,150.0)}));
+        d.frames(4);
+    }
+    panic!("{option} is unreachable in the panel menu");
+}
+
 #[test]
 fn reference_clips_are_view_only_and_open_the_existing_source() {
     let mut d = project_driver();
@@ -144,21 +159,7 @@ fn reference_clips_are_view_only_and_open_the_existing_source() {
     d.frames(2);
     let row = format!("project.reference.{id}");
     assert!(!d.has(&row));
-    let toggle = |d: &mut Driver| {
-        d.click("panel.menu.Project");
-        let option = "project.menu.showReferenceClips";
-        for _ in 0..12 {
-            let [_, y, _, h] = d.rect(option);
-            let [_, top, _, height] = d.rect("panel.menu.scroll");
-            if y >= top && y + h <= top + height {
-                d.click(option);
-                return;
-            }
-            d.ok("ui.scroll", json!({"id":"panel.menu.scroll","dy":(top + height / 2.0 - y).clamp(-150.0,150.0)}));
-            d.frames(4);
-        }
-        panic!("Show Reference Clips is unreachable in the panel menu");
-    };
+    let toggle = |d: &mut Driver| click_project_option(d, "project.menu.showReferenceClips");
     toggle(&mut d);
     assert!(d.app().session.prefs.project_panel.show_reference_clips);
     for mode in ["list", "icon", "freeform"] {
@@ -1838,10 +1839,21 @@ fn historical_bin_opens_from_project_and_live_bin_and_toggles_reference_rows() {
     let cut = demo.state.active_sequence.unwrap();
     let cuts = demo.project.root.parent_of(cut).unwrap();
     let source = demo.execute("project.referenceClips", json!({"bin":cuts})).unwrap()["items"][0].clone();
+    let project = std::sync::Arc::make_mut(&mut demo.project);
+    let empty = project.add_bin("Selects", None);
+    let deleted = project.add_bin("Selects", None);
     let file = dir.path().join("demo.fcproj");
     demo.execute("file.saveAs", json!({"path":file})).unwrap();
     let folder = dir.path().join("folder");
     filmcraft_format::project_folder::pack(&file, &folder, filmcraft_format::atomic_write_new).unwrap();
+    let manifest = folder.join("project.fcmod");
+    {
+        let (mut snapshot, before) = filmcraft_format::project_folder::FolderSnapshot::open(&manifest).unwrap();
+        let mut project = filmcraft_format::decode(&before).unwrap().project;
+        project.root.find_bin_mut(cuts).unwrap().name = "Current timeline bin".into();
+        project.root.remove_bin(deleted).unwrap();
+        snapshot.save(&before, &filmcraft_format::encode(&project, false)).unwrap();
+    }
     let mut s = Session::desktop_project_editor(filmcraft_engine::autosave::AutosaveConfig::new(dir.path().join("data"))).unwrap();
     s.execute("file.open", json!({"path":folder.join("project.fcmod")})).unwrap();
     let mut d = Driver::with(s);
@@ -1862,6 +1874,21 @@ fn historical_bin_opens_from_project_and_live_bin_and_toggles_reference_rows() {
     d.click("panel.menu.Project");
     d.click("project.menu.projectHistory");
     d.click("binHistory.revision.0");
+    assert!(d.has(&format!("binHistory.bin.{}", empty.0)));
+    d.click(&format!("binHistory.bin.{}", deleted.0));
+    assert!(!d.has(&reference));
+    d.click("binHistory.bins");
     d.click(&format!("binHistory.bin.{}", cuts.0));
     assert!(d.has(&format!("binHistory.item.{}", cut.0)));
+    d.click("binHistory.references");
+    d.click(&reference);
+    d.click("binHistory.copy");
+    d.ok("ui.menu.invoke", json!({"id":"projectPanel.openBin","params":{"bin":cuts,"how":"inPlace"}}));
+    d.frames(2);
+    assert!(!d.has("binHistory.copy"));
+    click_project_option(&mut d, "binHistory.paste");
+    assert!(d.has(&format!("project.item.{source}")), "{}", d.app().ui.status);
+    assert!(!d.has(&format!("project.reference.{source}")));
+    let live = d.app().session.project.root.find_bin(cuts).unwrap();
+    assert!(live.filed_sources.contains(&ItemId(source.as_u64().unwrap())));
 }

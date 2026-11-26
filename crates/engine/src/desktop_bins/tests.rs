@@ -378,3 +378,222 @@ fn browse_saved_bin_uses_revision_values_and_keeps_live_checkout_untouched() {
     assert_eq!(fs::read(path).unwrap(), head);
     assert_eq!(name(&s, 70), "Today's cuts");
 }
+
+#[test]
+fn historical_paste_preserves_identity_extensions_and_one_step_undo_across_reopen() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let path = fixture(dir);
+    let mut s = editor(dir);
+    open(&mut s, &path);
+    let rev = s.execute("project.binHistory", json!({})).unwrap()["revisions"][0][1].clone();
+    s.open_desktop_bin(70).unwrap();
+    s.execute("metadata.set", json!({"item":5,"bin":70,"fields":{"Comments":"new live notes"}})).unwrap();
+    s.execute("file.save", json!({})).unwrap();
+    let paste = |s: &mut Session, items: Value| {
+        let epoch = s.document_epoch;
+        s.execute("project.pasteFromHistory", json!({"bin":71,"revision":rev,"epoch":epoch,"items":items}))
+    };
+    let recover = |s: &mut Session| {
+        let r = paste(s, json!([21])).unwrap();
+        ItemId(r["items"][0].as_u64().unwrap())
+    };
+    let source = |s: &Session, id| s.project.sequence(id).unwrap().video_tracks[0].items[0].item;
+    s.open_desktop_bin(71).unwrap();
+    let first = recover(&mut s);
+    let historical = source(&s, first);
+    assert_ne!(first, ItemId(21));
+    assert_ne!(historical, ItemId(5));
+    s.execute("file.save", json!({})).unwrap();
+    drop(s);
+    let mut s = editor(dir);
+    open(&mut s, &path);
+    s.open_desktop_bin(71).unwrap();
+    let second = recover(&mut s);
+    assert_ne!(second, first);
+    assert_eq!(source(&s, second), historical);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(s.project.item(second).is_none());
+    assert_eq!(source(&s, first), historical);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(source(&s, second), historical);
+    paste(&mut s, json!([5])).unwrap();
+    s.execute("project.select", json!({"items":[historical]})).unwrap();
+    let duplicate = s.execute("edit.duplicate", json!({"bin":71})).unwrap()["items"][0].as_u64().unwrap();
+    s.execute("metadata.set", json!({"item":historical,"bin":71,"fields":{"Comments":"my recovered notes"}})).unwrap();
+    let third = recover(&mut s);
+    assert_ne!(source(&s, third), historical);
+    assert_ne!(source(&s, third), ItemId(duplicate));
+    assert_eq!(source(&s, first), historical);
+    assert_eq!(s.project.item(historical).unwrap().metadata["Comments"], "my recovered notes");
+    assert_eq!(s.project.item(source(&s, third)).unwrap().metadata.get("Comments"), s.project.item(ItemId(duplicate)).unwrap().metadata.get("Comments"));
+    let before = s.project.clone();
+    assert!(paste(&mut s, json!([21, 999999])).is_err());
+    assert_eq!(s.project, before);
+    s.execute("file.save", json!({})).unwrap();
+    let output = dir.join("cuts.fcproj");
+    s.execute("file.saveCopy", json!({"path":output})).unwrap();
+    let bytes = fs::read(output).unwrap();
+    let doc: Value = serde_json::from_slice(&bytes).unwrap();
+    for id in [first, second, third] {
+        assert_eq!(doc["project"]["items"][id.0.to_string()]["kind"]["Sequence"]["video_tracks"][0]["items"][0]["extension"]["camera"], "A");
+    }
+    let stock = filmcraft_format::decode(&bytes).unwrap().project;
+    assert_eq!(stock.item(historical).unwrap().metadata["Comments"], "my recovered notes");
+    assert_eq!(stock.item(ItemId(5)).unwrap().metadata["Comments"], "new live notes");
+}
+
+#[test]
+fn historical_source_is_shared_between_two_writable_bins_before_save() {
+    let t = tempfile::tempdir().unwrap();
+    let dir = t.path();
+    let path = fixture(dir);
+    let mut s = editor(dir);
+    open(&mut s, &path);
+    let listing = s.execute("project.binHistory", json!({})).unwrap();
+    let rev = &listing["revisions"][0][1];
+    let epoch = &listing["epoch"];
+    s.execute("metadata.set", json!({"item":5,"bin":70,"fields":{"Comments":"new notes"}})).unwrap();
+    s.execute("file.save", json!({})).unwrap();
+    let mut recover = |bin| {
+        s.open_desktop_bin(bin).unwrap();
+        let r = s.execute("project.pasteFromHistory", json!({"epoch":epoch,"revision":rev,"bin":bin,"items":[21]})).unwrap();
+        ItemId(r["items"][0].as_u64().unwrap())
+    };
+    let first = recover(71);
+    let second = recover(70);
+    let source = |s: &Session, id| s.project.sequence(id).unwrap().video_tracks[0].items[0].item;
+    let historical = source(&s, first);
+    assert_ne!(historical, ItemId(5));
+    assert_eq!(source(&s, second), historical);
+    let export = dir.join("both.fcproj");
+    s.execute("file.saveCopy", json!({"path":export})).unwrap();
+    let stock = filmcraft_format::decode(&fs::read(export).unwrap()).unwrap().project;
+    assert_eq!(stock.sequence(second).unwrap().video_tracks[0].items[0].item, historical);
+    assert_eq!(s.save_open_bins().unwrap()["savedBins"], json!([71, 70]));
+    drop(s);
+    let mut s = editor(dir);
+    open(&mut s, &path);
+    assert_eq!(source(&s, first), historical);
+    assert_eq!(source(&s, second), historical);
+}
+
+#[test]
+fn historical_batch_paste_plays_both_trims_and_preserves_proxy_after_reopen() {
+    use crate::media_test_util::{make_movie, session_with};
+    use filmcraft_media::DemoScene;
+    use filmcraft_project::TrackKind;
+    use filmcraft_time::{FrameRate, Tick, TimeRange};
+    let t = tempfile::tempdir().unwrap();
+    let dir = t.path();
+    let original = dir.join("Interview.mov");
+    let proxy = dir.join("Interview Proxy.mov");
+    make_movie(&original, DemoScene::Aurora, 160, 96, 12);
+    make_movie(&proxy, DemoScene::Plasma, 80, 48, 12);
+    let (mut setup, sources, first) = session_with(&[&original]);
+    let source = sources[0];
+    setup.execute("media.attachProxies", json!({"item":source,"path":proxy})).unwrap();
+    let project = Arc::make_mut(&mut setup.project);
+    let cuts = project.add_bin("Cuts", None);
+    let dest = project.add_bin("Recovered", None);
+    project.move_to_bin(&[first], Some(cuts)).unwrap();
+    let second = project.new_sequence("Trailer", project.sequence(first).unwrap().settings.clone(), 1, 1, Some(cuts));
+    let rate = FrameRate::FPS_24;
+    let trimmed = TimeRange::new(rate.tick_of(4), rate.tick_of(7));
+    for kind in [TrackKind::Video, TrackKind::Audio] {
+        let clip = project.make_track_item(source, kind, Tick::ZERO, trimmed, rate).unwrap();
+        let seq = project.sequence_mut(second).unwrap();
+        match kind {
+            TrackKind::Video => seq.video_tracks[0].items.push(clip),
+            TrackKind::Audio => seq.audio_tracks[0].items.push(clip),
+        }
+    }
+    let playback = |s: &mut Session, ids: [ItemId; 2]| {
+        let mut samples = Vec::new();
+        for id in ids {
+            s.execute("sequence.open", json!({"item":id})).unwrap();
+            let (image, offline) = s.try_render_program_with_offline_at(1.0, rate.tick_of(1)).unwrap();
+            assert!(offline.is_empty());
+            let provider = s.media.provider(s.project.clone(), s.services.clone());
+            let audio = filmcraft_render::audio::mix_sequence(&s.project, s.active_sequence().unwrap(), 2000, 1000, &provider);
+            assert!(audio.channels.iter().flatten().any(|v| v.abs() > 0.001));
+            samples.push((image.over_black_rgba8(), audio.channels));
+        }
+        samples
+    };
+    let expected = playback(&mut setup, [first, second]);
+    assert!(expected[0].0 != expected[1].0);
+    setup.execute("media.toggleProxies", json!({"enabled":true})).unwrap();
+    let expected_proxy = playback(&mut setup, [first, second]);
+    assert!(expected[0].0 != expected_proxy[0].0);
+    let stock = dir.join("draft.fcproj");
+    setup.execute("file.saveAs", json!({"path":stock})).unwrap();
+    drop(setup);
+    let folder = dir.join("modular");
+    pack(&stock, &folder, filmcraft_format::atomic_write_new).unwrap();
+    let path = folder.join(ROOT);
+    let mut s = editor(dir);
+    open(&mut s, &path);
+    let rev = s.execute("project.binHistory", json!({})).unwrap()["revisions"][0][1].clone();
+    s.open_desktop_bin(dest.0).unwrap();
+    let args = json!({"epoch":s.document_epoch,"revision":rev,"bin":dest,"items":[first,second]});
+    let mut peer = editor(&dir.join("peer"));
+    open(&mut peer, &path);
+    assert_eq!(peer.open_desktop_bin(dest.0).unwrap()["readOnly"], true);
+    assert!(peer.execute("project.pasteFromHistory", args.clone()).is_err());
+    let before = fs::read(&path).unwrap();
+    let rows = s.execute("project.pasteFromHistory", args).unwrap();
+    let ids: [ItemId; 2] = serde_json::from_value(rows["items"].clone()).unwrap();
+    assert!(!ids.contains(&first) && !ids.contains(&second) && ids[0] != ids[1]);
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(s.project.root.find_bin(dest).unwrap().children.len(), 2);
+    for id in ids {
+        assert_eq!(s.project.sequence(id).unwrap().video_tracks[0].items[0].item, source);
+    }
+    s.execute("file.save", json!({})).unwrap();
+    drop(peer);
+    drop(s);
+    // A later metadata change makes the original source unsuitable for yesterday's cuts.
+    let restored = |s: &mut Session, cut: ItemId| {
+        s.open_desktop_bin(dest.0).unwrap();
+        let result = s.execute("project.pasteFromHistory", json!({"epoch":s.document_epoch,"revision":rev,"bin":dest,"items":[cut]})).unwrap();
+        ItemId(result["items"][0].as_u64().unwrap())
+    };
+    let mut writer = editor(dir);
+    open(&mut writer, &path);
+    writer.execute("metadata.set", json!({"bin":cuts,"item":source,"fields":{"Comments":"today's notes"}})).unwrap();
+    writer.execute("file.save", json!({})).unwrap();
+    let rough = restored(&mut writer, first);
+    let saved_source = writer.project.sequence(rough).unwrap().video_tracks[0].items[0].item;
+    assert_ne!(saved_source, source);
+    writer.execute("file.save", json!({})).unwrap();
+    drop(writer);
+    let mut writer = editor(dir);
+    open(&mut writer, &path);
+    let trailer = restored(&mut writer, second);
+    assert_eq!(writer.project.sequence(trailer).unwrap().video_tracks[0].items[0].item, saved_source);
+    writer.execute("file.save", json!({})).unwrap();
+    drop(writer);
+    let mut writer = editor(dir);
+    open(&mut writer, &path);
+    writer.execute("metadata.set", json!({"bin":dest,"item":saved_source,"fields":{"Comments":"approved recovered source"}})).unwrap();
+    let alternate = restored(&mut writer, second);
+    let alternate_source = writer.project.sequence(alternate).unwrap().video_tracks[0].items[0].item;
+    assert_ne!(alternate_source, saved_source);
+    writer.execute("file.save", json!({})).unwrap();
+    drop(writer);
+    for proxy_only in [false, true] {
+        if proxy_only {
+            fs::rename(&original, dir.join("disconnected.mov")).unwrap();
+        }
+        let mut s = editor(dir);
+        s.execute("media.toggleProxies", json!({"enabled":proxy_only})).unwrap();
+        open(&mut s, &path);
+        let pictures = if proxy_only { &expected_proxy } else { &expected };
+        assert!(playback(&mut s, ids) == *pictures);
+        assert!(playback(&mut s, [rough, trailer]) == *pictures);
+        assert!(playback(&mut s, [rough, alternate]) == *pictures);
+        assert_eq!(s.project.item(saved_source).unwrap().metadata["Comments"], "approved recovered source");
+        assert_ne!(s.project.item(alternate_source).unwrap().metadata.get("Comments"), s.project.item(saved_source).unwrap().metadata.get("Comments"));
+    }
+}

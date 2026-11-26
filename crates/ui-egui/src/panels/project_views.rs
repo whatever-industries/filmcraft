@@ -446,6 +446,9 @@ fn bin_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, v: &View, bin: u64, actio
         super::bin_history::open(app, Some(bin));
         ui.close();
     }
+    if super::bin_history::paste_button(app, ui, bin) {
+        ui.close();
+    }
     for (label, how) in [(tl!("Open in Place"), "inPlace"), (tl!("Open in New Tab"), "newTab"), (tl!("Open in New Window"), "newWindow")] {
         let b = ui.button(label);
         app.auto.add(&format!("{}.binMenu.{how}", v.prefix), b.rect, label);
@@ -815,6 +818,9 @@ fn marquee(app: &mut FilmcraftApp, ui: &egui::Ui, v: &View, bg: &egui::Response,
 }
 
 fn background_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, v: &View, bin: Option<u64>, actions: &mut Actions) {
+    if super::bin_history::paste_button(app, ui, v.bin.0) {
+        ui.close();
+    }
     for (label, cmd) in [
         (tl!("New Bin"), "file.newBin"),
         (tl!("New Search Bin"), "file.newSearchBin"),

@@ -13,6 +13,8 @@ use std::path::Path;
 pub mod bin_history;
 pub mod bins;
 pub mod compare;
+mod history_luts;
+pub mod history_paste;
 mod paths;
 pub mod recovery;
 pub mod revisions;
@@ -127,6 +129,7 @@ pub fn standard_document(bytes: &[u8]) -> io::Result<Vec<u8>> {
     if let Some(items) = doc["project"]["items"].as_object_mut() {
         for item in items.values_mut().filter_map(Value::as_object_mut) {
             item.remove("field_edits");
+            item.remove("modular_history_origin");
         }
     }
     // Keep home rows when available. A rescued subtree may contain only a secondary filing.

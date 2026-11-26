@@ -77,6 +77,7 @@ impl Session {
             "project.renameBin"
             | "project.removeFromBin"
             | "project.fileInBin"
+            | "project.pasteFromHistory"
             | "edit.label"
             | "metadata.set"
             | "edit.duplicate"

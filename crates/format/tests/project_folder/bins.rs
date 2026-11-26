@@ -174,3 +174,33 @@ fn required_damage_or_a_bin_cycle_refuses_publication() {
 
 #[path = "compare.rs"]
 mod comparison;
+
+#[test]
+fn paste_recovers_used_lut_and_sidecars_without_replacing_the_live_grade() {
+    let t = tempdir().unwrap();
+    let mut historical = sample();
+    let fx = &mut historical["project"]["items"]["21"]["kind"]["Sequence"]["video_tracks"][0]["items"][0]["effects"][0];
+    fx["params"]["input_lut"] = json!({"value":{"Text":"lib:lut999"}});
+    let (folder, rev) = start(t.path(), &historical);
+    let mut current: Value = serde_json::from_slice(&fs::read(t.path().join("checkout")).unwrap()).unwrap();
+    current["project"]["luts"][0]["text"] = "different grade".into();
+    current["project"]["items"]["5"]["metadata"]["Comments"] = "current".into();
+    let ids_before = current["project"]["items"].as_object().unwrap().len();
+    let paste = filmcraft_format::project_folder::history_paste::prepare(&folder, &rev, &[21, 73], 3, &serde_json::to_vec(&current).unwrap(), 10000).unwrap();
+    let doc: Value = serde_json::from_slice(&paste.document).unwrap();
+    let p = &doc["project"];
+    let copies = &p["items"];
+    assert_eq!(copies.as_object().unwrap().len(), ids_before + 3);
+    let clip = |i: usize| &copies[paste.selected[i].to_string()]["kind"]["Sequence"]["video_tracks"][0]["items"][0];
+    let source = clip(0)["item"].as_u64().unwrap().to_string();
+    assert_ne!(source, "5");
+    assert_eq!(clip(0)["item"], clip(1)["item"]);
+    for field in ["transcripts", "source_graphics", "narrations"] {
+        assert_eq!(p[field][&source], p[field]["5"]);
+    }
+    let grade = clip(0)["effects"][0]["params"]["input_lut"]["value"]["Text"].as_str().unwrap().strip_prefix("lib:").unwrap();
+    assert_ne!(grade, "lut999");
+    let luts = p["luts"].as_array().unwrap();
+    assert!(luts.iter().any(|l| l["id"] == grade && l["text"] == "TITLE test"));
+    assert!(luts.iter().any(|l| l["id"] == "lut999" && l["text"] == "different grade"));
+}

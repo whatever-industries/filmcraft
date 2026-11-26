@@ -83,6 +83,10 @@ impl BinScope {
         (self.start..self.end).contains(&id)
     }
 
+    fn owns_lut(&self, key: &str) -> bool {
+        key.strip_prefix("lut").and_then(|v| v.parse().ok()).is_some_and(|id| self.owns_id(id))
+    }
+
     pub(super) fn verify(&self, base: &Manifest, latest: &Manifest) -> io::Result<()> {
         for bin in [true, false] {
             fn index(m: &Manifest, bin: bool) -> super::RecordIndex<'_> {
@@ -126,9 +130,13 @@ impl BinScope {
         // Items created by this checkout live in its exclusive reservation.
         expected.items.retain(|id, _| !self.owns_id(id.0) || after.items.contains_key(id));
         for (id, src) in &after.items {
-            if self.owns_id(id.0) && src.is_source_clip() {
+            if self.owns_id(id.0) {
                 if let Some(dest) = expected.items.get_mut(id) {
-                    dest.merge_editorial_fields(src, Some(owner));
+                    if src.is_source_clip() {
+                        dest.merge_editorial_fields(src, Some(owner));
+                    } else {
+                        dest.clone_from(src);
+                    }
                 } else {
                     expected.items.insert(*id, src.clone());
                 }
@@ -136,6 +144,17 @@ impl BinScope {
                 dest.merge_editorial_fields(src, Some(owner));
             }
         }
+        expected.luts.retain(|lut| !self.owns_lut(&lut.id));
+        expected.luts.extend(after.luts.iter().filter(|lut| self.owns_lut(&lut.id)).cloned());
+        macro_rules! owned_sidecars {
+            ($field:ident) => {{
+                expected.$field.retain(|id, _| !self.owns_id(id.0));
+                expected.$field.extend(after.$field.iter().filter(|(id, _)| self.owns_id(id.0)).map(|(id, value)| (*id, value.clone())));
+            }};
+        }
+        owned_sidecars!(transcripts);
+        owned_sidecars!(source_graphics);
+        owned_sidecars!(narrations);
         for id in &self.sequences {
             let id = ItemId(*id);
             let Some(filmcraft_project::ItemKind::Sequence(seq)) = after.items.get(&id).map(|i| &i.kind) else {
@@ -166,7 +185,7 @@ impl BinScope {
             if let Some(child) = children.remove(&k) {
                 old.children.push(child);
             } else if !k.0
-                && ((self.owns_id(k.1) && after.items.get(&ItemId(k.1)).is_some_and(|it| it.is_source_clip()))
+                && ((self.owns_id(k.1) && after.items.contains_key(&ItemId(k.1)))
                     || (self.filings.contains(&k.1) && before.root.parent_of(ItemId(k.1)).is_none() && before.items.contains_key(&ItemId(k.1))))
             {
                 old.children.push(filmcraft_project::BinEntry::Item(ItemId(k.1)));
@@ -218,14 +237,51 @@ impl BinScope {
         }
         for (&id, src) in &draft.items {
             if self.owns_id(id) {
-                if (src.pointer("/kind/Media").is_none() && src.pointer("/kind/Subclip").is_none()) || src["id"].as_u64() != Some(id) {
+                if src["id"].as_u64() != Some(id) {
                     return Err(invalid("invalid duplicated media item"));
                 }
-                latest.items.entry(id).or_insert_with(|| src.clone());
+                if src.pointer("/kind/Media").is_some() || src.pointer("/kind/Subclip").is_some() {
+                    latest.items.entry(id).or_insert_with(|| src.clone());
+                } else {
+                    latest.items.insert(id, src.clone());
+                }
             }
             if let Some(dest) = latest.items.get_mut(&id) {
                 merge_fields(dest, src, self.bin)?;
             }
+        }
+        for field in recovery::SIDECARS {
+            let dst = &mut latest.envelope["project"];
+            if let Some(map) = dst.get_mut(field).and_then(Value::as_object_mut) {
+                map.retain(|key, _| key.parse::<u64>().ok().is_none_or(|id| !self.owns_id(id)));
+            }
+            for (key, val) in draft.envelope["project"][field].as_object().into_iter().flatten() {
+                if key.parse::<u64>().ok().is_some_and(|id| self.owns_id(id) && draft.items.contains_key(&id)) {
+                    dst[field][key] = val.clone();
+                }
+            }
+        }
+        let owned = |lut: &Value| lut["id"].as_str().is_some_and(|id| self.owns_lut(id));
+        let incoming = draft.envelope["project"]["luts"].as_array().into_iter().flatten().filter(|lut| owned(lut));
+        let mut removed = BTreeSet::new();
+        if let Some(library) = latest.envelope["project"].get_mut("luts").and_then(Value::as_array_mut) {
+            library.retain(|lut| {
+                if owned(lut) {
+                    removed.insert(lut["id"].as_str().unwrap_or_default().to_owned());
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        for lut in incoming {
+            removed.remove(lut["id"].as_str().unwrap_or_default());
+            let library = latest.envelope["project"]
+                .as_object_mut()
+                .ok_or_else(|| invalid("expected project"))?
+                .entry("luts")
+                .or_insert_with(|| Value::Array(Vec::new()));
+            library.as_array_mut().ok_or_else(|| invalid("invalid LUT library"))?.push(lut.clone());
         }
         let inventory = latest.envelope["project"]["items"].as_array_mut().ok_or_else(|| invalid("missing item inventory"))?;
         inventory.retain(|v| v.as_u64().is_none_or(|id| !deleted.contains(&id)));
@@ -252,6 +308,7 @@ impl BinScope {
                 latest.items.get_mut(id).and_then(|i| i.pointer_mut("/kind/Sequence")).ok_or_else(|| invalid(format!("missing latest sequence {id}")))?;
             dest.clone_from(sequence);
         }
+        super::history_luts::verify_remaining(latest, &removed)?;
         Ok(())
     }
 }
@@ -287,6 +344,16 @@ fn merge_fields(dest: &mut Value, src: &Value, bin: u64) -> io::Result<()> {
     Ok(())
 }
 
+fn published_reservations(project: &Project, scope: &BinScope) -> BTreeSet<u64> {
+    project
+        .items
+        .keys()
+        .map(|id| id.0)
+        .chain(project.luts.iter().filter_map(|lut| lut.id.strip_prefix("lut")?.parse().ok()))
+        .filter(|id| scope.owns_id(*id))
+        .collect()
+}
+
 impl Claim {
     pub fn acquire(folder: &Path, bin: u64, prior: Option<(&str, &BinScope)>) -> io::Result<(Self, String, ProjectRecords)> {
         let gate = revisions::lock_file(&folder.join(".writer.lock"))?;
@@ -309,7 +376,11 @@ impl Claim {
         let high = high_water(folder)?;
         let (mut scope, original) = if let Some((base, s)) = prior {
             s.verify(&recovery::at(folder, base)?, &m)?;
-            if s.bin != bin || s.sequences != sequences || s.end.checked_sub(s.start) != Some(RESERVATION_SIZE) || s.end > high || s.end > Project::MAX_NEXT_ID
+            if s.bin != bin
+                || s.sequences != sequences.iter().copied().filter(|id| !s.owns_id(*id)).collect()
+                || s.end.checked_sub(s.start) != Some(RESERVATION_SIZE)
+                || s.end > high
+                || s.end > Project::MAX_NEXT_ID
             {
                 return Err(invalid("checkpoint reservation or ownership changed"));
             }
@@ -342,7 +413,7 @@ impl Claim {
             });
         }
         let published_copies = if let Some((base, _)) = prior {
-            read_records(folder, &recovery::at(folder, base)?)?.items.into_keys().filter(|id| scope.owns_id(*id)).collect()
+            published_reservations(&project(&read_records(folder, &recovery::at(folder, base)?)?)?, &scope)
         } else {
             BTreeSet::new()
         };
@@ -404,6 +475,15 @@ impl Claim {
         if project.nest_cycle().is_some() {
             return Err(invalid("combined edits would contain a sequence nesting cycle"));
         }
+        for (id, item) in project.items.iter().filter(|(id, _)| self.scope.owns_id(id.0)) {
+            let mut escaped = false;
+            item.visit_ids(|key| escaped |= !project.items.contains_key(&ItemId(key)) && !(self.scope.start..cursor).contains(&key));
+            let mut missing = false;
+            item.visit_references(|key| missing |= !project.items.contains_key(&key));
+            if escaped || missing {
+                return Err(invalid(format!("recovered item {} has an invalid ID or source", id.0)));
+            }
+        }
         // Only the checked-out sequences supply identifiers from the draft. IDs in the
         // other records came from the verified published revision.
         let mut escaped = false;
@@ -422,7 +502,7 @@ impl Claim {
 
     pub fn publish(&mut self, folder: &Path, base: &str, draft: &ProjectRecords, cursor: u64) -> io::Result<(String, Project)> {
         let (rev, published) = self.publish_with(folder, base, draft, cursor, revisions::publish)?;
-        self.published_copies = published.items.keys().filter(|id| self.scope.owns_id(id.0)).map(|id| id.0).collect();
+        self.published_copies = published_reservations(&published, &self.scope);
         Ok((rev, published))
     }
 
