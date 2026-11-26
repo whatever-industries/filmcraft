@@ -21,6 +21,7 @@ pub mod media_availability;
 mod paths;
 pub mod pins;
 pub mod recovery;
+pub mod retention;
 pub mod revisions;
 pub mod usage;
 

@@ -651,3 +651,6 @@ fn availability_reports_refused_paths_and_reads_around_damaged_items() {
 
 #[path = "pins.rs"]
 mod revision_pins;
+
+#[path = "retention.rs"]
+mod retention;

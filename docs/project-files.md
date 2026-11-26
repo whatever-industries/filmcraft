@@ -359,6 +359,19 @@ project_folder unpin FOLDER REVISION
 
 Pins live in `revision-pins.json` alongside the project manifest. A separate local lock serializes pin changes while an editor has the project open. Pinning leaves the published revision and any private edits intact. All published history is retained today. A future retention tool must honor these pins.
 
+### Preview history retention
+
+Run `project_folder retention-preview FOLDER KEEP_LATEST` to see what depends on each stored record. Use a positive number of recent saves, including the current one. Milestones are included automatically. Add `--reader REVISION` for each known reader or checkout base and `--draft SESSION_DIRECTORY` for each known private checkpoint. Both options are repeatable. The command checks each supplied draft descriptor against the original project folder’s identity.
+
+The JSON lists saves newest first, their pin labels, and why each would be kept. For each stored member it reports the logical size, how many saves share it as a payload, whether it belongs to the manifest chain, and which holds apply. Each file counts once toward these totals:
+
+- `retained_policy_bytes` covers the manifest chain and the payloads needed by the selected saves.
+- `older_only_payload_bytes` measures payloads used exclusively by other published saves. Dropping these bytes today would break those saves.
+- `unreferenced_digest_bytes` counts regular files with digest-shaped names outside the captured chain. They may belong to a save in progress or contain unrelated data.
+- `confirmed_reclaimable_bytes` is zero under the current storage format. A future pruning operation needs a way to retire saves while preserving history traversal and account for every active reader and recovery base.
+
+The preview checks payload digests and fails if protected history is missing or the head or pins change during inspection. Reader revisions and private checkpoints outside the supplied inputs are unknown. Sizes exclude private draft payloads, sidecars, and external media. Filesystem allocation, compression and cloning can affect physical space.
+
 ### Back up published history
 
 Use a new folder on your backup volume. Copy footage and proxies separately if you need media playback after losing the source drive.
