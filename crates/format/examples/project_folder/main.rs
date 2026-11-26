@@ -48,6 +48,17 @@ fn run() -> io::Result<()> {
     {
         return list_bins(Path::new(folder), revision, io::stdout().lock());
     }
+    if let [command, folder, revision, id] = args.as_slice()
+        && command == "find-uses"
+        && let (Some(revision), Some(item)) = (revision.to_str(), id.to_str().and_then(|s| s.parse().ok()))
+    {
+        use std::io::Write;
+        let usage = converter::usage::find_uses(Path::new(folder), revision, item)?;
+        let mut out = io::stdout().lock();
+        serde_json::to_writer(&mut out, &usage)?;
+        writeln!(out)?;
+        return if usage.complete { Ok(()) } else { Err(io::Error::other("incomplete item usage search")) };
+    }
     if let [command, folder, from, to, id] = args.as_slice()
         && (command == "compare-bin" || command == "compare-sequence")
         && let (Some(from), Some(to), Some(id)) = (from.to_str(), to.to_str(), id.to_str().and_then(|s| s.parse().ok()))
@@ -74,7 +85,7 @@ fn run() -> io::Result<()> {
     }
     Err(io::Error::new(
         io::ErrorKind::InvalidInput,
-        "usage: project_folder pack SOURCE.fcproj NEW_FOLDER | unpack FOLDER NEW_FILE.fcproj | checkout FOLDER NEW_FILE.fcproj | save FOLDER BASE_REVISION EDITED.fcproj | history FOLDER | compare-bin FOLDER FROM TO BIN_ID | compare-sequence FOLDER FROM TO SEQUENCE_ID | restore-copy FOLDER BASE_REVISION HISTORICAL_REVISION SEQUENCE_ID | rescue FOLDER REVISION SEQUENCE_ID NEW_FILE.fcproj | list-bins FOLDER REVISION | rescue-bin FOLDER REVISION BIN_ID NEW.fcproj",
+        "usage: project_folder pack SOURCE.fcproj NEW_FOLDER | unpack FOLDER NEW_FILE.fcproj | checkout FOLDER NEW_FILE.fcproj | save FOLDER BASE_REVISION EDITED.fcproj | history FOLDER | compare-bin FOLDER FROM TO BIN_ID | compare-sequence FOLDER FROM TO SEQUENCE_ID | restore-copy FOLDER BASE_REVISION HISTORICAL_REVISION SEQUENCE_ID | rescue FOLDER REVISION SEQUENCE_ID NEW_FILE.fcproj | list-bins FOLDER REVISION | find-uses FOLDER REVISION ITEM_ID | rescue-bin FOLDER REVISION BIN_ID NEW.fcproj",
     ))
 }
 

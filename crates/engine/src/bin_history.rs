@@ -94,18 +94,26 @@ pub(super) fn paste(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"items":paste.selected}))
 }
 
+pub(super) fn find_saved_item_uses(s: &mut Session, p: &Value) -> Result<Value> {
+    let folder = s.history_folder()?;
+    let revision = p["revision"].as_str().ok_or_else(|| error("expected a saved revision"))?;
+    let item = p["item"].as_u64().ok_or_else(|| error("expected an item ID"))?;
+    let usage = filmcraft_format::project_folder::usage::find_uses(folder, revision, item).map_err(error)?;
+    serde_json::to_value(usage).map_err(error)
+}
+
 pub(super) fn compare_versions(s: &mut Session, p: &Value) -> Result<Value> {
-    compare(s.comparison_folder()?, p)
+    compare(s.history_folder()?, p)
 }
 
 impl Session {
-    fn comparison_folder(&self) -> Result<&std::path::Path> {
+    fn history_folder(&self) -> Result<&std::path::Path> {
         Ok(self.editing_folder.as_ref().ok_or_else(|| error("open a modular project first"))?.snapshot.directory())
     }
 
     /// Capture this document's location so a background reader never borrows the live session.
     pub fn prepare_bin_comparison(&self, params: Value) -> Result<impl FnOnce() -> Result<Value> + Send + 'static + use<>> {
-        let folder = self.comparison_folder()?.to_owned();
+        let folder = self.history_folder()?.to_owned();
         Ok(move || compare(&folder, &params))
     }
 }

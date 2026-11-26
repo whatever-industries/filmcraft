@@ -18,6 +18,7 @@ pub mod history_paste;
 mod paths;
 pub mod recovery;
 pub mod revisions;
+pub mod usage;
 
 pub const ROOT: &str = "project.fcmod";
 const FORMAT: &str = "filmcraft.project-folder";

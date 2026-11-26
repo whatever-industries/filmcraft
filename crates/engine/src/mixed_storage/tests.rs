@@ -287,3 +287,28 @@ fn folder_only_crash_can_export_the_draft_while_another_writer_owns_the_folder()
     owner.shutdown();
     recovering.shutdown();
 }
+
+#[test]
+fn read_only_editor_can_find_saved_uses_while_the_writer_has_a_draft() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, folder) = fixture(dir.path());
+    let mut writer = editor(dir.path());
+    open(&mut writer, &folder);
+    rename(&mut writer, "Private draft name");
+    let mut reader = editor(dir.path());
+    assert_eq!(open(&mut reader, &folder)["readOnly"], true);
+    let history = reader.execute("project.binHistory", json!({})).unwrap();
+    let revision = &history["revisions"][0][1];
+    let report = reader.execute("project.findSavedItemUses", json!({"item":5,"revision":revision})).unwrap();
+    assert_eq!(report["complete"], true);
+    assert_eq!(report["revision"], *revision);
+    assert_eq!(report["sequences"][0]["id"], 21);
+    assert_eq!(report["sequences"][0]["direct"], true);
+    assert!(report["filings"].as_array().unwrap().iter().any(|f| f["bin"]["name"] == "Footage"));
+    assert!(!reader.is_dirty());
+    assert!(reader.execute("file.save", json!({})).is_err());
+    assert!(writer.is_dirty());
+    assert_eq!(bin(&writer), "Private draft name");
+    reader.shutdown();
+    writer.shutdown();
+}

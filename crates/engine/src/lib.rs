@@ -986,6 +986,7 @@ impl Session {
                     | "project.referenceClips"
                     | "project.binHistory"
                     | "project.compareBinVersions"
+                    | "project.findSavedItemUses"
                     | "sequence.inspect"
                     | "file.open"
                     | "file.newProject"

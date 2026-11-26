@@ -362,6 +362,18 @@ history chain, envelope and required item payloads must still be readable. Unrel
 and items can be missing. This command leaves the damaged folder available for further
 recovery. Keep a separate backup for loss of the underlying volume.
 
+### Find sequences that use a saved item
+
+Choose a revision digest from `project_folder history FOLDER` and the project item ID of the clip, subclip or sequence.
+
+```sh
+project_folder find-uses FOLDER REVISION ITEM_ID
+```
+
+The JSON report lists each matching sequence once. `direct: true` means the sequence itself references the selected ID through a timeline clip, a multicamera angle or a merged input. An indirect match reaches the item through another sequence or a subclip’s parent. Duplicate clips that share a media path keep their own IDs. The `filings` list shows which bins explicitly contain the selected item or a matching sequence, with bin IDs and saved paths.
+
+The search reads saved project records and works with offline media. Check `complete` before interpreting an empty result. If a bin or item is unreadable, the command prints verified matches and errors keyed by record ID, then exits unsuccessfully. In an open modular project, automation can request the same report with `project.findSavedItemUses` and parameters `{"revision":"<digest>","item":5}`. A read-only editor can run it while another editor owns the folder.
+
 ### Find and rescue a saved bin
 
 Use a digest from `project_folder history FOLDER`. To find a bin that has since

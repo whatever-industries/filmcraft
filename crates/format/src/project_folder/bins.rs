@@ -69,6 +69,16 @@ pub fn saved_bins(folder: &Path, revision: &str) -> io::Result<BinListing> {
     let manifest = recovery::at(folder, revision)?;
     let mut budget = MAX_PROJECT_BYTES;
     let (_, root) = recovery::metadata(folder, &manifest, &mut budget)?;
+    Ok(scan_bins(folder, &manifest, root, &mut budget, |_, _| Ok(())))
+}
+
+pub(super) fn scan_bins(
+    folder: &Path,
+    manifest: &super::Manifest,
+    root: u64,
+    budget: &mut u64,
+    mut visit: impl FnMut(&Bin, &Value) -> io::Result<()>,
+) -> BinListing {
     let ids = record_index(&manifest.bins);
     let mut names = BTreeMap::new();
     let mut errors = BTreeMap::new();
@@ -77,8 +87,11 @@ pub fn saved_bins(folder: &Path, revision: &str) -> io::Result<BinListing> {
         errors.insert(root, format!("missing root bin {root}"));
     }
     for &id in ids.keys() {
-        match read_bin(folder, &ids, id, &mut budget) {
-            Ok((bin, _)) => {
+        match read_bin(folder, &ids, id, budget) {
+            Ok((bin, raw)) => {
+                if let Err(e) = visit(&bin, &raw) {
+                    errors.insert(id, e.to_string());
+                }
                 names.insert(id, bin.name);
                 for entry in bin.children {
                     if let Entry::Bin(child) = entry {
@@ -103,7 +116,7 @@ pub fn saved_bins(folder: &Path, revision: &str) -> io::Result<BinListing> {
             BinLocation { id, name: name.clone(), path: path.map(|parts| parts.into_iter().map(str::to_owned).collect()) }
         })
         .collect();
-    Ok(BinListing { bins, errors, incomplete })
+    BinListing { bins, errors, incomplete }
 }
 
 pub fn list_bins(folder: &Path, revision: &str, mut out: impl Write) -> io::Result<()> {

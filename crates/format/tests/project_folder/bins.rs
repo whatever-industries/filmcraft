@@ -204,3 +204,6 @@ fn paste_recovers_used_lut_and_sidecars_without_replacing_the_live_grade() {
     assert!(luts.iter().any(|l| l["id"] == grade && l["text"] == "TITLE test"));
     assert!(luts.iter().any(|l| l["id"] == "lut999" && l["text"] == "different grade"));
 }
+
+#[path = "usage.rs"]
+mod usage;
