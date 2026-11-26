@@ -125,9 +125,27 @@ the original project into a fresh destination. Unpacking checks every referenced
 and record ID before publishing a new standard file. Both commands refuse occupied
 destinations and keep their inputs intact.
 
-Folder layout version 1 accepts at most 100,000 bin and item records, a 16 MiB manifest,
+Both supported folder layouts accept at most 100,000 bin and item records, a 16 MiB manifest,
 and 256 MiB of combined record data. A standard input or export must also fit FilmCraft's
 ordinary project size limit.
+
+### Incremental saves
+
+`project_folder checkout FOLDER NEW_FILE.fcproj` exports the current snapshot and prints
+its revision digest. Edit the exported file, then run
+`project_folder save FOLDER BASE_REVISION EDITED.fcproj` with that digest. A successful
+save prints the next digest. An unchanged save returns the same digest. A stale or busy
+writer gets an error and retains its edited file. A stale writer can check out a fresh
+snapshot before reapplying its edits.
+
+On a local filesystem the writer holds an OS lock across the revision check and commit.
+The lock file stays in the folder so later writers lock the same file.
+Changed records and the previous manifest are written first. Replacing the current manifest
+commits the entire edit, including moves between bins. Changed bin and item records acquire
+an internal UTC edit time and revision number. Imported edit times start unknown.
+The first changed save upgrades the folder to layout version 2, which retains its previous
+manifests by digest. Each save still reads and validates the complete project. Shared
+filesystem locking requires separate qualification.
 
 ## Saving is atomic
 

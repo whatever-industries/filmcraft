@@ -1,7 +1,11 @@
 #[path = "../../examples/project_folder/converter.rs"]
 mod converter;
 
-use converter::{ROOT, pack, unpack};
+use converter::{
+    ROOT, pack, records_from,
+    revisions::{checkout, save, save_with},
+    unpack,
+};
 use filmcraft_format::{SCHEMA_VERSION, atomic_write_new};
 use serde_json::Value;
 use serde_json::json;
@@ -290,4 +294,162 @@ fn editing_one_sequence_changes_only_its_record() {
     assert_eq!(old, new);
     let cut: Value = serde_json::from_slice(&fs::read(tmp.path().join("second").join(new_cut)).unwrap()).unwrap();
     assert_eq!(cut, project["project"]["items"]["73"]);
+}
+
+fn write_doc(path: &Path, doc: &Value) {
+    fs::write(path, serde_json::to_vec(doc).unwrap()).unwrap();
+}
+
+#[test]
+fn held_writer_lock_keeps_a_competing_save_from_publishing() {
+    let tmp = tempdir().unwrap();
+    let source = tmp.path().join("source.fcproj");
+    let edit = tmp.path().join("edit.fcproj");
+    let folder = tmp.path().join("project");
+    let mut doc = current();
+    write_doc(&source, &doc);
+    pack(&source, &folder, atomic_write_new).unwrap();
+    let base = checkout(&folder, &edit).unwrap();
+    doc["project"]["items"]["73"]["name"] = json!("Revised cut");
+    write_doc(&edit, &doc);
+
+    let lock = fs::OpenOptions::new().create_new(true).read(true).write(true).open(folder.join(".writer.lock")).unwrap();
+    lock.lock().unwrap();
+    assert_eq!(save(&folder, &base, &edit).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    let reopened = tmp.path().join("reopened.fcproj");
+    assert_eq!(checkout(&folder, &reopened).unwrap(), base);
+    drop(lock);
+    assert_ne!(save(&folder, &base, &edit).unwrap(), base);
+}
+
+#[test]
+fn checkout_refuses_an_invalid_live_revision() {
+    let tmp = tempdir().unwrap();
+    let source = tmp.path().join("source.fcproj");
+    let folder = tmp.path().join("project");
+    let export = tmp.path().join("export.fcproj");
+    write_doc(&source, &current());
+    pack(&source, &folder, atomic_write_new).unwrap();
+    let root = folder.join(ROOT);
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&root).unwrap()).unwrap();
+    manifest["layout"] = json!(2);
+    manifest["revision"] = json!({"number": 1, "parent": "invalid digest", "bin_edits": {}, "item_edits": {}});
+    write_doc(&root, &manifest);
+    assert_eq!(checkout(&folder, &export).unwrap_err().kind(), io::ErrorKind::InvalidData);
+    assert!(!export.exists());
+}
+
+#[test]
+fn trim_publishes_only_its_record_and_revision_metadata_and_rejects_a_stale_editor() {
+    let tmp = tempdir().unwrap();
+    let src = tmp.path().join("src.fcproj");
+    let folder = tmp.path().join("folder");
+    let edit = tmp.path().join("edit.fcproj");
+    let mut doc = current();
+    write_doc(&src, &doc);
+    pack(&src, &folder, atomic_write_new).unwrap();
+    let base = checkout(&folder, &edit).unwrap();
+    let first: Value = serde_json::from_slice(&fs::read(folder.join(ROOT)).unwrap()).unwrap();
+    assert_eq!(save(&folder, &base, &edit).unwrap(), base);
+
+    let duration = &mut doc["project"]["items"]["73"]["kind"]["Sequence"]["video_tracks"][0]["items"][0]["duration"];
+    *duration = json!(duration.as_i64().unwrap() / 2);
+    write_doc(&edit, &doc);
+    let mut writes = Vec::new();
+    let next = save_with(&folder, &base, records_from(&edit, &folder).unwrap(), |path, bytes| {
+        writes.push((path.file_name().unwrap().to_owned(), bytes.len()));
+        if path.ends_with(ROOT) { filmcraft_format::atomic_write(path, bytes) } else { atomic_write_new(path, bytes) }
+    })
+    .unwrap();
+    let second: Value = serde_json::from_slice(&fs::read(folder.join(ROOT)).unwrap()).unwrap();
+    let cut = second["items"].as_array().unwrap().iter().find(|r| r[0] == 73).unwrap();
+    let cut_size = serde_json::to_vec(&doc["project"]["items"]["73"]).unwrap().len();
+    assert_eq!(
+        writes,
+        vec![
+            (cut[1].as_str().unwrap().into(), cut_size),
+            (base.as_str().into(), serde_json::to_vec(&first).unwrap().len()),
+            (ROOT.into(), serde_json::to_vec(&second).unwrap().len())
+        ]
+    );
+    assert_eq!(second["bins"], first["bins"]);
+    assert_eq!(second["envelope"], first["envelope"]);
+    assert_eq!(second["revision"]["item_edits"].as_object().unwrap().len(), 1);
+    let stamp = second["revision"]["item_edits"]["73"].clone();
+    assert!(stamp["utc_ms"].as_i64().unwrap() > 0);
+    assert_eq!(stamp["revision"], 1);
+    assert_eq!(second["revision"]["parent"], base);
+    assert!(save(&folder, &base, &src).unwrap_err().to_string().contains("stale"));
+
+    doc["project"]["items"]["21"]["name"] = json!("Another reel");
+    write_doc(&edit, &doc);
+    save(&folder, &next, &edit).unwrap();
+    let third: Value = serde_json::from_slice(&fs::read(folder.join(ROOT)).unwrap()).unwrap();
+    assert_eq!(third["revision"]["item_edits"]["73"], stamp);
+    assert_eq!(third["revision"]["item_edits"]["21"]["revision"], 2);
+}
+
+#[test]
+fn moving_a_sequence_survives_writer_death_at_each_publication_boundary() {
+    // The subprocess exits without running any Rust destructors, including the writer guard.
+    const CHILD: &str = "FILMCRAFT_FOLDER_MOVE_EXIT_TEST";
+    if let Some(dir) = std::env::var_os(CHILD) {
+        let dir = Path::new(&dir);
+        let base = fs::read_to_string(dir.join("base")).unwrap();
+        let stop: usize = fs::read_to_string(dir.join("stop")).unwrap().parse().unwrap();
+        let folder = dir.join("folder");
+        let records = records_from(&dir.join("moved"), &folder).unwrap();
+        let mut count = 0;
+        save_with(&folder, &base, records, |path, bytes| {
+            if count == stop {
+                std::process::exit(85)
+            }
+            if path.ends_with(ROOT) {
+                filmcraft_format::atomic_write(path, bytes)?;
+            } else {
+                atomic_write_new(path, bytes)?;
+            }
+            count += 1;
+            if path.ends_with(ROOT) {
+                std::process::exit(86)
+            }
+            Ok(())
+        })
+        .unwrap();
+        panic!("child missed commit");
+    }
+    for stop in 0..=4 {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path();
+        let folder = dir.join("folder");
+        let old = current();
+        write_doc(&dir.join("input"), &old);
+        pack(&dir.join("input"), &folder, atomic_write_new).unwrap();
+        let base = checkout(&folder, &dir.join("initial")).unwrap();
+        fs::write(dir.join("base"), &base).unwrap();
+        fs::write(dir.join("stop"), stop.to_string()).unwrap();
+        let mut moved = old.clone();
+        let bin = &mut moved["project"]["root"]["children"][0]["Bin"];
+        let list = bin["children"].as_array_mut().unwrap();
+        let nested = list.iter_mut().find_map(|v| v.get_mut("Bin")).unwrap();
+        let item = nested["children"].as_array_mut().unwrap().pop().unwrap();
+        list.push(item);
+        write_doc(&dir.join("moved"), &moved);
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "project_folder::moving_a_sequence_survives_writer_death_at_each_publication_boundary"])
+            .env(CHILD, dir)
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(if stop < 4 { 85 } else { 86 }));
+        let reopened = dir.join("reopened");
+        unpack(&folder, &reopened).unwrap();
+        let doc: Value = serde_json::from_slice(&fs::read(reopened).unwrap()).unwrap();
+        assert_eq!(&doc, if stop < 4 { &old } else { &moved });
+        if stop < 4 {
+            let next = save(&folder, &base, &dir.join("moved")).unwrap();
+            let retried = dir.join("retried");
+            assert_eq!(checkout(&folder, &retried).unwrap(), next);
+            assert_eq!(serde_json::from_slice::<Value>(&fs::read(retried).unwrap()).unwrap(), moved);
+        }
+    }
 }

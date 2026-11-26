@@ -1,9 +1,16 @@
 //! Developer-only project-folder conversion. See docs/project-files.md.
 mod converter;
 
-use converter::{pack, unpack};
+use converter::{
+    pack,
+    revisions::{checkout, save},
+    unpack,
+};
 use filmcraft_format::atomic_write_new;
-use std::{io, path::Path};
+use std::{
+    io::{self, Write},
+    path::Path,
+};
 
 fn run() -> io::Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -12,11 +19,25 @@ fn run() -> io::Result<()> {
         if command == "pack" {
             return pack(src, dest, atomic_write_new);
         }
+        if command == "checkout" {
+            let revision = checkout(src, dest)?;
+            return writeln!(io::stdout().lock(), "{revision}");
+        }
         if command == "unpack" {
             return unpack(src, dest);
         }
     }
-    Err(io::Error::new(io::ErrorKind::InvalidInput, "usage: project_folder pack SOURCE.fcproj NEW_FOLDER | unpack FOLDER NEW_FILE.fcproj"))
+    if let [command, folder, expected, source] = args.as_slice()
+        && command == "save"
+        && let Some(expected) = expected.to_str()
+    {
+        let revision = save(Path::new(folder), expected, Path::new(source))?;
+        return writeln!(io::stdout().lock(), "{revision}");
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "usage: project_folder pack SOURCE.fcproj NEW_FOLDER | unpack FOLDER NEW_FILE.fcproj | checkout FOLDER NEW_FILE.fcproj | save FOLDER BASE_REVISION EDITED.fcproj",
+    ))
 }
 
 fn main() -> std::process::ExitCode {
