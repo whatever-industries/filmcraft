@@ -778,8 +778,14 @@ Edit Marker dialog offers explicit HTTP(S) browser opening for Web Link markers.
 
 ### Copy items from a saved bin
 
-In the Project panel menu, choose **Project History**, select a saved revision and open a bin. This includes bins deleted after that save. Right-click a current bin and choose **Bin History** to follow that bin across renames. The historical window shows saved values. **Show Reference Clips** reveals the sources used by its cuts alongside explicitly filed rows.
+In the Project panel menu, choose **Project History**, select a saved revision and open a bin. This includes bins deleted after that save. Right-click a current bin and choose **Bin History** to follow that bin across renames. The historical window shows saved membership, timing and media settings. Source rows show the current name, label and descriptive columns for that source ID, including cleared custom fields. A source that now exists only in history shows its saved values and a **Saved metadata** indicator. **Show Reference Clips** reveals the sources used by its cuts alongside explicitly filed rows.
 
 Select items, choose **Copy Selected Items**, open a writable destination bin and choose **Paste from Bin History** in its menu. Each selected sequence receives a fresh ID. An unchanged source can be shared. When its historical metadata differs, paste creates a separate source linked to the same media. Pasting another cut from the same revision can reuse that recovered source, including after reopening, while an edit to the recovered source preserves it as an independent version. Copying a reference row explicitly files it in the destination. Sources brought along only by a cut remain reference rows.
 
 Each paste is one Undo step. Save publishes it. The automation equivalents are `project.binHistory` for revision, bin and row listings and `project.pasteFromHistory` for pasting selected item IDs into a writable bin in the same document session. Pass the listing’s `epoch` together with the saved `revision`, destination `bin`, and selected `items`.
+
+#### Compare versions of a bin
+
+In **Bin History**, choose **Compare Versions** beside a save, or open a saved bin in **Project History** and choose **Compare Versions**. The first side defaults to the save that introduced the bin’s preceding distinct state. Either side can be changed. Names follow the same bin ID across renames. A source logging edit counts toward the history of every bin that explicitly filed it at that save. Cuts that only referenced that source skip the logging-only save, even with reference rows visible.
+
+Expand **Changed fields** to see the saved values on each side. **Inspect sequence** shows clip edits with their track, timing and source. A damaged record is identified in an incomplete comparison. If damage interrupts automatic lookup, select two revisions manually. Use **Copy from first save** or **Copy from second save**, then **Paste from Bin History** in a writable bin. Copying while inspecting a clip recovers its owning sequence. Browsing, comparing and copying leave the live edit and its Undo history intact.
