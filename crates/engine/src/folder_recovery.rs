@@ -7,7 +7,7 @@ use crate::{
 };
 use filmcraft_format::project_folder::{
     EditOrigin, FolderSnapshot,
-    checkpoint::{Checkpoint, DESCRIPTOR, Source},
+    checkpoint::{self, Checkpoint, DESCRIPTOR, Source},
 };
 use serde_json::{Value, json};
 use std::{
@@ -98,7 +98,7 @@ impl Session {
         if !self.allow_project_folders || self.editing_folder.is_some() || self.persistence.is_some() {
             return Err(error("enable recovery in a fresh local folder editing session"));
         }
-        let dir = data.join("FolderDrafts");
+        let dir = checkpoint::data_directory(data);
         fs::create_dir_all(&dir).map_err(error)?;
         self.folder_recovery = Some(dir.canonicalize().map_err(error)?);
         Ok(())

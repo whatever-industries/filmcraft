@@ -15,6 +15,11 @@ use std::path::{Path, PathBuf};
 /// The folder name used next to a project.
 pub const AUTO_SAVE_DIR: &str = "Auto-Save";
 
+/// Private crash journals for one application data profile.
+pub fn recovery_root(data_dir: &Path) -> PathBuf {
+    data_dir.join("Recovery")
+}
+
 /// `Auto-Save` folder for a project file.
 pub fn auto_save_dir(project_path: &Path) -> PathBuf {
     project_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).join(AUTO_SAVE_DIR)

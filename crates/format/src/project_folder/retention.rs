@@ -60,6 +60,33 @@ pub struct Preview {
     pub protection_scope: &'static str,
 }
 
+/// Return matching journal directories without taking ownership of running or recoverable sessions.
+/// A missing recovery store is distinct from a store that was successfully inspected and is empty.
+pub fn draft_sessions(root: &Path, folder: &Path) -> io::Result<Option<Vec<PathBuf>>> {
+    match root.symlink_metadata() {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => return Err(invalid(format!("expected a recovery directory at {}", root.display()))),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    let manifest = folder.canonicalize()?.join(ROOT);
+    let mut drafts = Vec::new();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let dir = entry.path();
+        match checkpoint::Checkpoint::read(&dir) {
+            Ok(c) if c.source.manifest == manifest => drafts.push(dir),
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(invalid(format!("cannot inspect checkpoint in {}: {e}", dir.display()))),
+        }
+    }
+    Ok(Some(drafts))
+}
+
 pub fn preview(folder: &Path, keep_latest: NonZeroUsize, readers: &[String], drafts: &[PathBuf]) -> io::Result<Preview> {
     let folder = folder.canonicalize()?;
     let mut readers: BTreeSet<_> = readers.iter().map(String::as_str).collect();

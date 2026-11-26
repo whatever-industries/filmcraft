@@ -38,14 +38,29 @@ fn run() -> io::Result<()> {
         let keep = count.to_str().and_then(|s| s.parse().ok()).ok_or_else(|| io::Error::other("KEEP_LATEST must be a positive integer"))?;
         let mut readers = Vec::new();
         let mut drafts = Vec::new();
+        let mut profiles = std::collections::BTreeSet::new();
         for pair in options.chunks(2) {
             match pair {
                 [flag, rev] if flag == "--reader" => readers.push(rev.to_str().ok_or_else(|| io::Error::other("expected a revision digest"))?.to_owned()),
                 [flag, dir] if flag == "--draft" => drafts.push(dir.into()),
-                _ => return Err(io::Error::other("expected --reader REVISION or --draft SESSION_DIRECTORY")),
+                [flag, dir] if flag == "--profile" => {
+                    profiles.insert(Path::new(dir));
+                }
+                _ => return Err(io::Error::other("expected --reader REVISION, --draft SESSION_DIRECTORY or --profile DATA_DIRECTORY")),
             }
         }
-        let report = converter::retention::preview(Path::new(folder), keep, &readers, &drafts)?;
+        for profile in &profiles {
+            let root = filmcraft_format::autosave::recovery_root(&converter::checkpoint::data_directory(profile));
+            let sessions = converter::retention::draft_sessions(&root, Path::new(folder))?
+                .ok_or_else(|| io::Error::other(format!("no modular recovery store at {}", root.display())))?;
+            drafts.extend(sessions);
+        }
+        drafts.sort();
+        drafts.dedup();
+        let mut report = converter::retention::preview(Path::new(folder), keep, &readers, &drafts)?;
+        if !profiles.is_empty() {
+            report.protection_scope = "Published history, pins, supplied readers and drafts, and matching checkpoints in the supplied profiles. Other readers and profiles may exist.";
+        }
         let mut out = io::stdout().lock();
         serde_json::to_writer(&mut out, &report)?;
         return writeln!(out);
@@ -150,7 +165,7 @@ fn run() -> io::Result<()> {
     }
     Err(io::Error::new(
         io::ErrorKind::InvalidInput,
-        "usage: project_folder pack SOURCE.fcproj NEW_FOLDER | backup FOLDER NEW_FOLDER | unpack FOLDER NEW_FILE.fcproj | checkout FOLDER NEW_FILE.fcproj | save FOLDER BASE_REVISION EDITED.fcproj | history FOLDER | pin FOLDER REVISION LABEL | list-pins FOLDER | retention-preview FOLDER KEEP_LATEST [--reader REVISION] [--draft SESSION_DIRECTORY] | unpin FOLDER REVISION | media-availability FOLDER REVISION | compare-bin FOLDER FROM TO BIN_ID | compare-sequence FOLDER FROM TO SEQUENCE_ID | restore-copy FOLDER BASE_REVISION HISTORICAL_REVISION SEQUENCE_ID | rescue FOLDER REVISION SEQUENCE_ID NEW_FILE.fcproj | list-bins FOLDER REVISION | find-uses FOLDER REVISION ITEM_ID | preview-bin FOLDER REVISION BIN_ID | rescue-bin FOLDER REVISION BIN_ID NEW.fcproj",
+        "usage: project_folder pack SOURCE.fcproj NEW_FOLDER | backup FOLDER NEW_FOLDER | unpack FOLDER NEW_FILE.fcproj | checkout FOLDER NEW_FILE.fcproj | save FOLDER BASE_REVISION EDITED.fcproj | history FOLDER | pin FOLDER REVISION LABEL | list-pins FOLDER | retention-preview FOLDER KEEP_LATEST [--reader REVISION] [--draft SESSION_DIRECTORY] [--profile DATA_DIRECTORY] | unpin FOLDER REVISION | media-availability FOLDER REVISION | compare-bin FOLDER FROM TO BIN_ID | compare-sequence FOLDER FROM TO SEQUENCE_ID | restore-copy FOLDER BASE_REVISION HISTORICAL_REVISION SEQUENCE_ID | rescue FOLDER REVISION SEQUENCE_ID NEW_FILE.fcproj | list-bins FOLDER REVISION | find-uses FOLDER REVISION ITEM_ID | preview-bin FOLDER REVISION BIN_ID | rescue-bin FOLDER REVISION BIN_ID NEW.fcproj",
     ))
 }
 

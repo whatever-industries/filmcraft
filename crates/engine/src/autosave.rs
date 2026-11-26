@@ -585,9 +585,7 @@ const SNAPSHOT: &str = "snapshot.fcproj";
 const META: &str = "session.json";
 const LOCK: &str = "lock";
 
-pub fn recovery_root(data_dir: &Path) -> PathBuf {
-    data_dir.join("Recovery")
-}
+pub use names::recovery_root;
 
 /// Is the session directory's lock free (owner gone)?
 fn lock_is_stale(dir: &Path) -> bool {

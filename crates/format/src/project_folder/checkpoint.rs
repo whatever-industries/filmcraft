@@ -8,6 +8,11 @@ use std::{
 };
 
 pub const DESCRIPTOR: &str = "folder-draft.json";
+/// Data directory used by the modular journal worker within a FilmCraft profile.
+pub fn data_directory(profile: &Path) -> PathBuf {
+    profile.join("FolderDrafts")
+}
+
 const DESCRIPTOR_LIMIT: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

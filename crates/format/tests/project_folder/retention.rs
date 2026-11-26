@@ -100,3 +100,44 @@ fn retention_refuses_unknown_bases_foreign_drafts_and_damaged_payloads() {
     let error = preview(&folder, NonZeroUsize::MIN, &[], &[]).err().unwrap().to_string();
     assert!(error.contains(hash) && error.contains(&head));
 }
+
+#[test]
+fn profile_scan_protects_the_original_projects_drafts_and_reports_unreadable_journals() {
+    use converter::retention::draft_sessions;
+    let tmp = tempdir().unwrap();
+    let folder = tmp.path().join("project");
+    let backup = tmp.path().join("backup");
+    let profile = tmp.path().join("profile");
+    let sessions = filmcraft_format::autosave::recovery_root(&converter::checkpoint::data_directory(&profile));
+    let edit = tmp.path().join("edit.fcproj");
+    let mut doc = current();
+    write_doc(&edit, &doc);
+    pack(&edit, &folder, atomic_write_new).unwrap();
+    let base = converter::backup::published_history(&folder, &backup).unwrap();
+    doc["project"]["items"]["73"]["name"] = "Edited cut".into();
+    write_doc(&edit, &doc);
+    save(&folder, &base, &edit).unwrap();
+
+    let scan = || draft_sessions(&sessions, &folder);
+    assert!(scan().unwrap().is_none());
+    fs::create_dir_all(sessions.join("standard-file-session")).unwrap();
+    assert!(scan().unwrap().unwrap().is_empty());
+    let draft = sessions.join("working");
+    let other = sessions.join("independent-copy");
+    let bytes = fs::read(&edit).unwrap();
+    for (project, dir) in [(&folder, &draft), (&backup, &other)] {
+        fs::create_dir(dir).unwrap();
+        Checkpoint::publish(dir, Source::capture(&project.canonicalize().unwrap(), &base).unwrap(), 1, "Private cut", &bytes).unwrap();
+    }
+    let before = snapshot(&draft);
+    let found = scan().unwrap().unwrap();
+    assert_eq!(found.as_slice(), std::slice::from_ref(&draft));
+    let report = preview(&folder, NonZeroUsize::MIN, &[], &found).unwrap();
+    assert!(report.saves.iter().any(|s| s.revision == base && s.holds.supplied_draft && !s.holds.recent));
+    assert_eq!(report.confirmed_reclaimable_bytes, 0);
+    assert_eq!(before, snapshot(&draft));
+
+    fs::write(other.join(converter::checkpoint::DESCRIPTOR), b"broken").unwrap();
+    let error = scan().unwrap_err();
+    assert!(error.to_string().contains("independent-copy"));
+}

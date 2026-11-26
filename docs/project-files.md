@@ -365,7 +365,13 @@ In a modular project's Project panel, open **Project History → Preview History
 
 The desktop engine query `project.retentionPreview` accepts `{"keepLatest":1}` and returns the per-save and per-file report. It uses the active project and profile. A checkpoint with unreadable metadata can prevent the scan from completing because the editor cannot establish which project it belongs to.
 
-For a standalone inspection, run `project_folder retention-preview FOLDER KEEP_LATEST` to see what depends on each stored record. Use a positive number of recent saves, including the current one. Milestones are included automatically. Add `--reader REVISION` for each known reader or checkout base and `--draft SESSION_DIRECTORY` for each known private checkpoint. Both options are repeatable. The command checks each supplied draft descriptor against the original project folder’s identity.
+For a standalone inspection, run `project_folder retention-preview FOLDER KEEP_LATEST` to see what depends on each stored record. Use a positive number of recent saves, including the current one. Milestones are included automatically. Add `--reader REVISION` for each known reader or checkout base and `--draft SESSION_DIRECTORY` for each known private checkpoint. To include every matching checkpoint from another local FilmCraft profile, pass `--profile DATA_DIRECTORY` with the profile’s data directory. The tool looks under `FolderDrafts/Recovery`. Repeat the option for each profile you want to inspect, including the active one. For example:
+
+```sh
+project_folder retention-preview MyProject 3 --profile StudioProfile --profile LaptopProfile
+```
+
+The tool reads the checkpoint descriptors, including those from running sessions, and verifies matching drafts against the original folder’s identity. An independent backup can share revision hashes and still have its own drafts. A missing recovery store or unreadable descriptor in a requested profile makes the command fail. A successfully scanned empty store contributes no holds. Unsaved edits that have yet to reach a checkpoint can still depend on other revisions. Use `--reader` for known reader bases. All three options are repeatable.
 
 The JSON lists saves newest first, their pin labels, and why each would be kept. For each stored member it reports the logical size, how many saves share it as a payload, whether it belongs to the manifest chain, and which holds apply. Each file counts once toward these totals:
 
