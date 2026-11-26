@@ -86,6 +86,14 @@ impl BinScope {
         if after.next_id < self.start || after.next_id > self.end {
             return Err(invalid("ID reservation exhausted; save, release, and check out the bin again"));
         }
+        if self.project_onto(before, after)? != *after {
+            return Err(invalid(format!("edit changes records outside bin {}", self.bin)));
+        }
+        Ok(())
+    }
+
+    /// Project only owned records onto another view, retaining children owned by other bins.
+    pub fn project_onto(&self, before: &Project, after: &Project) -> io::Result<Project> {
         let mut expected = before.clone();
         expected.next_id = after.next_id;
         for id in &self.sequences {
@@ -111,10 +119,10 @@ impl BinScope {
         for entry in &new.children {
             old.children.push(children.remove(&key(entry)).ok_or_else(|| invalid("checkout permits reordering existing entries only"))?);
         }
-        if !children.is_empty() || expected != *after {
+        if !children.is_empty() {
             return Err(invalid(format!("edit changes records outside bin {}", self.bin)));
         }
-        Ok(())
+        Ok(expected)
     }
 
     fn apply(&self, latest: &mut ProjectRecords, draft: &ProjectRecords) -> io::Result<()> {

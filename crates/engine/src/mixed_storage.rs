@@ -19,6 +19,10 @@ impl Session {
     /// Each relinquished standard writer is joined, including any in-flight autosave. Its
     /// queued acknowledgements cannot be delivered through the replacement worker.
     pub(super) fn prepare_document_switch(&mut self) -> Result<()> {
+        if self.editing_bins() {
+            self.save_open_bins()?;
+            return Ok(());
+        }
         if self.editing_folder.is_some() {
             self.flush_folder_recovery()?;
             return Ok(());
@@ -77,6 +81,9 @@ impl Session {
             return Err(EngineError::Other("expected a recovery candidate id".into()));
         }
         let bulk = discard && params["all"] == true;
+        if self.supports_desktop_bins() && entries.len() > 1 && !bulk && !params["id"].is_string() {
+            return Err(EngineError::Other("choose one recovery candidate by storage and id".into()));
+        }
         if files && folders && (!params["storage"].is_string() || (!bulk && !params["id"].is_string())) {
             return Err(EngineError::Other("choose a recovery candidate by storage (projectFile or projectFolder) and id".into()));
         }

@@ -195,6 +195,24 @@ impl FolderSnapshot {
         Ok(origin)
     }
 
+    /// Apply one locked bin to an in-memory export. Each overlay is validated against
+    /// the same pinned project plus the preceding overlays, including reference and ID checks.
+    pub fn overlay_checkout(&self, current: &[u8], origin: &EditOrigin, before: &[u8], after: &[u8]) -> io::Result<Vec<u8>> {
+        let claim = self.claim.as_ref().ok_or_else(|| invalid("no bin checkout"))?;
+        let raw = ProjectRecords::split(current).map_err(invalid)?;
+        let edited = origin.merge(&self.folder, Some((&self.revision, &self.raw)), before, after)?;
+        let merged = claim.project_draft(&raw, &edited, self.cursor)?;
+        encode_at(&self.folder, merged, &self.folder.join(ROOT))
+    }
+
+    pub fn export_document(&self, bytes: &[u8], destination: &Path) -> io::Result<()> {
+        if destination.extension().is_none_or(|ext| ext != "fcproj") {
+            return Err(invalid("expected a new .fcproj destination"));
+        }
+        super::outside_folder(&self.folder, destination)?;
+        crate::atomic_write_new(destination, &relocate_document(bytes, &self.folder.join(ROOT), destination)?)
+    }
+
     pub fn export(&self, before: &[u8], after: &[u8], destination: &Path) -> io::Result<()> {
         self.export_from(&self.revision, before, after, destination)
     }

@@ -105,7 +105,13 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             offline_file,
         ),
         spec("file.closeProject", "Close Project", &["File"], Some("Cmd+Shift+W"), r#"{"force":bool?}"#, always, close_project),
-        spec("file.saveAll", "Save All", &["File"], None, "{}", always, |s, _| s.execute("file.save", json!({}))),
+        spec("file.saveAll", "Save All", &["File"], None, "{}", always, |s, _| {
+            #[cfg(not(target_arch = "wasm32"))]
+            if s.editing_bins() {
+                return s.save_open_bins();
+            }
+            s.execute("file.save", json!({}))
+        }),
         // ---------------- Edit ----------------
         spec(
             "edit.pasteAttributes",

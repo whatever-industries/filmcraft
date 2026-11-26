@@ -301,7 +301,11 @@ impl Services for FsServices {
 
 /// A point in the undo history (its top step), from [`Session::undo_mark`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct UndoMark(Option<usize>);
+pub struct UndoMark {
+    top: Option<usize>,
+    epoch: u64,
+    checkout: Option<u64>,
+}
 
 /// The typed edit state and, for a folder document, the origin of its extension fields.
 #[derive(Clone, Debug, PartialEq)]
@@ -532,6 +536,8 @@ pub struct Session {
     #[cfg(not(target_arch = "wasm32"))]
     shared_bins: bool,
     #[cfg(not(target_arch = "wasm32"))]
+    bin_editors: desktop_bins::BinEditors,
+    #[cfg(not(target_arch = "wasm32"))]
     editing_folder: Option<folder_edit::EditingFolder>,
     #[cfg(not(target_arch = "wasm32"))]
     folder_recovery: Option<std::path::PathBuf>,
@@ -654,6 +660,8 @@ impl Job {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+mod desktop_bins;
+#[cfg(not(target_arch = "wasm32"))]
 mod folder_edit;
 #[cfg(not(target_arch = "wasm32"))]
 mod folder_recovery;
@@ -672,6 +680,7 @@ impl Session {
     fn begin_document(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
+            self.bin_editors = Default::default();
             self.editing_folder = None;
         }
         self.project_instance = Arc::new(());
@@ -687,6 +696,8 @@ impl Session {
             mixed_config: None,
             #[cfg(not(target_arch = "wasm32"))]
             shared_bins: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            bin_editors: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             editing_folder: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -797,6 +808,13 @@ impl Session {
     pub fn shutdown(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         if self.editing_folder.is_some() {
+            if self.editing_bins() {
+                if let Err(e) = self.save_open_bins() {
+                    self.error_toast("Project folder", e.to_string());
+                    return;
+                }
+                self.bin_editors = Default::default();
+            }
             if let Err(e) = self.flush_folder_recovery() {
                 log::warn!("{e}");
             }
@@ -908,6 +926,30 @@ impl Session {
         }
     }
 
+    pub fn supports_desktop_bins(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.shared_bins && self.mixed_config.is_some()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn editing_bins(&self) -> bool {
+        false
+    }
+    #[cfg(target_arch = "wasm32")]
+    pub fn focused_bin(&self) -> Option<u64> {
+        None
+    }
+    #[cfg(target_arch = "wasm32")]
+    pub fn bin_access(&self, _bin: u64) -> Option<bool> {
+        None
+    }
+
     pub fn is_dirty(&self) -> bool {
         self.revision != self.saved_revision
     }
@@ -916,7 +958,10 @@ impl Session {
     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
         let spec = commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
         #[cfg(not(target_arch = "wasm32"))]
-        self.shared_command(id, &params)?;
+        {
+            self.route_bin_edit(id, &params)?;
+            self.shared_command(id, &params)?;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if self.editing_folder.as_ref().is_some_and(|f| !f.snapshot.is_shared() && !f.snapshot.writable())
             && !matches!(
@@ -1134,13 +1179,30 @@ impl Session {
     }
 
     /// Swap only the editable content. The session keeps its current writer lease and HEAD.
-    fn replace_project(&mut self, mut state: ProjectSnapshot) -> ProjectSnapshot {
+    fn replace_project(&mut self, state: ProjectSnapshot) {
+        let _ = self.swap_snapshot(state);
+    }
+
+    fn swap_snapshot(&mut self, mut state: ProjectSnapshot) -> Option<ProjectSnapshot> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.editing_bins()
+            && let Some(scope) = self.editing_folder.as_ref().and_then(|f| f.snapshot.scope())
+        {
+            // Histories can predate edits in another open bin. Restore only the owned records.
+            match scope.project_onto(&self.project, &state.project) {
+                Ok(project) => state.project = Arc::new(project),
+                Err(e) => {
+                    self.toast(format!("Cannot restore bin history: {e}"));
+                    return None;
+                }
+            }
+        }
         std::mem::swap(&mut self.project, &mut state.project);
         #[cfg(not(target_arch = "wasm32"))]
         if let (Some(folder), Some(base)) = (&mut self.editing_folder, &mut state.folder_base) {
             std::mem::swap(&mut folder.baseline, base);
         }
-        state
+        Some(state)
     }
 
     /// Apply an undoable project edit. The closure gets a mutable copy; on error nothing changes.
@@ -1236,14 +1298,31 @@ impl Session {
 
     /// Where the undo history stands now, for [`Session::revert_to`].
     pub fn undo_mark(&self) -> UndoMark {
-        UndoMark(self.history.undo.last().map(|u| Arc::as_ptr(&u.1.project) as usize))
+        UndoMark {
+            top: self.history.undo.last().map(|u| Arc::as_ptr(&u.1.project) as usize),
+            epoch: self.document_epoch,
+            checkout: {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    self.editing_folder.as_ref().and_then(|f| f.snapshot.scope()).map(|s| s.start)
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    None
+                }
+            },
+        }
     }
 
     /// Take back every edit made since `mark` (a gesture cancelled with Escape, #580), merged or
     /// not: the project returns to how it was at `mark`, and neither undo nor redo keeps them.
     /// Nothing happens when `mark` has left the history. Returns how many steps were taken back.
     pub fn revert_to(&mut self, mark: UndoMark) -> usize {
-        if let UndoMark(Some(p)) = mark
+        let current = self.undo_mark();
+        if mark.epoch != current.epoch || mark.checkout != current.checkout {
+            return 0;
+        }
+        if let Some(p) = mark.top
             && !self.history.undo.iter().any(|u| Arc::as_ptr(&u.1.project) as usize == p)
         {
             return 0;
@@ -1278,6 +1357,12 @@ impl Session {
         f: impl FnOnce(&mut Sequence, &mut EditCtx, &mut EditorState) -> Result<R>,
     ) -> Result<R> {
         let seq_id = self.state.active_sequence.ok_or(EngineError::NoSequence)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.editing_bins()
+            && let Some(bin) = self.project.root.parent_of(seq_id)
+        {
+            self.open_desktop_bin(bin.0)?;
+        }
         let media = self.media.clone();
         let body = move |p: &mut Project, st: &mut EditorState| {
             let project_snapshot = std::sync::Arc::new(p.clone());
@@ -1304,9 +1389,10 @@ impl Session {
     }
 
     pub fn undo(&mut self) -> Option<String> {
-        let (label, prev, origin) = self.history.undo.pop()?;
+        let prev = self.history.undo.last()?.1.clone();
+        let cur = self.swap_snapshot(prev)?;
+        let (label, _, origin) = self.history.undo.pop()?;
         self.history.merge_key = None;
-        let cur = self.replace_project(prev);
         self.history.redo.push((label.clone(), cur, origin));
         self.fix_state();
         self.bump();
@@ -1314,9 +1400,10 @@ impl Session {
     }
 
     pub fn redo(&mut self) -> Option<String> {
-        let (label, next, origin) = self.history.redo.pop()?;
+        let next = self.history.redo.last()?.1.clone();
+        let cur = self.swap_snapshot(next)?;
+        let (label, _, origin) = self.history.redo.pop()?;
         self.history.merge_key = None;
-        let cur = self.replace_project(next);
         self.history.undo.push((label.clone(), cur, origin));
         self.fix_state();
         self.bump();

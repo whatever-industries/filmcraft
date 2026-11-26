@@ -45,6 +45,8 @@ pub struct Checkpoint {
     pub source: Source,
     pub generation: u64,
     pub project_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bin_name: Option<String>,
     payload: String,
 }
 
@@ -79,13 +81,15 @@ impl Checkpoint {
         bytes: &[u8],
         commit: impl FnOnce(&Path, &[u8]) -> io::Result<()>,
     ) -> io::Result<()> {
-        crate::decode(bytes).map_err(invalid)?;
+        let project = crate::decode(bytes).map_err(invalid)?.project;
+        let bin_name =
+            source.scope.as_ref().and_then(|s| project.root.find_bin(filmcraft_project::BinId(s.bin))).map(|bin| bin.name.chars().take(256).collect());
         let prior = match Self::read(dir) {
             Ok(c) => Some(c),
             Err(e) if e.kind() == io::ErrorKind::NotFound => None,
             Err(e) => return Err(e),
         };
-        let next = Self { source, generation, project_name: name.into(), payload: digest(bytes) };
+        let next = Self { source, generation, project_name: name.into(), bin_name, payload: digest(bytes) };
         let descriptor = serde_json::to_vec(&next)?;
         if descriptor.len() as u64 > DESCRIPTOR_LIMIT {
             return Err(invalid("recovery descriptor is too large"));

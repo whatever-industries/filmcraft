@@ -10,6 +10,18 @@ pub(crate) struct EditingFolder {
     pub(super) baseline: Arc<FolderBase>,
 }
 
+impl EditingFolder {
+    pub(super) fn scoped_project(&self, project: &Arc<filmcraft_project::Project>) -> Result<Arc<filmcraft_project::Project>> {
+        if let Some(scope) = self.snapshot.scope() {
+            let mut isolated = scope.project_onto(&self.baseline.project, project).map_err(|e| EngineError::Other(e.to_string()))?;
+            isolated.next_id = self.snapshot.cursor();
+            Ok(Arc::new(isolated))
+        } else {
+            Ok(project.clone())
+        }
+    }
+}
+
 /// Shared by all undo/redo entries made against this saved representation. The
 /// immutable raw records stay in the folder. The project snapshot shares the engine's Arcs.
 #[derive(Debug, PartialEq)]
@@ -38,6 +50,14 @@ pub(crate) struct Draft {
 impl Draft {
     pub(crate) fn encode(&self, project: &filmcraft_project::Project, directory: &Path) -> std::io::Result<Vec<u8>> {
         let folder = self.source.manifest.parent().ok_or_else(|| std::io::Error::other("missing source directory"))?;
+        let mut isolated;
+        let project = if let (Some(scope), Some(cursor)) = (&self.source.scope, self.source.cursor) {
+            isolated = scope.project_onto(&self.baseline.project, project)?;
+            isolated.next_id = cursor;
+            &isolated
+        } else {
+            project
+        };
         let after = filmcraft_format::encode_with_view(project, Some(&self.view), false);
         self.baseline.origin.checkpoint(folder, &self.baseline.typed(), &after, &directory.join(filmcraft_format::project_folder::checkpoint::DESCRIPTOR))
     }
@@ -57,6 +77,9 @@ impl Session {
     pub(crate) fn open_folder(&mut self, path: &str) -> Result<Value> {
         if !self.allow_project_folders || (self.persistence.is_some() && self.mixed_config.is_none()) {
             return Err(EngineError::Other("project folders require a local manual editing session".into()));
+        }
+        if self.editing_bins() && self.editing_folder.as_ref().is_some_and(|f| f.snapshot.is_manifest(Path::new(path))) {
+            return Ok(crate::commands::inspect_project(self));
         }
         let (mut snapshot, bytes) = (if self.shared_bins { FolderSnapshot::open_shared(Path::new(path)) } else { FolderSnapshot::open(Path::new(path)) })
             .map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
@@ -84,12 +107,21 @@ impl Session {
     }
 
     pub(crate) fn save_folder(&mut self, path: &str, adopt: bool) -> Result<Value> {
+        if self.editing_bins() && !manifest(path) {
+            let result = self.export_bins(Path::new(path))?;
+            if adopt {
+                return crate::commands::open_project(self, path);
+            }
+            return Ok(result);
+        }
         if adopt && !manifest(path) {
             self.flush_folder_recovery()?;
         }
         let view = self.project_view();
-        let next = filmcraft_format::encode_with_view(&self.project, Some(&view), false);
+
         let folder = self.editing_folder.as_mut().ok_or_else(|| EngineError::Other("open the folder before saving its manifest".into()))?;
+        let scoped = folder.scoped_project(&self.project)?;
+        let next = filmcraft_format::encode_with_view(&scoped, Some(&view), false);
         if manifest(path) {
             if !adopt || !folder.snapshot.is_manifest(Path::new(path)) {
                 return Err(EngineError::Other("a folder can only publish to its open manifest".into()));
@@ -101,7 +133,10 @@ impl Session {
                 .snapshot
                 .save_edit_with_origin(&folder.baseline.origin, &folder.baseline.typed(), &next)
                 .map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
-            folder.baseline = Arc::new(FolderBase { origin, project: self.project.clone(), view });
+            folder.baseline = Arc::new(FolderBase { origin, project: scoped, view });
+            if let Some(j) = folder.journal.as_mut() {
+                j.pending_cleanup = true;
+            }
             self.saved_revision = self.revision;
             return Ok(json!({"path":path,"folderRevision":folder.snapshot.revision(),"readOnly":false}));
         }

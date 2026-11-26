@@ -216,6 +216,10 @@ pub(super) fn offline_file(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 pub(super) fn close_project(s: &mut Session, p: &Value) -> Result<Value> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if s.editing_bins() {
+        s.save_open_bins()?;
+    }
     if s.is_dirty() && !bool_p(p, "force").unwrap_or(false) {
         return Err(EngineError::Other("the project has unsaved changes: save it first, or pass {\"force\": true} to discard them".into()));
     }

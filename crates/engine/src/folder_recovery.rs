@@ -25,6 +25,7 @@ pub(crate) struct FolderJournal {
     worker: Option<Persistence>,
     source: Source,
     last_sent: Option<(u64, bool)>,
+    pub(super) pending_cleanup: bool,
 }
 
 impl FolderJournal {
@@ -36,7 +37,7 @@ impl FolderJournal {
         let mut config = host.cloned().unwrap_or_else(|| AutosaveConfig::new(data));
         config.data_dir = data.to_owned();
         let worker = Persistence::start_folder(&config).map_err(error)?;
-        Ok(Self { worker: Some(worker), source, last_sent: None })
+        Ok(Self { worker: Some(worker), source, last_sent: None, pending_cleanup: false })
     }
 
     pub(super) fn clear(&self) -> Result<()> {
@@ -137,6 +138,11 @@ impl Session {
         if self.is_dirty() && written != Some(self.revision) {
             return Err(error("checkpoint generation did not match the open draft"));
         }
+        if !self.is_dirty()
+            && let Some(j) = self.editing_folder.as_mut().and_then(|f| f.journal.as_mut())
+        {
+            j.pending_cleanup = false;
+        }
         Ok(written)
     }
 
@@ -171,7 +177,7 @@ impl Session {
                 .map(|d| d.as_millis());
             match claim(&dir) {
                 Ok(c) => entries.push(
-                    json!({"id":id,"savedUnixMs":saved,"projectPath":c.checkpoint.source.manifest,"projectName":c.checkpoint.project_name,"revision":c.checkpoint.generation}),
+                    json!({"id":id,"savedUnixMs":saved,"savedAt":saved.and_then(|ms| self.persistence.as_ref().map(|p| p.local_time((ms/1000) as i64))),"binName":c.checkpoint.bin_name,"bin":c.checkpoint.source.scope.as_ref().map(|s|s.bin),"projectPath":c.checkpoint.source.manifest,"projectName":c.checkpoint.project_name,"revision":c.checkpoint.generation}),
                 ),
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::NotFound => continue,
                 Err(e) => entries.push(json!({"id":id,"error":e.to_string()})),
@@ -258,6 +264,11 @@ impl Session {
         let journal = FolderJournal::start(self.folder_recovery.as_ref().ok_or_else(|| error("disabled"))?, &snapshot, self.mixed_config.as_ref())?;
         if !Source::capture(snapshot.directory(), &c.source.head).map_err(error)?.matches(&c.source) {
             return Err(error(independent));
+        }
+        if self.shared_bins && self.mixed_config.is_some() && snapshot.scope().is_some() {
+            self.restore_desktop_bin(snapshot, bytes, loaded.project, journal)?;
+            candidate.retire()?;
+            return Ok(json!({"path":path,"storage":"projectFolder","dirty":true,"bin":self.focused_bin()}));
         }
         let path_text = path.to_str().ok_or_else(|| error("non-UTF-8 project path"))?;
         self.prepare_document_switch()?;

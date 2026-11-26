@@ -23,6 +23,41 @@ impl Session {
 
     pub(super) fn shared_command(&self, id: &str, p: &Value) -> Result<()> {
         let Some(folder) = self.editing_folder.as_ref().filter(|f| f.snapshot.is_shared()) else { return Ok(()) };
+        if self.editing_bins()
+            && matches!(
+                id,
+                "file.saveAll"
+                    | "file.saveAs"
+                    | "file.discardRecovery"
+                    | "file.recover"
+                    | "file.open"
+                    | "file.closeProject"
+                    | "file.newProject"
+                    | "file.closeAllProjects"
+                    | "sequence.close"
+                    | "sequence.closeOthers"
+                    | "project.select"
+                    | "project.selectAll"
+                    | "project.deselectAll"
+                    | "source.open"
+                    | "source.close"
+                    | "source.closeAll"
+                    | "source.setPlayhead"
+                    | "timeline.select"
+                    | "playhead.set"
+                    | "playhead.step"
+                    | "playhead.start"
+                    | "playhead.end"
+                    | "playhead.stepForward"
+                    | "playhead.stepBack"
+                    | "playhead.stepForward5"
+                    | "playhead.stepBack5"
+                    | "playhead.nextEdit"
+                    | "playhead.prevEdit"
+            )
+        {
+            return Ok(());
+        }
         match id {
             "project.inspect"
             | "sequence.inspect"
@@ -80,6 +115,13 @@ impl Session {
     }
 
     pub(crate) fn change_checkout(&mut self, id: &str, p: &Value) -> Result<Value> {
+        if self.editing_bins() {
+            return match id {
+                "project.checkoutBin" => self.open_desktop_bin(p["bin"].as_u64().ok_or_else(|| error("expected a bin ID"))?),
+                "project.releaseBin" => self.close_desktop_bin(p["bin"].as_u64().or(self.focused_bin()).ok_or_else(|| error("choose an open bin"))?),
+                _ => Err(error("close and reopen the bin to refresh")),
+            };
+        }
         let f = self.editing_folder.as_ref().filter(|f| f.snapshot.is_shared()).ok_or_else(|| error("open a project folder with --shared-bins"))?;
         let discard = p.get("discard").map(|v| v.as_bool().ok_or_else(|| error("discard must be a boolean"))).transpose()?.unwrap_or(false);
         if self.is_dirty() && (!discard || id == "project.refresh") {
