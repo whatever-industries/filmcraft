@@ -122,6 +122,13 @@ impl Session {
         Ok(move || filmcraft_format::project_folder::usage::find_uses(&folder, &revision, item).map_err(error))
     }
 
+    /// Capture only the saved revision and its folder for the history browser's worker.
+    pub fn prepare_saved_usage_index(&self, revision: &str) -> Result<impl FnOnce() -> Result<crate::UsageIndex> + Send + 'static + use<>> {
+        let folder = self.history_folder()?.to_owned();
+        let revision = revision.to_owned();
+        Ok(move || crate::UsageIndex::read(&folder, &revision).map_err(error))
+    }
+
     /// Capture this document's location so a background reader never borrows the live session.
     pub fn prepare_bin_comparison(&self, params: Value) -> Result<impl FnOnce() -> Result<Value> + Send + 'static + use<>> {
         let folder = self.history_folder()?.to_owned();

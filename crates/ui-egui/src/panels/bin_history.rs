@@ -40,6 +40,7 @@ pub struct Browser {
     live_revision: u64,
     comparison: Option<versions::Comparison>,
     uses: Option<uses::Uses>,
+    usage_index: Option<uses::Cache>,
     focus_item: Option<u64>,
     revision: Option<String>,
     page: Value,
@@ -72,6 +73,7 @@ pub fn open(app: &mut FilmcraftApp, bin: Option<u64>) {
             live_revision: app.session.revision,
             comparison: None,
             uses: None,
+            usage_index: None,
             focus_item: None,
             revision: None,
             page,
@@ -116,7 +118,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
         if let (Some(uses), Some(revision)) = (&mut b.uses, &b.revision) {
             if button(app, ui, "binHistory.back", tl!("Back to Bin History")) {
                 b.uses = None;
-            } else if let Some((bin, item)) = uses.show(app, ui, revision) {
+            } else if let Some((bin, item)) = uses.show(app, ui, revision, &mut b.usage_index) {
                 match app.session.execute("project.binHistory", json!({"revision":revision,"bin":bin})) {
                     Ok(page) if page["rows"].as_array().is_some_and(|rows| rows.iter().any(|row| row["item"].as_u64() == Some(item))) => {
                         b.page = page;
@@ -143,7 +145,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
         }
         if let Some(revision) = &b.revision {
             ui.horizontal(|ui| {
-                if ui.button(tl!("Revisions")).clicked() {
+                if button(app, ui, "binHistory.revisions", tl!("Revisions")) {
                     next = Some(b.initial_bin.map_or(json!({}), |id| json!({"bin":id})));
                 }
                 if b.page["rows"].is_array() && button(app, ui, "binHistory.bins", tl!("Browse Bins")) {
@@ -234,7 +236,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                                 if button(app, ui, &format!("binHistory.findUses.{id}"), tl!("Find Uses"))
                                     && let Some(revision) = &b.revision
                                 {
-                                    b.uses = Some(uses::Uses::open(app, ctx, revision, id, name));
+                                    b.uses = Some(uses::Uses::open(app, ctx, revision, id, name, b.usage_index.as_ref()));
                                     ui.close();
                                 }
                             });
@@ -268,7 +270,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                 && let Some(revision) = &b.revision
                 && let Some(row) = rows.iter().find(|row| row["item"].as_u64() == Some(*id))
             {
-                b.uses = Some(uses::Uses::open(app, ctx, revision, *id, row["name"].as_str().unwrap_or_default()));
+                b.uses = Some(uses::Uses::open(app, ctx, revision, *id, row["name"].as_str().unwrap_or_default(), b.usage_index.as_ref()));
             }
             let r = ui.add_enabled(!selected.is_empty(), egui::Button::new(tl!("Copy Selected Items")));
             app.auto.add("binHistory.copy", r.rect, tl!("Copy Selected Items"));
@@ -284,6 +286,9 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
     if let Some(params) = next
         && let Some(page) = query(app, params.clone())
     {
+        if b.revision.as_deref() != params["revision"].as_str() {
+            b.usage_index = None;
+        }
         b.revision = params["revision"].as_str().map(str::to_owned);
         b.page = page;
         b.live_revision = app.session.revision;

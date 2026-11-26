@@ -89,3 +89,25 @@ fn damaged_saved_records_preserve_verified_uses_and_flag_incomplete_coverage() {
     assert_eq!(none["complete"], false);
     assert_eq!(before, snapshot(&folder));
 }
+
+#[test]
+fn retained_uses_do_not_authorize_rescuing_damaged_media_records() {
+    use filmcraft_format::project_folder::{recovery::rescue, usage::UsageIndex};
+    let temp = tempdir().unwrap();
+    let (folder, rev) = start(temp.path(), &sample());
+    let index = UsageIndex::read(&folder, &rev).unwrap();
+    let mut m = manifest(&folder);
+    let source = folder.join(payload(&mut m, "items", 5).as_str().unwrap());
+    let original = fs::read(&source).unwrap();
+    fs::remove_file(&source).unwrap();
+    let remembered = index.lookup(5).unwrap();
+    assert!(remembered.complete && remembered.sequences.iter().any(|s| s.id == 21));
+    let fresh = find_uses(&folder, &rev, 5).unwrap();
+    assert!(!fresh.complete && fresh.item_errors.contains_key(&5));
+    let export = temp.path().join("restored.fcproj");
+    assert!(rescue(&folder, &rev, 21, &export).is_err());
+    assert!(!export.exists());
+    fs::write(&source, original).unwrap();
+    rescue(&folder, &rev, 21, &export).unwrap();
+    assert!(filmcraft_format::decode(&fs::read(export).unwrap()).is_ok());
+}

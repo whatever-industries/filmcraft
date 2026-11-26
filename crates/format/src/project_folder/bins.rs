@@ -58,7 +58,7 @@ pub struct BinListing {
     pub incomplete: bool,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct BinLocation {
     pub id: u64,
     pub name: String,

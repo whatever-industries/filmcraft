@@ -1981,7 +1981,8 @@ fn find_uses_jumps_to_the_filed_cut_in_the_pinned_save() {
     let folder = temp.path().join("folder");
     std::fs::write(&stock, filmcraft_format::encode(&project, false)).unwrap();
     pack(&stock, &folder, filmcraft_format::atomic_write_new).unwrap();
-    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(folder.join("project.fcmod")).unwrap()).unwrap();
+    let first_manifest = std::fs::read(folder.join("project.fcmod")).unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&first_manifest).unwrap();
     let saved_cut_bin = manifest["bins"].as_array().unwrap().iter().find(|row| row[0] == cuts.0).unwrap()[1].as_str().unwrap();
     let mut session = Session::desktop_project_editor(filmcraft_engine::autosave::AutosaveConfig::new(temp.path().join("profile"))).unwrap();
     session.execute("file.open", json!({"path":folder.join("project.fcmod")})).unwrap();
@@ -2023,11 +2024,71 @@ fn find_uses_jumps_to_the_filed_cut_in_the_pinned_save() {
     assert!(!d.app().session.is_dirty());
 
     // Damage only the older revision's cut-bin record. An incomplete scan cannot prove absence.
-    std::fs::remove_file(folder.join(saved_cut_bin)).unwrap();
+    let payload = folder.join(saved_cut_bin);
+    let intact = std::fs::read(&payload).unwrap();
+    std::fs::remove_file(&payload).unwrap();
     d.click("binHistory.bin.1");
     d.click(&format!("binHistory.item.{}", unused.0));
     d.click("binHistory.findSelectedUses");
     d.wait_for("binHistory.noUses");
+    assert_eq!(d.label("binHistory.noUses"), "No sequences use this item in this save", "the browser retains its scan across bin changes");
+    d.click("binHistory.refreshUses");
+    d.wait_for("binHistory.noUses");
     assert_eq!(d.label("binHistory.noUses"), "No verified matches");
     assert!(d.parts().0.query_by_label("Search incomplete").is_some());
+    std::fs::write(&payload, &intact).unwrap();
+    d.click("binHistory.refreshUses");
+    d.wait_for("binHistory.noUses");
+    assert_eq!(d.label("binHistory.noUses"), "No sequences use this item in this save");
+    assert!(d.parts().0.query_by_label("Search incomplete").is_none());
+
+    std::fs::remove_file(&payload).unwrap();
+    d.click("binHistory.back");
+    d.ok("ui.click", json!({"id":"binHistory.item.5","button":"right"}));
+    d.click("binHistory.findUses.5");
+    d.wait_for(&jump);
+    d.click(&jump);
+    assert!(d.has("binHistory.refreshUses"), "a cached result cannot open a damaged bin");
+    assert!(!d.has("binHistory.item.21"));
+
+    d.click("binHistory.back");
+    d.click("binHistory.revisions");
+    d.click("binHistory.revision.1");
+    d.ok("ui.click", json!({"id":"binHistory.item.5","button":"right"}));
+    d.click("binHistory.findUses.5");
+    d.wait_for(&jump);
+    assert!(d.label(&jump).contains("Current Cuts"));
+    d.click("binHistory.back");
+    d.click("binHistory.revisions");
+    d.click("binHistory.revision.0");
+    d.click(&format!("binHistory.item.{}", unused.0));
+    d.click("binHistory.findSelectedUses");
+    d.wait_for("binHistory.noUses");
+    assert_eq!(d.label("binHistory.noUses"), "No verified matches", "returning to an old revision must reload it");
+
+    let head = folder.join("project.fcmod");
+    let saved_head = std::fs::read(&head).unwrap();
+    std::fs::write(&head, b"broken manifest").unwrap();
+    d.click("binHistory.refreshUses");
+    d.wait_for("binHistory.refreshUses");
+    assert!(!d.has("binHistory.noUses"), "failed refresh must clear the previous report");
+    std::fs::write(&head, saved_head).unwrap();
+    d.click("binHistory.refreshUses");
+    d.wait_for("binHistory.noUses");
+    assert_eq!(d.label("binHistory.noUses"), "No verified matches");
+
+    // Same saved records and identifiers, independent document and scan.
+    let other = temp.path().join("other");
+    pack(&stock, &other, filmcraft_format::atomic_write_new).unwrap();
+    assert_eq!(std::fs::read(other.join("project.fcmod")).unwrap(), first_manifest);
+    d.exec("file.open", json!({"path":other.join("project.fcmod")}));
+    d.frames(2);
+    assert!(!d.has("binHistory.refreshUses"));
+    d.ok("ui.click", json!({"id":"project.bin.1","button":"right"}));
+    d.click("project.binMenu.history");
+    d.click("binHistory.revision.0");
+    d.click(&format!("binHistory.item.{}", unused.0));
+    d.click("binHistory.findSelectedUses");
+    d.wait_for("binHistory.noUses");
+    assert_eq!(d.label("binHistory.noUses"), "No sequences use this item in this save");
 }

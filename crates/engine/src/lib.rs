@@ -664,6 +664,8 @@ impl Job {
 #[cfg(not(target_arch = "wasm32"))]
 mod bin_history;
 #[cfg(not(target_arch = "wasm32"))]
+pub use filmcraft_format::project_folder::usage::UsageIndex;
+#[cfg(not(target_arch = "wasm32"))]
 mod desktop_bins;
 #[cfg(not(target_arch = "wasm32"))]
 mod folder_edit;

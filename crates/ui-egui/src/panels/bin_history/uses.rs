@@ -1,6 +1,14 @@
 //! Navigate from a saved item to its consuming sequences without opening a live cut.
 use super::{FilmcraftApp, button, worker::Pending};
 use std::collections::BTreeMap;
+use std::sync::Arc;
+
+#[cfg(not(target_arch = "wasm32"))]
+type Index = filmcraft_engine::UsageIndex;
+#[cfg(target_arch = "wasm32")]
+type Index = ();
+
+pub(super) type Cache = Arc<Index>;
 
 #[derive(Clone, Debug, PartialEq)]
 struct Sequence {
@@ -30,17 +38,23 @@ struct Report {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Uses {
     name: String,
-    pending: Option<Pending<Report>>,
+    item: u64,
+    pending: Option<Pending<(Cache, Report)>>,
     report: Option<Report>,
     pub error: Option<String>,
 }
 
 impl Uses {
-    pub fn open(app: &mut FilmcraftApp, ctx: &egui::Context, revision: &str, item: u64, name: &str) -> Self {
+    pub fn open(app: &mut FilmcraftApp, ctx: &egui::Context, revision: &str, item: u64, name: &str, cache: Option<&Cache>) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
-        let result = app.session.prepare_saved_item_uses(revision, item).map_err(|e| e.to_string()).and_then(|read| {
+        let result = app.session.prepare_saved_usage_index(revision).map_err(|e| e.to_string()).and_then(|read| {
+            let cached = cache.filter(|index| index.revision() == revision).cloned();
             app.bin_history_worker.submit(ctx, move || {
-                let usage = read().map_err(|e| e.to_string())?;
+                let index = match cached {
+                    Some(index) => index,
+                    None => Arc::new(read().map_err(|e| e.to_string())?),
+                };
+                let usage = index.lookup(item).map_err(|e| e.to_string())?;
                 let mut bins = Vec::new();
                 let mut locations = BTreeMap::<_, Vec<_>>::new();
                 for filing in usage.filings {
@@ -51,35 +65,41 @@ impl Uses {
                         locations.entry(id).or_default().push(index);
                     }
                 }
-                Ok(Report {
-                    sequences: usage.sequences.into_iter().map(|s| Sequence { id: s.id, name: s.name, direct: s.direct }).collect(),
-                    bins,
-                    locations,
-                    complete: usage.complete,
-                    bin_errors: usage.bin_errors,
-                    item_errors: usage.item_errors,
-                })
+                Ok((
+                    index,
+                    Report {
+                        sequences: usage.sequences.into_iter().map(|s| Sequence { id: s.id, name: s.name, direct: s.direct }).collect(),
+                        bins,
+                        locations,
+                        complete: usage.complete,
+                        bin_errors: usage.bin_errors,
+                        item_errors: usage.item_errors,
+                    },
+                ))
             })
         });
         #[cfg(target_arch = "wasm32")]
         let result = {
-            let _ = (app, ctx, revision, item);
+            let _ = (app, ctx, revision, cache);
             Err(tl!("Find Uses requires a local project folder").to_owned())
         };
         let (pending, error) = match result {
             Ok(pending) => (Some(pending), None),
             Err(e) => (None, Some(e)),
         };
-        Self { name: name.to_owned(), pending, report: None, error }
+        Self { name: name.to_owned(), item, pending, report: None, error }
     }
 
-    pub fn show(&mut self, app: &mut FilmcraftApp, ui: &mut egui::Ui, revision: &str) -> Option<(u64, u64)> {
+    pub fn show(&mut self, app: &mut FilmcraftApp, ui: &mut egui::Ui, revision: &str, cache: &mut Option<Cache>) -> Option<(u64, u64)> {
         ui.heading(&self.name);
         ui.label(format!("{} {}", tl!("Revision"), revision.get(..8).unwrap_or(revision)));
         if let Some(reply) = self.pending.as_ref().and_then(Pending::poll) {
             self.pending = None;
             match reply {
-                Ok(report) => self.report = Some(report),
+                Ok((index, report)) => {
+                    *cache = Some(index);
+                    self.report = Some(report);
+                }
                 Err(error) => self.error = Some(error),
             }
         }
@@ -89,6 +109,22 @@ impl Uses {
                 ui.ctx().accesskit_node_builder(response.id, |node| node.set_live(egui::accesskit::Live::Polite));
             }
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+        }
+        if self.pending.is_none() {
+            let refresh = ui
+                .horizontal(|ui| {
+                    let clicked = button(app, ui, "binHistory.refreshUses", tl!("Refresh"));
+                    if self.report.is_some() {
+                        ui.label(tl!("Results from the last scan"));
+                    }
+                    clicked
+                })
+                .inner;
+            if refresh {
+                *cache = None;
+                *self = Self::open(app, ui.ctx(), revision, self.item, &self.name, None);
+                return None;
+            }
         }
         if let Some(message) = &self.error {
             ui.label(message);
