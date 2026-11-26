@@ -227,7 +227,7 @@ fn compare_named_fields_secondary_filings_and_used_resources() {
 
 #[test]
 fn previous_follows_bin_identity_through_rename_deletion_and_damaged_history() {
-    use filmcraft_format::project_folder::compare::previous;
+    use filmcraft_format::project_folder::compare::{bin_versions, previous};
     let t = tempdir().unwrap();
     let mut doc = sample();
     let (folder, a) = start(t.path(), &doc);
@@ -243,11 +243,17 @@ fn previous_follows_bin_identity_through_rename_deletion_and_damaged_history() {
     let mut m = manifest(&folder);
     let damaged = folder.join(payload(&mut m, "bins", 90).as_str().unwrap());
     doc["project"]["root"]["children"].as_array_mut().unwrap().pop();
-    let _head = publish(&folder, &c, &doc);
-    assert_eq!(previous(&folder, &c, 90).unwrap(), Some(b));
+    let head = publish(&folder, &c, &doc);
+    assert_eq!(previous(&folder, &c, 90).unwrap().as_ref(), Some(&b));
     fs::remove_file(damaged).unwrap();
     let gap = previous(&folder, &c, 90).unwrap_err().to_string();
     assert!(gap.contains(&c) && gap.contains("90"), "{gap}");
+    let picker = bin_versions(&folder, &c, 90).unwrap();
+    assert!(picker.previous.err().unwrap().to_string().contains(&c));
+    assert_eq!(picker.revisions.iter().map(|(_, h)| h).collect::<Vec<_>>(), [&head, &c, &b, &a]);
+    // An unreadable ancestor of the already-damaged bin also invalidates the revision list.
+    fs::write(folder.join(&a), b"broken").unwrap();
+    assert!(bin_versions(&folder, &c, 90).err().unwrap().to_string().contains(&a));
 }
 
 #[test]
@@ -293,4 +299,26 @@ fn previous_reports_a_missing_or_repeated_dependency_in_an_older_manifest() {
         let error = previous(&folder, &selected, 1).unwrap_err().to_string();
         assert!(error.contains(&hash) && error.contains("item 5"), "{error}");
     }
+}
+
+#[test]
+fn picker_compares_its_pinned_endpoints_after_the_root_changes() {
+    use filmcraft_format::project_folder::{ROOT, compare::bin_versions};
+    let t = tempdir().unwrap();
+    let mut doc = sample();
+    let (folder, first) = start(t.path(), &doc);
+    let original = fs::read(folder.join(ROOT)).unwrap();
+    doc["project"]["root"]["children"][1]["Bin"]["name"] = "Unrelated edit".into();
+    let middle = publish(&folder, &first, &doc);
+    doc["project"]["root"]["children"][0]["Bin"]["name"] = "Final cuts".into();
+    let last = publish(&folder, &middle, &doc);
+    let picker = bin_versions(&folder, &last, 1).unwrap();
+    assert_eq!(picker.revisions.iter().map(|(_, h)| h).collect::<Vec<_>>(), [&last, &middle, &first]);
+    let expected = report(&folder, &first, &last, Selection::Bin(1), true);
+    assert!(!expected.is_empty());
+    fs::write(folder.join(ROOT), original).unwrap();
+    let (from, result) = picker.previous.unwrap().unwrap().into_report(Selection::Bin(1)).unwrap();
+    assert_eq!(from, first);
+    assert!(result.complete);
+    assert_eq!(result.rows, expected);
 }

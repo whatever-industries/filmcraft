@@ -61,41 +61,91 @@ impl VerifiedBin {
     }
 }
 
+/// The picker and its comparison endpoints come from one verified manifest chain.
+/// A damaged bin can still leave a usable revision picker for an explicit comparison.
+pub struct BinVersions<'a> {
+    pub revisions: Vec<(u64, String)>,
+    pub previous: io::Result<Option<VersionPair<'a>>>,
+}
+
+pub struct VersionPair<'a> {
+    folder: &'a Path,
+    selected: &'a str,
+    from: String,
+    before: Manifest,
+    after: Manifest,
+}
+
+impl VersionPair<'_> {
+    pub fn into_report(self, selection: Selection) -> io::Result<(String, super::Report)> {
+        let a = super::read_snapshot(self.folder, &self.from, &self.before, selection)?;
+        let b = super::read_snapshot(self.folder, self.selected, &self.after, selection)?;
+        let report = super::compare_snapshots(&self.from, &a, self.selected, &b, selection)?;
+        Ok((self.from, report))
+    }
+}
+
+pub fn bin_versions<'a>(folder: &'a Path, selected: &'a str, bin: u64) -> io::Result<BinVersions<'a>> {
+    lookup(folder, selected, bin, true)
+}
+
 pub fn previous(folder: &Path, selected: &str, bin: u64) -> io::Result<Option<String>> {
     check_hash(selected)?;
+    Ok(lookup(folder, selected, bin, false)?.previous?.map(|pair| pair.from))
+}
+
+fn lookup<'a>(folder: &'a Path, selected: &'a str, bin: u64, list_all: bool) -> io::Result<BinVersions<'a>> {
+    let mut failure = check_hash(selected).err();
     let mut verified: Option<VerifiedBin> = None;
-    let mut started = false;
-    let mut current = None;
-    let mut previous = None;
-    let mut answer = None;
+    let mut after = None;
+    let mut before = None;
+    let mut current_state = None;
+    let mut previous_state = None;
+    let mut finished = false;
+    let mut revisions = Vec::new();
     recovery::walk(folder, |hash, manifest| {
-        started |= hash == selected;
-        if !started {
+        if list_all {
+            revisions.push((manifest.revision.as_ref().map_or(0, |r| r.number), hash.to_owned()));
+        }
+        if finished || failure.is_some() {
+            return Ok(!list_all);
+        }
+        if hash != selected && after.is_none() {
             return Ok(false);
         }
         if !manifest.bins.iter().any(|(id, _)| *id == bin) {
             if hash == selected {
-                return Err(invalid(format!("bin {bin} absent at {hash}")));
+                failure = Some(invalid(format!("bin {bin} absent at {hash}")));
             }
-            return Ok(true);
+            finished = true;
+            return Ok(!list_all);
         }
         let state = match &verified {
-            Some(bin) if bin.matches(manifest) => bin.state,
-            _ => verified.insert(VerifiedBin::read(folder, manifest, bin).map_err(|e| invalid(format!("Cannot establish bin history at {hash}: {e}")))?).state,
+            Some(cached) if cached.matches(&manifest) => cached.state,
+            _ => match VerifiedBin::read(folder, &manifest, bin) {
+                Ok(next) => verified.insert(next).state,
+                Err(e) => {
+                    failure = Some(invalid(format!("Cannot establish bin history at {hash}: {e}")));
+                    return Ok(!list_all);
+                }
+            },
         };
-        let selected_state = current.get_or_insert(state);
-        if previous.is_none() && *selected_state == state {
-            return Ok(false);
+        if hash == selected {
+            current_state = Some(state);
+            after = Some(manifest);
+        } else if previous_state.is_some_and(|p| p != state) {
+            finished = true;
+        } else if current_state != Some(state) {
+            previous_state = Some(state);
+            before = Some((hash.to_owned(), manifest));
         }
-        if previous.as_ref().is_some_and(|p| p != &state) {
-            return Ok(true);
-        }
-        previous = Some(state);
-        answer = Some(hash.to_owned());
-        Ok(false)
+        Ok(finished && !list_all)
     })?;
-    if !started {
-        return Err(invalid("revision outside project history"));
-    }
-    Ok(answer)
+    let previous = match (failure, after, before) {
+        (Some(e), _, _) => Err(e),
+        (_, None, _) => Err(invalid("revision outside project history")),
+        (_, Some(after), Some((from, before))) => Ok(Some(VersionPair { folder, selected, from, before, after })),
+        _ => Ok(None),
+    };
+    Ok(BinVersions { revisions, previous })
 }

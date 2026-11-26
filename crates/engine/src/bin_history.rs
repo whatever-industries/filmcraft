@@ -100,12 +100,20 @@ pub(super) fn compare_versions(s: &mut Session, p: &Value) -> Result<Value> {
     let bin = p["bin"].as_u64().ok_or_else(|| error("expected a bin ID"))?;
     let to = p["to"].as_str().ok_or_else(|| error("expected a saved revision"))?;
     let mut result = json!({"bin":bin,"to":to});
-    let from = if let Some(v) = p.get("from") {
-        v.as_str().ok_or_else(|| error("expected a saved revision"))?.to_owned()
+    let selection = || -> Result<Selection> {
+        Ok(match p.get("sequence") {
+            None => Selection::Bin(bin),
+            Some(v) => Selection::Sequence(v.as_u64().ok_or_else(|| error("expected a sequence ID"))?),
+        })
+    };
+    let (from, report) = if let Some(v) = p.get("from") {
+        let from = v.as_str().ok_or_else(|| error("expected a saved revision"))?;
+        (from.to_owned(), compare::report(folder, from, to, selection()?).map_err(error)?)
     } else {
-        result["revisions"] = json!(bin_history::revisions(folder, None).map_err(error)?);
-        match compare::previous(folder, to, bin) {
-            Ok(Some(previous)) => previous,
+        let picker = compare::bin_versions(folder, to, bin).map_err(error)?;
+        result["revisions"] = json!(picker.revisions);
+        match picker.previous {
+            Ok(Some(pair)) => pair.into_report(selection()?).map_err(error)?,
             Ok(None) => return Ok(result),
             Err(e) => {
                 result["lookupError"] = e.to_string().into();
@@ -113,11 +121,7 @@ pub(super) fn compare_versions(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
     };
-    let selection = match p.get("sequence") {
-        None => Selection::Bin(bin),
-        Some(v) => Selection::Sequence(v.as_u64().ok_or_else(|| error("expected a sequence ID"))?),
-    };
-    result["report"] = serde_json::to_value(compare::report(folder, &from, to, selection).map_err(error)?).map_err(error)?;
+    result["report"] = serde_json::to_value(report).map_err(error)?;
     result["from"] = from.into();
     Ok(result)
 }

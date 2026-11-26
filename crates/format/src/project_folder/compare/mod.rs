@@ -1,7 +1,7 @@
 //! Read-only editorial comparison of two reachable saved revisions.
 mod fields;
 mod previous;
-pub use previous::previous;
+pub use previous::{BinVersions, VersionPair, bin_versions, previous};
 mod sequence;
 mod snapshot;
 use super::{bins::Entry, check_hash, invalid, recovery};
@@ -148,16 +148,24 @@ pub fn report(folder: &Path, from: &str, to: &str, selection: Selection) -> io::
     // Both digests must be reachable from the same read of project.fcmod, even during publication.
     recovery::walk(folder, |hash, manifest| {
         if hash == from {
-            left = Some(Snapshot::read(folder, manifest, selection).map_err(|e| invalid(format!("{hash}: {e}")))?);
+            left = Some(read_snapshot(folder, hash, &manifest, selection)?);
         }
         if hash == to && to != from {
-            right = Some(Snapshot::read(folder, manifest, selection).map_err(|e| invalid(format!("{hash}: {e}")))?);
+            right = Some(read_snapshot(folder, hash, &manifest, selection)?);
         }
         Ok(left.is_some() && (from == to || right.is_some()))
     })?;
     let absent = |hash: &str| invalid(format!("revision {hash} is outside the current project history"));
     let a = left.as_ref().ok_or_else(|| absent(from))?;
     let b = if from == to { a } else { right.as_ref().ok_or_else(|| absent(to))? };
+    compare_snapshots(from, a, to, b, selection)
+}
+
+fn read_snapshot(folder: &Path, hash: &str, manifest: &super::Manifest, selection: Selection) -> io::Result<Snapshot> {
+    Snapshot::read(folder, manifest, selection).map_err(|e| invalid(format!("{hash}: {e}")))
+}
+
+fn compare_snapshots(from: &str, a: &Snapshot, to: &str, b: &Snapshot, selection: Selection) -> io::Result<Report> {
     let key = selection.key();
     if !a.catalog.contains(&key) && !b.catalog.contains(&key) {
         return Err(invalid(format!("missing {key:?} in both revisions")));

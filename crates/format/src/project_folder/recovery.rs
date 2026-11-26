@@ -12,7 +12,7 @@ use std::{io, path::Path};
 
 pub(super) const SIDECARS: [&str; 3] = ["transcripts", "source_graphics", "narrations"];
 
-pub(super) fn walk(folder: &Path, mut visit: impl FnMut(&str, &Manifest) -> io::Result<bool>) -> io::Result<Option<Manifest>> {
+pub(super) fn walk(folder: &Path, mut visit: impl FnMut(&str, Manifest) -> io::Result<bool>) -> io::Result<()> {
     let mut bytes = read_member(&folder.join(ROOT), MANIFEST_LIMIT)?;
     let mut hash = digest(&bytes);
     let mut expected_number = None;
@@ -23,16 +23,17 @@ pub(super) fn walk(folder: &Path, mut visit: impl FnMut(&str, &Manifest) -> io::
         if expected_number.is_some_and(|n| number != n) || (number == 0 && manifest.revision.is_some()) {
             return Err(invalid("broken project revision numbering"));
         }
-        if visit(&hash, &manifest)? {
-            return Ok(Some(manifest));
+        let parent = manifest.revision.as_ref().map(|r| r.parent.clone());
+        if visit(&hash, manifest)? {
+            return Ok(());
         }
-        let Some(revision) = manifest.revision else { return Ok(None) };
-        check_hash(&revision.parent)?;
-        bytes = read_member(&folder.join(&revision.parent), MANIFEST_LIMIT)?;
-        if digest(&bytes) != revision.parent {
-            return Err(invalid(format!("damaged archived manifest {}", revision.parent)));
+        let Some(parent) = parent else { return Ok(()) };
+        check_hash(&parent)?;
+        bytes = read_member(&folder.join(&parent), MANIFEST_LIMIT)?;
+        if digest(&bytes) != parent {
+            return Err(invalid(format!("damaged archived manifest {parent}")));
         }
-        hash = revision.parent;
+        hash = parent;
         expected_number = Some(number - 1);
     }
 }
@@ -47,7 +48,14 @@ pub fn history(folder: &Path, mut visit: impl FnMut(u64, &str) -> io::Result<()>
 
 pub(super) fn at(folder: &Path, requested: &str) -> io::Result<Manifest> {
     check_hash(requested)?;
-    walk(folder, |hash, _| Ok(requested == hash))?.ok_or_else(|| invalid("selected revision is outside the current project history"))
+    let mut found = None;
+    walk(folder, |hash, manifest| {
+        if requested == hash {
+            found = Some(manifest);
+        }
+        Ok(found.is_some())
+    })?;
+    found.ok_or_else(|| invalid("selected revision is outside the current project history"))
 }
 
 pub(super) fn references(item: &ProjectItem, pending: &mut Vec<u64>) {
