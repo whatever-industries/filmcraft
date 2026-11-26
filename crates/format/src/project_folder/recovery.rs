@@ -13,7 +13,11 @@ use std::{io, path::Path};
 pub(super) const SIDECARS: [&str; 3] = ["transcripts", "source_graphics", "narrations"];
 
 pub(super) fn walk(folder: &Path, mut visit: impl FnMut(&str, Manifest) -> io::Result<bool>) -> io::Result<()> {
-    let mut bytes = read_member(&folder.join(ROOT), MANIFEST_LIMIT)?;
+    walk_from(folder, read_member(&folder.join(ROOT), MANIFEST_LIMIT)?, |hash, manifest, _| visit(hash, manifest))
+}
+
+/// Follow the immutable ancestors of already captured root bytes.
+pub(super) fn walk_from(folder: &Path, mut bytes: Vec<u8>, mut visit: impl FnMut(&str, Manifest, &[u8]) -> io::Result<bool>) -> io::Result<()> {
     let mut hash = digest(&bytes);
     let mut expected_number = None;
     loop {
@@ -24,7 +28,7 @@ pub(super) fn walk(folder: &Path, mut visit: impl FnMut(&str, Manifest) -> io::R
             return Err(invalid("broken project revision numbering"));
         }
         let parent = manifest.revision.as_ref().map(|r| r.parent.clone());
-        if visit(&hash, manifest)? {
+        if visit(&hash, manifest, &bytes)? {
             return Ok(());
         }
         let Some(parent) = parent else { return Ok(()) };

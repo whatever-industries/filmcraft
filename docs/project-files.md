@@ -345,6 +345,22 @@ rows for its ID and revision. The report retains verified findings and exits non
 An invalid revision or unreadable manifest can stop comparison before a report is
 available. Comparison reads saved project metadata and works with offline media.
 
+### Back up published history
+
+Use a new folder on your backup volume. Copy footage and proxies separately if you need media playback after losing the source drive.
+
+```sh
+project_folder backup FOLDER NEW_BACKUP_FOLDER
+project_folder history NEW_BACKUP_FOLDER
+project_folder rescue NEW_BACKUP_FOLDER REVISION SEQUENCE_ID recovered.fcproj
+```
+
+The first command prints the captured head digest. It copies the published project metadata and every ancestor of that save. Shared records occupy one file per digest. The backup reads every saved project from the destination before publishing `project.fcmod`. Another editor can keep working and saving during the copy. To include an editor’s draft, have them save it before starting the backup.
+
+The resulting folder opens directly as a modular project. It retains revision IDs, original and proxy path strings, and embedded project data. Relative media paths resolve from the restored project folder. Restore the original folder layout or relink the media if you move it. Private checkpoints, locks, unrelated files and external media are excluded.
+
+Choose an unused destination outside the source folder. An error identifying a historical item can mean that an older save is damaged even when the current project still opens. If the process is interrupted, a destination without `project.fcmod` is incomplete. Retry with a fresh folder.
+
 ### Recover a sequence
 
 Run `project_folder history FOLDER` to list revision numbers and digests, newest first.

@@ -501,3 +501,87 @@ fn an_untouched_record_keeps_its_original_bytes_and_digest() {
     assert_eq!(next["items"], manifest["items"]);
     assert_eq!(fs::read(folder.join(hash)).unwrap(), pretty);
 }
+
+#[test]
+fn published_backup_recovers_old_cuts_without_the_source_and_excludes_private_files() {
+    use converter::{backup::published_history, recovery};
+    use std::collections::BTreeSet;
+    let tmp = tempdir().unwrap();
+    let folder = tmp.path().join("production");
+    let backup = tmp.path().join("backup");
+    let edit = tmp.path().join("cut.fcproj");
+    let mut doc = current();
+    write_doc(&edit, &doc);
+    pack(&edit, &folder, atomic_write_new).unwrap();
+    let root = folder.join(ROOT);
+    // Preserve noncanonical archived manifests too: their bytes determine their identity.
+    let initial: Value = serde_json::from_slice(&fs::read(&root).unwrap()).unwrap();
+    fs::write(&root, serde_json::to_vec_pretty(&initial).unwrap()).unwrap();
+    let base = checkout(&folder, &tmp.path().join("checkout.fcproj")).unwrap();
+    let old_name = doc["project"]["items"]["73"]["name"].as_str().unwrap().to_owned();
+    doc["project"]["items"]["73"]["name"] = "New cut".into();
+    write_doc(&edit, &doc);
+    let head = save(&folder, &base, &edit).unwrap();
+    let orphan = "f".repeat(64);
+    for name in [".writer.lock", ".private-checkpoint", "footage.mov", &orphan] {
+        fs::write(folder.join(name), b"exclude").unwrap();
+    }
+    let latest = fs::read(&root).unwrap();
+    assert_eq!(published_history(&folder, &backup).unwrap(), head);
+    assert_eq!(fs::read(&root).unwrap(), latest);
+    assert_eq!(fs::read(backup.join(ROOT)).unwrap(), latest);
+    let mut expected = BTreeSet::from([ROOT.to_owned(), base.clone()]);
+    for m in [initial, serde_json::from_slice(&latest).unwrap()] {
+        expected.insert(m["envelope"].as_str().unwrap().into());
+        for kind in ["items", "bins"] {
+            expected.extend(m[kind].as_array().unwrap().iter().map(|row| row[1].as_str().unwrap().to_owned()));
+        }
+    }
+    let members = fs::read_dir(&backup).unwrap().map(|p| p.unwrap().file_name().into_string().unwrap()).collect::<BTreeSet<_>>();
+    assert_eq!(members, expected);
+    for name in members {
+        assert_eq!(fs::read(folder.join(&name)).unwrap(), fs::read(backup.join(name)).unwrap());
+    }
+    fs::remove_dir_all(&folder).unwrap();
+    for (revision, name) in [(base, old_name.as_str()), (head, "New cut")] {
+        let out = tmp.path().join(format!("{revision}.fcproj"));
+        recovery::rescue(&backup, &revision, 73, &out).unwrap();
+        let restored = filmcraft_format::decode(&fs::read(out).unwrap()).unwrap().project;
+        assert_eq!(restored.item(filmcraft_project::ItemId(73)).unwrap().name, name);
+        assert!(restored.item(filmcraft_project::ItemId(5)).is_some());
+    }
+}
+
+#[test]
+fn backup_rejects_an_occupied_destination_and_damage_unique_to_an_older_save() {
+    use converter::backup::published_history;
+    let tmp = tempdir().unwrap();
+    let folder = tmp.path().join("production");
+    let backup = tmp.path().join("backup");
+    let edit = tmp.path().join("cut.fcproj");
+    let mut doc = current();
+    write_doc(&edit, &doc);
+    pack(&edit, &folder, atomic_write_new).unwrap();
+    assert!(published_history(&folder, &folder.join("nested")).is_err());
+    assert!(!folder.join("nested").exists());
+    fs::create_dir(&backup).unwrap();
+    fs::write(backup.join(ROOT), b"keep").unwrap();
+    assert_eq!(published_history(&folder, &backup).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(fs::read(backup.join(ROOT)).unwrap(), b"keep");
+
+    let base = checkout(&folder, &tmp.path().join("before.fcproj")).unwrap();
+    let root = folder.join(ROOT);
+    let old: Value = serde_json::from_slice(&fs::read(&root).unwrap()).unwrap();
+    let original = old["items"].as_array().unwrap().iter().find(|r| r[0] == 73).unwrap()[1].as_str().unwrap();
+    doc["project"]["items"]["73"]["name"] = "Updated cut".into();
+    write_doc(&edit, &doc);
+    save(&folder, &base, &edit).unwrap();
+    let latest = fs::read(&root).unwrap();
+    fs::write(folder.join(original), b"damaged").unwrap();
+    unpack(&folder, &tmp.path().join("still-opens.fcproj")).unwrap();
+    let fresh = tmp.path().join("attempt");
+    let message = published_history(&folder, &fresh).unwrap_err().to_string();
+    assert!(message.contains(&base) && message.contains("item 73"), "{message}");
+    assert!(!fresh.exists());
+    assert_eq!(fs::read(root).unwrap(), latest);
+}

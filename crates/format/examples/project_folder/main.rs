@@ -16,6 +16,10 @@ fn run() -> io::Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if let [command, source, destination] = args.as_slice() {
         let (src, dest) = (Path::new(source), Path::new(destination));
+        if command == "backup" {
+            println!("{}", converter::backup::published_history(src, dest)?);
+            return Ok(());
+        }
         if command == "pack" {
             return pack(src, dest, atomic_write_new);
         }
@@ -95,7 +99,7 @@ fn run() -> io::Result<()> {
     }
     Err(io::Error::new(
         io::ErrorKind::InvalidInput,
-        "usage: project_folder pack SOURCE.fcproj NEW_FOLDER | unpack FOLDER NEW_FILE.fcproj | checkout FOLDER NEW_FILE.fcproj | save FOLDER BASE_REVISION EDITED.fcproj | history FOLDER | compare-bin FOLDER FROM TO BIN_ID | compare-sequence FOLDER FROM TO SEQUENCE_ID | restore-copy FOLDER BASE_REVISION HISTORICAL_REVISION SEQUENCE_ID | rescue FOLDER REVISION SEQUENCE_ID NEW_FILE.fcproj | list-bins FOLDER REVISION | find-uses FOLDER REVISION ITEM_ID | preview-bin FOLDER REVISION BIN_ID | rescue-bin FOLDER REVISION BIN_ID NEW.fcproj",
+        "usage: project_folder pack SOURCE.fcproj NEW_FOLDER | backup FOLDER NEW_FOLDER | unpack FOLDER NEW_FILE.fcproj | checkout FOLDER NEW_FILE.fcproj | save FOLDER BASE_REVISION EDITED.fcproj | history FOLDER | compare-bin FOLDER FROM TO BIN_ID | compare-sequence FOLDER FROM TO SEQUENCE_ID | restore-copy FOLDER BASE_REVISION HISTORICAL_REVISION SEQUENCE_ID | rescue FOLDER REVISION SEQUENCE_ID NEW_FILE.fcproj | list-bins FOLDER REVISION | find-uses FOLDER REVISION ITEM_ID | preview-bin FOLDER REVISION BIN_ID | rescue-bin FOLDER REVISION BIN_ID NEW.fcproj",
     ))
 }
 
