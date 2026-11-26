@@ -345,6 +345,20 @@ rows for its ID and revision. The report retains verified findings and exits non
 An invalid revision or unreadable manifest can stop comparison before a report is
 available. Comparison reads saved project metadata and works with offline media.
 
+### Pin a milestone save
+
+Choose a revision digest from `project_folder history FOLDER`. Give that exact save a label so another editor can find the same cut after later saves.
+
+```sh
+project_folder pin FOLDER REVISION "Picture lock"
+project_folder list-pins FOLDER
+project_folder unpin FOLDER REVISION
+```
+
+`list-pins` prints JSON entries with a revision digest and label. The digest identifies the save even if two milestones have the same label. Repeating the same pin is safe. To change a label, unpin the digest and pin it again. Removing a pin leaves the save available in history.
+
+Pins live in `revision-pins.json` alongside the project manifest. A separate local lock serializes pin changes while an editor has the project open. Pinning leaves the published revision and any private edits intact. All published history is retained today. A future retention tool must honor these pins.
+
 ### Back up published history
 
 Use a new folder on your backup volume. Copy footage and proxies separately if you need media playback after losing the source drive.
@@ -355,7 +369,7 @@ project_folder history NEW_BACKUP_FOLDER
 project_folder rescue NEW_BACKUP_FOLDER REVISION SEQUENCE_ID recovered.fcproj
 ```
 
-The first command prints the captured head digest. It copies the published project metadata and every ancestor of that save. Shared records occupy one file per digest. The backup reads every saved project from the destination before publishing `project.fcmod`. Another editor can keep working and saving during the copy. To include an editor’s draft, have them save it before starting the backup.
+The first command prints the captured head digest. It captures the milestone pins at the start of the backup, then copies the published project metadata and every ancestor of the captured head. It verifies each pinned digest occurs in the copied history. Changes to the pins after capture apply to the next backup. Shared records occupy one file per digest. The backup reads every saved project from the destination before publishing `project.fcmod`. Another editor can keep working and saving during the copy. To include an editor’s draft, have them save it before starting the backup.
 
 The resulting folder opens directly as a modular project. It retains revision IDs, original and proxy path strings, and embedded project data. Relative media paths resolve from the restored project folder. Restore the original folder layout or relink the media if you move it. Private checkpoints, locks, unrelated files and external media are excluded.
 

@@ -648,3 +648,6 @@ fn availability_reports_refused_paths_and_reads_around_damaged_items() {
     assert!(matches!(&source.original, Probe::Refused { path, .. } if path.starts_with("https:")));
     assert!(matches!(&source.proxy, Some(Probe::Inaccessible { reason, .. }) if reason.contains("regular file")));
 }
+
+#[path = "pins.rs"]
+mod revision_pins;
