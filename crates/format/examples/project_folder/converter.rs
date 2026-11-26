@@ -12,6 +12,8 @@ use std::path::Path;
 
 #[path = "paths.rs"]
 mod paths;
+#[path = "recovery.rs"]
+pub(super) mod recovery;
 #[path = "revisions.rs"]
 pub(super) mod revisions;
 
@@ -52,10 +54,15 @@ fn is_digest(hash: &str) -> bool {
     hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-fn load_payload(folder: &Path, hash: &str, remaining: &mut u64) -> io::Result<Value> {
+fn check_hash(hash: &str) -> io::Result<()> {
     if !is_digest(hash) {
         return Err(invalid("invalid SHA-256 digest"));
     }
+    Ok(())
+}
+
+fn load_payload(folder: &Path, hash: &str, remaining: &mut u64) -> io::Result<Value> {
+    check_hash(hash)?;
     let bytes = read_member(&folder.join(hash), *remaining)?;
     if digest(&bytes) != hash {
         return Err(invalid("SHA-256 mismatch"));
@@ -75,7 +82,7 @@ fn load_group(folder: &Path, kind: &str, entries: &[(u64, String)], budget: &mut
     Ok(group)
 }
 
-fn assemble(folder: &Path, manifest: &Manifest, destination: &Path) -> io::Result<Vec<u8>> {
+fn check_manifest(manifest: &Manifest) -> io::Result<()> {
     if manifest.format != FORMAT || !matches!((manifest.layout, &manifest.revision), (1, None) | (2, Some(_))) {
         return Err(invalid(format!("unsupported project folder format {:?}, layout {}", manifest.format, manifest.layout)));
     }
@@ -85,11 +92,23 @@ fn assemble(folder: &Path, manifest: &Manifest, destination: &Path) -> io::Resul
     if manifest.bins.len().saturating_add(manifest.items.len()) > RECORD_LIMIT {
         return Err(invalid("too many project records"));
     }
+    Ok(())
+}
+
+fn read_records(folder: &Path, manifest: &Manifest) -> io::Result<ProjectRecords> {
+    check_manifest(manifest)?;
     let mut budget = MAX_PROJECT_BYTES;
     let envelope = load_payload(folder, &manifest.envelope, &mut budget).map_err(|e| invalid(format!("project metadata: {e}")))?;
     let bins = load_group(folder, "bin", &manifest.bins, &mut budget)?;
     let items = load_group(folder, "item", &manifest.items, &mut budget)?;
-    let mut records = ProjectRecords { envelope, bins, items };
+    Ok(ProjectRecords { envelope, bins, items })
+}
+
+fn assemble(folder: &Path, manifest: &Manifest, destination: &Path) -> io::Result<Vec<u8>> {
+    encode_at(folder, read_records(folder, manifest)?, destination)
+}
+
+fn encode_at(folder: &Path, mut records: ProjectRecords, destination: &Path) -> io::Result<Vec<u8>> {
     paths::rebase(&mut records, &folder.join(ROOT), destination)?;
     let app_schema = records.envelope.get("schema_version").and_then(Value::as_u64) == Some(u64::from(SCHEMA_VERSION));
     if app_schema {

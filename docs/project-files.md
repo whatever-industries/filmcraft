@@ -147,6 +147,24 @@ The first changed save upgrades the folder to layout version 2, which retains it
 manifests by digest. Each save still reads and validates the complete project. Shared
 filesystem locking requires separate qualification.
 
+### Recover a sequence
+
+Run `project_folder history FOLDER` to list revision numbers and digests, newest first.
+Use `project_folder restore-copy FOLDER BASE_REVISION HISTORICAL_REVISION SEQUENCE_ID`
+to add the old cut alongside the current one. The result prints the new project item ID
+and revision. The copy goes into the current cut's bin, or the root if the original
+was removed. Existing media and nested sequences keep their IDs. If a required source
+is missing or changed, its attached data changed, or the project LUT library differs,
+use `rescue` to export the historical cut as a separate project.
+
+`project_folder rescue FOLDER HISTORICAL_REVISION SEQUENCE_ID NEW_FILE.fcproj` writes
+a standard project with the selected cut, its transitive sources and a fresh root bin.
+It follows subclips, nested sequences, multicam angles and merged sources. File-backed
+media and proxy references are rebased to the destination. The root manifest, requested
+history chain, envelope and required item payloads must still be readable. Unrelated bins
+and items can be missing. This command leaves the damaged folder available for further
+recovery. Keep a separate backup for loss of the underlying volume.
+
 ## Saving is atomic
 
 Every write of a project file, auto-save, recovery snapshot or preferences file goes through
