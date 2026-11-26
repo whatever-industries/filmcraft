@@ -74,6 +74,7 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             always,
             new_search_bin,
         ),
+        spec("project.removeFromBin", "Remove from Bin", &[], None, r#"{"bin":id,"items":[id]?,"bins":[id]?}"#, always, remove_from_bin),
         query("project.searchBinItems", "Search Bin Contents", &[], None, r#"{"bin":id}"#, always, search_bin_items),
         spec(
             "project.editSearchBin",
@@ -459,6 +460,43 @@ fn new_search_bin(s: &mut Session, p: &Value) -> Result<Value> {
         Ok(b)
     })?;
     Ok(search_bin_json(&s.project, &b))
+}
+
+/// Unfile direct entries. Their records and media are independent of the bin hierarchy.
+fn remove_from_bin(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "project.removeFromBin";
+    let bin = filmcraft_project::BinId(u64_p(p, "bin").ok_or_else(|| bad(cmd, "expected parent bin ID"))?);
+    let ids = |key| -> Result<BTreeSet<u64>> {
+        match p.get(key) {
+            None => Ok(BTreeSet::new()),
+            Some(v) => v
+                .as_array()
+                .ok_or_else(|| bad(cmd, "expected an array of IDs"))?
+                .iter()
+                .map(|id| id.as_u64().ok_or_else(|| bad(cmd, "expected an item or bin ID")))
+                .collect(),
+        }
+    };
+    let items = ids("items")?;
+    let bins = ids("bins")?;
+    let count = items.len() + bins.len();
+    if count == 0 {
+        return Err(bad(cmd, "choose a filed item or bin"));
+    }
+    s.edit("Remove from Bin", |project, state| {
+        let parent = project.root.find_bin_mut(bin).ok_or_else(|| bad(cmd, "unknown parent bin"))?;
+        let before = parent.children.len();
+        parent.children.retain(|e| match e {
+            BinEntry::Item(id) => !items.contains(&id.0),
+            BinEntry::Bin(child) => !bins.contains(&child.id.0),
+        });
+        if before - parent.children.len() != count {
+            return Err(bad(cmd, "selection includes an entry outside the bin"));
+        }
+        state.project_selection.retain(|id| !items.contains(&id.0));
+        Ok(())
+    })?;
+    Ok(json!({"removed":count}))
 }
 
 fn bin_p(s: &Session, p: &Value, cmd: &str) -> Result<SearchBin> {

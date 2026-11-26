@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{MAX_PROJECT_BYTES, atomic_write_new};
 use craft_fcproj_format::records::ProjectRecords;
-use filmcraft_project::{ItemId, ItemKind, Project, ProjectItem};
+use filmcraft_project::{ItemId, Project, ProjectItem};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::{io, path::Path};
@@ -51,15 +51,7 @@ pub(super) fn at(folder: &Path, requested: &str) -> io::Result<Manifest> {
 }
 
 pub(super) fn references(item: &ProjectItem, pending: &mut Vec<u64>) {
-    match &item.kind {
-        ItemKind::Subclip { parent, .. } => pending.push(parent.0),
-        ItemKind::Sequence(seq) => {
-            pending.extend(seq.all_tracks().chain(&seq.submix_tracks).flat_map(|track| &track.items).map(|clip| clip.item.0));
-            pending.extend(seq.multicam.iter().flat_map(|m| &m.cameras).filter_map(|c| c.source).map(|id| id.0));
-            pending.extend(seq.merged.iter().flat_map(|m| m.video.iter().chain(&m.audio)).map(|id| id.0));
-        }
-        ItemKind::Media(_) | ItemKind::Graphic { .. } | ItemKind::AdjustmentLayer { .. } => {}
-    }
+    item.visit_references(|id| pending.push(id.0));
 }
 
 pub(super) fn metadata(folder: &Path, manifest: &Manifest, budget: &mut u64) -> io::Result<(Value, u64)> {

@@ -967,6 +967,9 @@ impl Session {
             && !matches!(
                 id,
                 "project.inspect"
+                    | "project.view.get"
+                    | "project.view.set"
+                    | "project.referenceClips"
                     | "sequence.inspect"
                     | "file.open"
                     | "file.newProject"

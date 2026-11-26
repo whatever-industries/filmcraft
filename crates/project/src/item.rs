@@ -161,6 +161,27 @@ pub struct ProjectItem {
 }
 
 impl ProjectItem {
+    /// Visit direct project-item dependencies. Track IDs, clip instance IDs and media paths are not project-item links.
+    pub fn visit_references(&self, mut visit: impl FnMut(ItemId)) {
+        match &self.kind {
+            ItemKind::Subclip { parent, .. } => visit(*parent),
+            ItemKind::Sequence(seq) => {
+                for track in seq.all_tracks().chain(&seq.submix_tracks) {
+                    for clip in &track.items {
+                        visit(clip.item);
+                    }
+                }
+                for source in seq.multicam.iter().flat_map(|m| &m.cameras).filter_map(|c| c.source) {
+                    visit(source);
+                }
+                for id in seq.merged.iter().flat_map(|m| m.video.iter().chain(&m.audio)) {
+                    visit(*id);
+                }
+            }
+            ItemKind::Media(_) | ItemKind::Graphic { .. } | ItemKind::AdjustmentLayer { .. } => {}
+        }
+    }
+
     pub fn as_media(&self) -> Option<&MediaClip> {
         match &self.kind {
             ItemKind::Media(m) => Some(m),

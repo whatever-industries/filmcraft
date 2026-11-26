@@ -168,6 +168,7 @@ pub struct ProjectPanelPrefs {
     pub view: ViewSettings,
     /// Panel menu ▸ Preview Area (thumbnail + info at the top).
     pub preview_area: bool,
+    pub show_reference_clips: bool,
     /// Panel menu ▸ Thumbnails (List view thumbnails).
     pub thumbnails: bool,
     pub thumbnails_show_effects: bool,
@@ -186,6 +187,7 @@ impl Default for ProjectPanelPrefs {
         ProjectPanelPrefs {
             view: ViewSettings::default(),
             preview_area: false,
+            show_reference_clips: false,
             thumbnails: false,
             thumbnails_show_effects: true,
             hover_scrub: true,
@@ -469,6 +471,30 @@ pub fn sort_items(p: &Project, ids: &mut [ItemId], sort: &SortSpec) {
     for (slot, (_, _, id)) in ids.iter_mut().zip(keyed) {
         *slot = id;
     }
+}
+
+/// Extra source rows for sequences filed directly in this bin. Normal entries are already visible.
+pub fn reference_clips(project: &Project, bin: &Bin) -> Vec<ItemId> {
+    let filed: BTreeSet<_> = bin
+        .children
+        .iter()
+        .filter_map(|entry| match entry {
+            BinEntry::Item(id) => Some(*id),
+            BinEntry::Bin(_) => None,
+        })
+        .collect();
+    let mut pending: Vec<_> = filed.iter().copied().filter(|id| project.sequence(*id).is_some()).collect();
+    let mut seen = BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if seen.insert(id)
+            && let Some(item) = project.item(id)
+        {
+            item.visit_references(|source| pending.push(source));
+        }
+    }
+    let mut ids: Vec<_> = seen.difference(&filed).copied().filter(|id| project.items.contains_key(id)).collect();
+    ids.sort_by_cached_key(|id| project.items[id].name.to_lowercase());
+    ids
 }
 
 /// A bin's direct sub-bins and items (items sorted by `sort`; bins by name, following the
@@ -904,6 +930,7 @@ fn view_json(s: &Session) -> Value {
     json!({
         "view": pp.view,
         "previewArea": pp.preview_area,
+        "showReferenceClips": pp.show_reference_clips,
         "thumbnails": pp.thumbnails,
         "thumbnailsShowEffects": pp.thumbnails_show_effects,
         "hoverScrub": pp.hover_scrub,
@@ -928,6 +955,7 @@ fn view_set(s: &mut Session, p: &Value) -> Result<Value> {
     }
     for (k, f) in [
         ("previewArea", &mut pp.preview_area as &mut bool),
+        ("showReferenceClips", &mut pp.show_reference_clips),
         ("thumbnails", &mut pp.thumbnails),
         ("thumbnailsShowEffects", &mut pp.thumbnails_show_effects),
         ("hoverScrub", &mut pp.hover_scrub),
@@ -1238,7 +1266,7 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
         c(
             "project.view.set",
             "Set Project Panel View",
-            r#"{"view":"list|icon|freeform"?,"iconSize":f32?,"fontSize":"small|medium|large|extraLarge"?,"previewArea":bool?,"thumbnails":bool?,"thumbnailsShowEffects":bool?,"hoverScrub":bool?,"thumbnailControlsAllDevices":bool?,"iconSort":column|{"column":str,"descending":bool}?}"#,
+            r#"{"view":"list|icon|freeform"?,"iconSize":f32?,"fontSize":"small|medium|large|extraLarge"?,"previewArea":bool?,"showReferenceClips":bool?,"thumbnails":bool?,"thumbnailsShowEffects":bool?,"hoverScrub":bool?,"thumbnailControlsAllDevices":bool?,"iconSort":column|{"column":str,"descending":bool}?}"#,
             always,
             view_set,
         ),
@@ -1250,6 +1278,10 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
         c("project.columns.set", "Metadata Display", r#"{"columns":[name|{"name":str,"width":f32}]}"#, always, columns_set),
         c("project.columns.resize", "Resize Column", r#"{"column":str,"width":f32}"#, always, columns_resize),
         c("project.sort", "Sort Project Items", r#"{"column":str,"descending":bool?}"#, always, sort),
+        q("project.referenceClips", "List Reference Clips", r#"{"bin":binId}"#, |s, p| {
+            let bin = bin_p(p).and_then(|id| s.project.root.find_bin(id)).ok_or_else(|| bad("project.referenceClips", "expected a bin ID in this project"))?;
+            Ok(json!({"bin":bin.id,"items":reference_clips(&s.project,bin)}))
+        }),
         q("project.items", "List Project Panel Rows", r#"{"bin":binId?,"recursive":bool?}"#, items),
         q("project.viewPreset.list", "List View Presets", "{}", |s, _| Ok(presets_json(s))),
         c("project.viewPreset.save", "Save Current View Preset", r#"{"slot":1..10?,"name":str?}"#, has_current_preset, |s, p| preset_save(s, p, false)),

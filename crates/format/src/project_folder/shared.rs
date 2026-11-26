@@ -15,6 +15,9 @@ use std::{
 pub struct BinScope {
     pub bin: u64,
     pub sequences: BTreeSet<u64>,
+    // Direct source filings at checkout. Undo may restore these after a save.
+    #[serde(skip)] // Reconstructed from the verified origin revision on recovery.
+    filings: BTreeSet<u64>,
     pub origin: String,
     pub start: u64,
     pub end: u64,
@@ -116,23 +119,59 @@ impl BinScope {
             filmcraft_project::BinEntry::Item(i) => (false, i.0),
         };
         let mut children: BTreeMap<_, _> = std::mem::take(&mut old.children).into_iter().map(|v| (key(&v), v)).collect();
+        let mut seen = BTreeSet::new();
         for entry in &new.children {
-            old.children.push(children.remove(&key(entry)).ok_or_else(|| invalid("checkout permits reordering existing entries only"))?);
+            let k = key(entry);
+            if !seen.insert(k) {
+                return Err(invalid("duplicate bin entry"));
+            }
+            if let Some(child) = children.remove(&k) {
+                old.children.push(child);
+            } else if !k.0 && self.filings.contains(&k.1) && before.root.parent_of(ItemId(k.1)).is_none() && before.items.contains_key(&ItemId(k.1)) {
+                old.children.push(filmcraft_project::BinEntry::Item(ItemId(k.1)));
+            } else {
+                return Err(invalid("entry is outside the checked-out bin"));
+            }
         }
-        if !children.is_empty() {
+        if children.keys().any(|(bin, id)| *bin || !self.filings.contains(id)) {
             return Err(invalid(format!("edit changes records outside bin {}", self.bin)));
         }
         Ok(expected)
     }
 
     fn apply(&self, latest: &mut ProjectRecords, draft: &ProjectRecords) -> io::Result<()> {
-        let bin = latest.bins.get_mut(&self.bin).ok_or_else(|| invalid("missing bin"))?;
         let new = draft.bins.get(&self.bin).ok_or_else(|| invalid("draft has no checked-out bin"))?;
         let members = |v: &Value| -> io::Result<Vec<String>> {
-            let mut keys: Vec<_> = v["children"].as_array().ok_or_else(|| invalid("expected bin entries"))?.iter().map(Value::to_string).collect();
+            let mut keys = Vec::new();
+            let mut seen = BTreeSet::new();
+            for entry in v["children"].as_array().ok_or_else(|| invalid("expected bin entries"))? {
+                if !seen.insert(entry.to_string()) {
+                    return Err(invalid("duplicate bin entry"));
+                }
+                if entry["Item"].as_u64().is_some_and(|id| self.filings.contains(&id)) {
+                    continue;
+                }
+                keys.push(entry.to_string());
+            }
             keys.sort();
             Ok(keys)
         };
+        let requested: BTreeSet<u64> = new["children"]
+            .as_array()
+            .ok_or_else(|| invalid("expected bin entries"))?
+            .iter()
+            .filter_map(|entry| entry["Item"].as_u64())
+            .filter(|id| self.filings.contains(id))
+            .collect();
+        if !requested.is_empty()
+            && (!requested.iter().all(|id| latest.items.contains_key(id))
+                || latest.bins.iter().filter(|(id, _)| **id != self.bin).any(|(_, bin)| {
+                    bin["children"].as_array().into_iter().flatten().filter_map(|entry| entry["Item"].as_u64()).any(|id| requested.contains(&id))
+                }))
+        {
+            return Err(invalid("source filing is missing or belongs to another bin"));
+        }
+        let bin = latest.bins.get_mut(&self.bin).ok_or_else(|| invalid("missing bin"))?;
         if members(bin)? != members(new)? {
             return Err(invalid("bin membership changed"));
         }
@@ -168,7 +207,7 @@ impl Claim {
             locks.push(lock);
         }
         let high = high_water(folder)?;
-        let (scope, original) = if let Some((base, s)) = prior {
+        let (mut scope, original) = if let Some((base, s)) = prior {
             s.verify(&recovery::at(folder, base)?, &m)?;
             if s.bin != bin || s.sequences != sequences || s.end.checked_sub(s.start) != Some(RESERVATION_SIZE) || s.end > high || s.end > Project::MAX_NEXT_ID
             {
@@ -184,8 +223,17 @@ impl Claim {
             let start = high.max(original.next_id);
             let end = start.checked_add(RESERVATION_SIZE).filter(|end| *end <= Project::MAX_NEXT_ID).ok_or_else(|| invalid("project ID space exhausted"))?;
             crate::atomic_write_no_follow(&folder.join(".shared-next-id"), &serde_json::to_vec(&end)?)?;
-            (BinScope { bin, sequences, start, end, origin: rev.clone() }, original)
+            (BinScope { bin, sequences, filings: BTreeSet::new(), start, end, origin: rev.clone() }, original)
         };
+        let original_bin = original.root.find_bin(filmcraft_project::BinId(bin)).ok_or_else(|| invalid("missing original bin"))?;
+        scope.filings = original_bin
+            .children
+            .iter()
+            .filter_map(|entry| match entry {
+                filmcraft_project::BinEntry::Item(id) if original.sequence(*id).is_none() => Some(id.0),
+                _ => None,
+            })
+            .collect();
         let mut original_ids = BTreeSet::new();
         for seq in &scope.sequences {
             let item = original.item(ItemId(*seq)).ok_or_else(|| invalid("checkout origin has no owned sequence"))?;

@@ -514,7 +514,10 @@ fn body(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, v: &View, actions
         preview_area(app, ui, pr, &pre);
         y = pr.max.y + 6.0;
     }
-    let content = Rect::from_min_max(pos2(rect.min.x + 4.0, y), pos2(rect.max.x - 4.0, rect.max.y - FOOTER_H));
+    let mut content = Rect::from_min_max(pos2(rect.min.x + 4.0, y), pos2(rect.max.x - 4.0, rect.max.y - FOOTER_H));
+    if app.session.prefs.project_panel.show_reference_clips {
+        reference_rows(app, ui, v, &filter, &mut content, actions);
+    }
     ui.painter().rect_filled(content, 4.0, t.panel_bg.gamma_multiply(0.92));
     let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(content).id_salt((&pre, "content")));
     cui.set_clip_rect(content.intersect(ui.clip_rect()));
@@ -528,6 +531,54 @@ fn body(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, v: &View, actions
         app.ui.project_panel.reveal = None;
     }
     footer(app, ui, Rect::from_min_max(pos2(rect.min.x, rect.max.y - FOOTER_H), rect.max), v, actions);
+}
+
+/// A read-only list shared by all three views. Reference rows can open sources without filing them.
+fn reference_rows(app: &mut FilmcraftApp, ui: &mut egui::Ui, v: &View, filter: &str, content: &mut Rect, actions: &mut Actions) {
+    use std::sync::{Arc, Weak};
+    type Cache = (Weak<filmcraft_project::Project>, BinId, Arc<Vec<ItemId>>);
+    let project = &app.session.project;
+    let key = egui::Id::unique((&v.prefix, "reference-clips"));
+    let cached = ui.ctx().data(|d| d.get_temp::<Cache>(key));
+    let ids = match cached {
+        Some((owner, bin, ids)) if bin == v.bin && owner.ptr_eq(&Arc::downgrade(project)) => ids,
+        _ => {
+            let Some(bin) = project.root.find_bin(v.bin) else { return };
+            let ids = Arc::new(filmcraft_engine::project_panel::reference_clips(project, bin));
+            ui.ctx().data_mut(|d| d.insert_temp(key, (Arc::downgrade(project), v.bin, ids.clone())));
+            ids
+        }
+    };
+    if ids.is_empty() {
+        return;
+    }
+    let row_height = ui.spacing().interact_size.y;
+    let height = (row_height * (1 + ids.len().min(4)) as f32 + ui.spacing().item_spacing.y * 5.0).min(content.height() * 0.4);
+    if height <= row_height {
+        return;
+    }
+    let area = Rect::from_min_max(pos2(content.left(), content.bottom() - height), content.max);
+    content.max.y = area.top() - ui.spacing().item_spacing.y;
+    let mut rows = ui.new_child(egui::UiBuilder::new().id_salt(key).max_rect(area));
+    rows.set_clip_rect(area.intersect(ui.clip_rect()));
+    rows.label(tl!("Reference Clips"));
+    let filtered;
+    let ids = if filter.is_empty() {
+        ids.as_slice()
+    } else {
+        filtered = ids.iter().copied().filter(|id| super::project_views::name_matches(&project.items[id].name, filter)).collect::<Vec<_>>();
+        &filtered
+    };
+    egui::ScrollArea::vertical().auto_shrink([false, true]).show_rows(&mut rows, row_height, ids.len(), |ui, range| {
+        for id in &ids[range] {
+            let item = &project.items[id];
+            let response = ui.button(&item.name);
+            app.auto.add(&format!("{}.reference.{}", v.prefix, id.0), response.rect.intersect(ui.clip_rect()), &item.name);
+            if response.clicked() {
+                actions.push((if item.as_sequence().is_some() { "sequence.open" } else { "source.open" }.into(), json!({"item":id.0})));
+            }
+        }
+    });
 }
 
 fn bin_path(root: &filmcraft_project::Bin, target: BinId) -> Vec<String> {
@@ -688,7 +739,7 @@ fn footer(app: &mut FilmcraftApp, ui: &mut egui::Ui, bar: Rect, v: &View, action
     let clear = crate::panels::project_views::clear_params(&app.session.state.project_selection, app.ui.project_panel.selected_bin);
     let automate = app.session.is_enabled("clip.automateToSequence");
     for (icon, id, tip) in [
-        (Icon::Trash, "project.delete", tl!("Clear (Delete)")),
+        (Icon::Trash, "project.delete", if app.session.editing_bins() { tl!("Remove from Bin") } else { tl!("Clear (Delete)") }),
         (Icon::NewItem, "new-item", tl!("New Item")),
         (Icon::Folder, "file.newBin", tl!("New Bin")),
         (Icon::Search, "find", tl!("Find")),
@@ -849,7 +900,7 @@ pub fn panel_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui) -> bool {
         if item(ui, "rename", tl!("Rename"), has_sel, None) {
             actions.push(("projectPanel.rename".into(), json!({})));
         }
-        if item(ui, "delete", tl!("Delete"), clear.is_some(), Some("Backspace")) {
+        if item(ui, "delete", if app.session.editing_bins() { tl!("Remove from Bin") } else { tl!("Delete") }, clear.is_some(), Some("Backspace")) {
             app.ui.project_panel.rename = None;
             actions.push(("project.delete".into(), clear.unwrap_or_default()));
         }
@@ -875,6 +926,7 @@ pub fn panel_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui) -> bool {
     ui.separator();
     for (key, label, on, shortcut) in [
         ("previewArea", tl!("Preview Area"), pp.preview_area, ""),
+        ("showReferenceClips", tl!("Show Reference Clips"), pp.show_reference_clips, ""),
         ("thumbnails", tl!("Thumbnails"), pp.thumbnails, ""),
         ("thumbnailsShowEffects", tl!("Thumbnails show effects applied"), pp.thumbnails_show_effects, ""),
         ("hoverScrub", tl!("Hover Scrub"), pp.hover_scrub, "Shift+H"),

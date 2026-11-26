@@ -208,6 +208,30 @@ pub(crate) fn menu_items_with_focus(app: &FilmcraftApp, ctx: &egui::Context) -> 
 
 /// Execute a UI or engine command by id.
 pub fn invoke_command(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params: Value) -> Result<Value, String> {
+    // Project-panel delete in a modular session removes the filing in its owning bin.
+    let mut id = id;
+    if id == "project.delete" && app.session.editing_bins() && !app.engine_call {
+        let ids: Vec<u64> = match params.get("items") {
+            Some(value) => serde_json::from_value(value.clone()).map_err(|e| e.to_string())?,
+            None => app.session.state.project_selection.iter().map(|id| id.0).collect(),
+        };
+        let tree = &app.session.project.root;
+        let first = ids.first().ok_or_else(|| tl!("Select a filed clip").to_string())?;
+        let bin = tree.parent_of(filmcraft_project::ItemId(*first)).ok_or_else(|| tl!("Open a writable source bin to remove a clip").to_string())?;
+        id = "project.removeFromBin";
+        params = json!({"bin":bin.0, "items":ids});
+    }
+    if id == "project.removeFromBin" && app.session.editing_bins() && !app.engine_call {
+        let owner = params["bin"].as_u64().ok_or_else(|| tl!("Select a filed clip").to_string())?;
+        let result = app.session.execute(id, params).map_err(|e| e.to_string())?;
+        // A selection in an expanded sub-bin can belong to a different editor. Keep Save
+        // and Undo directed at the bin whose filing just changed.
+        let inst = crate::panels::project::shown_inst(app);
+        if crate::panels::project::view_of(app, inst).bin.0 != owner {
+            crate::panels::project::navigate(app, inst, Some(owner));
+        }
+        return Ok(result);
+    }
     if id == "file.openProjectFolder" && app.session.supports_desktop_bins() {
         return app.file_dialog(id, &params);
     }

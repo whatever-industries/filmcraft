@@ -60,6 +60,9 @@ impl Session {
         }
         match id {
             "project.inspect"
+            | "project.view.get"
+            | "project.view.set"
+            | "project.referenceClips"
             | "sequence.inspect"
             | "source.inspect"
             | "sequence.open"
@@ -71,6 +74,7 @@ impl Session {
             | "project.refresh" => Ok(()),
             "file.open" | "file.revert" | "file.recover" | "file.closeProject" if !self.is_dirty() => Ok(()),
             "project.renameBin"
+            | "project.removeFromBin"
             | "project.reorderBin"
             | "timeline.move"
             | "timeline.trim"

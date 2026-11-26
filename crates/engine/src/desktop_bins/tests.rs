@@ -156,3 +156,107 @@ fn failed_second_publish_keeps_draft_and_both_leases_for_retry() {
     open(&mut s, &manifest);
     assert_eq!((name(&s, 70), name(&s, 71)), ("First", "Second"));
 }
+
+/// Both edits must still decode the same pictures after their shared source loses its filing.
+#[test]
+fn removing_source_filing_preserves_two_cuts_on_cold_reopen() {
+    use crate::media_test_util::{make_movie, session_with};
+    use filmcraft_media::DemoScene;
+    use filmcraft_project::TrackKind;
+    use filmcraft_time::{FrameRate, Tick, TimeRange};
+
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let original = dir.join("interview.mov");
+    let proxy = dir.join("interview-proxy.mov");
+    make_movie(&original, DemoScene::Aurora, 160, 96, 12);
+    make_movie(&proxy, DemoScene::Plasma, 80, 48, 12);
+    let (mut setup, items, first) = session_with(&[&original]);
+    let source = items[0];
+    let source_name = setup.project.item(source).unwrap().name.clone();
+    setup.execute("media.attachProxies", json!({"item":source.0,"path":proxy})).unwrap();
+    let p = Arc::make_mut(&mut setup.project);
+    let sources = p.add_bin("Interviews", None);
+    let cuts = p.add_bin("Cuts", None);
+    p.move_to_bin(&[source], Some(sources)).unwrap();
+    p.move_to_bin(&[first], Some(cuts)).unwrap();
+    let rate = FrameRate::FPS_24;
+    let second = p.new_sequence("Short cut", p.sequence(first).unwrap().settings.clone(), 1, 1, Some(cuts));
+    let clip = p.make_track_item(source, TrackKind::Video, Tick::ZERO, TimeRange::new(rate.tick_of(4), rate.tick_of(7)), rate).unwrap();
+    let audio = p.make_track_item(source, TrackKind::Audio, Tick::ZERO, TimeRange::new(rate.tick_of(4), rate.tick_of(7)), rate).unwrap();
+    p.sequence_mut(second).unwrap().video_tracks[0].items.push(clip);
+    p.sequence_mut(second).unwrap().audio_tracks[0].items.push(audio);
+    let stock = dir.join("edits.fcproj");
+    setup.execute("file.saveAs", json!({"path":stock})).unwrap();
+    let render = |s: &mut Session| {
+        let mut frames = Vec::new();
+        for id in [first, second] {
+            s.execute("sequence.open", json!({"item":id.0})).unwrap();
+            for frame in [0, 2] {
+                let (image, offline) = s.try_render_program_with_offline_at(1.0, rate.tick_of(frame)).unwrap();
+                assert!(offline.is_empty());
+                let provider = s.media.provider(s.project.clone(), s.services.clone());
+                let audio = filmcraft_render::audio::mix_sequence(&s.project, s.active_sequence().unwrap(), frame * 2000, 1000, &provider);
+                assert!(audio.channels.iter().flatten().any(|v| v.abs() > 0.001));
+                frames.push((image.over_black_rgba8(), audio.channels));
+            }
+        }
+        frames
+    };
+    let expected = render(&mut setup);
+    assert!(expected[0].0 != expected[2].0);
+    setup.execute("media.toggleProxies", json!({"enabled":true})).unwrap();
+    let expected_proxy = render(&mut setup);
+    assert!(expected[0].0 != expected_proxy[0].0);
+    drop(setup);
+    let folder = dir.join("modular");
+    pack(&stock, &folder, filmcraft_format::atomic_write_new).unwrap();
+    let manifest = folder.join(ROOT);
+    {
+        let mut s = editor(dir);
+        open(&mut s, &manifest);
+        s.execute("project.removeFromBin", json!({"bin":sources.0,"items":[source.0]})).unwrap();
+        let mut peer = editor(&dir.join("peer"));
+        open(&mut peer, &manifest);
+        assert!(peer.execute("project.removeFromBin", json!({"bin":sources.0,"items":[source.0]})).is_err());
+        assert_eq!(peer.project.root.parent_of(source), Some(sources));
+        s.execute("file.save", json!({})).unwrap();
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(s.project.root.parent_of(source), Some(sources));
+        s.execute("file.save", json!({})).unwrap();
+        s.execute("edit.redo", json!({})).unwrap();
+        s.execute("file.save", json!({})).unwrap();
+    }
+    // The exclusive folder writer can unfile the entire hierarchy in one edit.
+    let second_folder = dir.join("whole-bin");
+    pack(&stock, &second_folder, filmcraft_format::atomic_write_new).unwrap();
+    let whole = second_folder.join(ROOT);
+    {
+        let mut s = Session::local_folder_editor();
+        open(&mut s, &whole);
+        s.execute("project.removeFromBin", json!({"bin":s.project.root.id.0,"bins":[sources.0]})).unwrap();
+        s.execute("file.save", json!({})).unwrap();
+    }
+    {
+        let mut s = editor(dir);
+        open(&mut s, &whole);
+        assert!(s.project.root.find_bin(sources).is_none());
+        assert!(render(&mut s) == expected);
+    }
+    for (use_proxy, pictures) in [(false, expected), (true, expected_proxy)] {
+        if use_proxy {
+            fs::rename(&original, dir.join("disconnected.mov")).unwrap();
+        }
+        let mut s = editor(dir);
+        s.execute("media.toggleProxies", json!({"enabled":use_proxy})).unwrap();
+        open(&mut s, &manifest);
+        assert_eq!(s.project.root.parent_of(source), None);
+        let saved_tree = s.project.root.clone();
+        s.execute("project.view.set", json!({"showReferenceClips":true})).unwrap();
+        assert_eq!(s.execute("project.referenceClips", json!({"bin":cuts.0})).unwrap()["items"], json!([source.0]));
+        assert_eq!(s.project.root, saved_tree);
+        assert!(!s.is_dirty());
+        assert_eq!(s.project.item(source).unwrap().name, source_name);
+        assert!(render(&mut s) == pictures, "decoded pictures changed (proxy {use_proxy})");
+    }
+}

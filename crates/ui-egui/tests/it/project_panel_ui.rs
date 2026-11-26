@@ -94,6 +94,56 @@ fn double_click_bin(d: &mut Driver, bin: u64, alt: bool) {
 }
 
 #[test]
+fn reference_clips_are_view_only_and_open_the_existing_source() {
+    let mut d = project_driver();
+    let sequence = d.app().session.state.active_sequence.unwrap();
+    let bin = d.app().session.project.root.parent_of(sequence).unwrap();
+    let result = d.exec("project.referenceClips", json!({"bin":bin.0}));
+    let id = result["items"][0].as_u64().unwrap();
+    let home = d.app().session.project.root.parent_of(ItemId(id)).unwrap();
+    d.ok("ui.menu.invoke", json!({"id":"projectPanel.openBin","params":{"bin":home.0,"how":"inPlace"}}));
+    d.frames(2);
+    d.ok("ui.click", json!({"id":format!("project.item.{id}"),"button":"right"}));
+    d.click("project.itemMenu.removeFromBin");
+    assert!(d.app().session.project.root.parent_of(ItemId(id)).is_none());
+    let before = d.app().session.project.root.clone();
+    d.ok("ui.menu.invoke", json!({"id":"projectPanel.openBin","params":{"bin":bin.0,"how":"inPlace"}}));
+    d.frames(2);
+    let row = format!("project.reference.{id}");
+    assert!(!d.has(&row));
+    let toggle = |d: &mut Driver| {
+        d.click("panel.menu.Project");
+        let option = "project.menu.showReferenceClips";
+        for _ in 0..12 {
+            let [_, y, _, h] = d.rect(option);
+            let [_, top, _, height] = d.rect("panel.menu.scroll");
+            if y >= top && y + h <= top + height {
+                d.click(option);
+                return;
+            }
+            d.ok("ui.scroll", json!({"id":"panel.menu.scroll","dy":(top + height / 2.0 - y).clamp(-150.0,150.0)}));
+            d.frames(4);
+        }
+        panic!("Show Reference Clips is unreachable in the panel menu");
+    };
+    toggle(&mut d);
+    assert!(d.app().session.prefs.project_panel.show_reference_clips);
+    for mode in ["list", "icon", "freeform"] {
+        d.exec("project.view.set", json!({"view":mode}));
+        d.frames(2);
+        assert!(d.has(&row), "missing reference in {mode}");
+    }
+    let name = d.app().session.project.item(ItemId(id)).unwrap().name.clone();
+    let _ = d.harness.get_by_role_and_label(egui::accesskit::Role::Button, &name);
+    d.snapshot("bin-reference-clips", Some("panel.Project"));
+    d.click(&row);
+    assert_eq!(d.app().session.state.source_item, Some(ItemId(id)));
+    toggle(&mut d);
+    assert!(!d.has(&row));
+    assert_eq!(d.app().session.project.root, before);
+}
+
+#[test]
 fn list_view_columns_sort_resize_and_rename() {
     let mut d = project_driver();
     d.exec("project.view.set", json!({"view": "list"}));

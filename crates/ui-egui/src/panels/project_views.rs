@@ -124,7 +124,7 @@ fn matches_filter(app: &FilmcraftApp, id: ItemId, filter: &str) -> bool {
 /// The search finds a name holding every word typed, in any order: "comedy manager smiling" finds
 /// "Comedy manager · medium · smiling", where the typed text as one run of letters would not.
 /// `filter` is already lowercase.
-fn name_matches(name: &str, filter: &str) -> bool {
+pub(super) fn name_matches(name: &str, filter: &str) -> bool {
     let name = name.to_ascii_lowercase();
     filter.split_whitespace().all(|word| name.contains(word))
 }
@@ -399,7 +399,19 @@ fn item_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, id: ItemId, kind: &ItemK
         app.auto.add("project.itemMenu.proxy", r.response.rect, tl!("Proxy"));
     }
     ui.separator();
-    if ui.button(tl!("Clear")).clicked() {
+    if let Some(parent) = app.session.project.root.parent_of(id) {
+        let ids = menu_targets(&app.session.state.project_selection, id);
+        let enabled = ids.iter().all(|item| {
+            app.session.project.root.parent_of(*item) == Some(parent) && (!app.session.editing_bins() || app.session.project.sequence(*item).is_none())
+        }) && (!app.session.editing_bins() || (parent != app.session.project.root.id && app.session.bin_access(parent.0) != Some(false)));
+        let remove = ui.add_enabled(enabled, egui::Button::new(tl!("Remove from Bin")));
+        app.auto.add("project.itemMenu.removeFromBin", remove.rect, tl!("Remove from Bin"));
+        if remove.clicked() {
+            actions.push(("project.removeFromBin".into(), json!({"bin":parent.0,"items":ids})));
+            ui.close();
+        }
+    }
+    if !app.session.editing_bins() && ui.button(tl!("Clear")).clicked() {
         actions.push(("project.delete".into(), json!({"items": [id.0]})));
         ui.close();
     }
@@ -427,7 +439,14 @@ fn bin_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, v: &View, bin: u64, actio
         ui.close();
     }
     ui.separator();
-    if ui.button(tl!("Clear")).clicked() {
+    if !app.session.editing_bins()
+        && let Some(parent) = super::project::parent_bin(&app.session.project.root, BinId(bin))
+        && ui.button(tl!("Remove from Bin")).clicked()
+    {
+        actions.push(("project.removeFromBin".into(), json!({"bin":parent.0,"bins":[bin]})));
+        ui.close();
+    }
+    if !app.session.editing_bins() && ui.button(tl!("Clear")).clicked() {
         actions.push(("project.delete".into(), json!({"items": [bin]})));
         ui.close();
     }

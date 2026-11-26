@@ -153,7 +153,7 @@ impl Session {
         if !self.editing_bins() {
             return Ok(());
         }
-        let owner = if id == "project.renameBin" || id == "project.reorderBin" {
+        let owner = if matches!(id, "project.renameBin" | "project.reorderBin" | "project.removeFromBin") {
             p["bin"].as_u64()
         } else if id == "sequence.open" {
             p["item"].as_u64().filter(|&n| self.project.sequence(ItemId(n)).is_some()).and_then(|n| self.project.root.parent_of(ItemId(n))).map(|b| b.0)
