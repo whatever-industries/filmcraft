@@ -249,3 +249,48 @@ fn previous_follows_bin_identity_through_rename_deletion_and_damaged_history() {
     let gap = previous(&folder, &c, 90).unwrap_err().to_string();
     assert!(gap.contains(&c) && gap.contains("90"), "{gap}");
 }
+
+#[test]
+fn previous_rechecks_the_envelope_when_only_the_transcript_changes() {
+    use filmcraft_format::project_folder::compare::previous;
+    let t = tempdir().unwrap();
+    let mut doc = sample();
+    let (folder, first) = start(t.path(), &doc);
+    doc["project"]["transcripts"]["5"]["language"] = "fr".into();
+    let logging = publish(&folder, &first, &doc);
+    doc["project"]["root"]["children"][1]["Bin"]["name"] = "Other bin".into();
+    let last = publish(&folder, &logging, &doc);
+    assert_eq!(previous(&folder, &last, 1).unwrap(), Some(first));
+}
+
+#[test]
+fn previous_reports_a_missing_or_repeated_dependency_in_an_older_manifest() {
+    use filmcraft_format::project_folder::{ROOT, compare::previous};
+    use sha2::{Digest, Sha256};
+    let t = tempdir().unwrap();
+    let mut doc = sample();
+    let (folder, first) = start(t.path(), &doc);
+    let archived = manifest(&folder);
+    doc["project"]["root"]["children"][1]["Bin"]["name"] = "Unrelated rename".into();
+    publish(&folder, &first, &doc);
+    let mut head = manifest(&folder);
+    for repeat in [false, true] {
+        let mut bad = archived.clone();
+        let items = bad["items"].as_array_mut().unwrap();
+        let index = items.iter().position(|r| r[0] == 5).unwrap();
+        if repeat {
+            items.push(items[index].clone());
+        } else {
+            items.remove(index);
+        }
+        let bytes = serde_json::to_vec(&bad).unwrap();
+        let hash = format!("{:x}", Sha256::digest(&bytes));
+        fs::write(folder.join(&hash), bytes).unwrap();
+        head["revision"]["parent"] = json!(hash);
+        let bytes = serde_json::to_vec(&head).unwrap();
+        let selected = format!("{:x}", Sha256::digest(&bytes));
+        fs::write(folder.join(ROOT), bytes).unwrap();
+        let error = previous(&folder, &selected, 1).unwrap_err().to_string();
+        assert!(error.contains(&hash) && error.contains("item 5"), "{error}");
+    }
+}
