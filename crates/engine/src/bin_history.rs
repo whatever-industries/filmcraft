@@ -59,8 +59,8 @@ pub(super) fn paste(s: &mut Session, p: &Value) -> Result<Value> {
     let bin = p["bin"].as_u64().ok_or_else(|| error("choose a destination bin"))?;
     let revision = p["revision"].as_str().ok_or_else(|| error("expected a saved revision"))?;
     let ids: Vec<u64> = serde::Deserialize::deserialize(&p["items"]).map_err(error)?;
-    apply_edit(s, p, bin, "Paste from Bin History", |directory, raw, next| {
-        let paste = history_paste::prepare(directory, revision, &ids, bin, raw, next)?;
+    apply_edit(s, p, bin, "Paste from Bin History", |snapshot, raw, next| {
+        let paste = history_paste::prepare(snapshot.directory(), revision, &ids, bin, raw, next)?;
         Ok((paste.document, paste.next_id, json!({"items":paste.selected})))
     })
 }
@@ -84,8 +84,9 @@ pub(super) fn import_external(s: &mut Session, p: &Value) -> Result<Value> {
         bin: p["sourceBin"].as_u64().ok_or_else(|| error("choose a source bin"))?,
     };
     let bin = p["bin"].as_u64().ok_or_else(|| error("choose a destination bin"))?;
-    apply_edit(s, p, bin, "Import Saved Bin", |directory, raw, next| {
-        let imported = request.prepare(directory, bin, raw, next)?;
+    apply_edit(s, p, bin, "Import Saved Bin", |snapshot, raw, next| {
+        let imported =
+            if snapshot.is_shared() { request.prepare_in_checkout(snapshot, bin, raw)? } else { request.prepare(snapshot.directory(), bin, raw, next)? };
         Ok((imported.document, imported.next_id, json!({"bin":imported.id})))
     })
 }
@@ -95,7 +96,7 @@ fn apply_edit(
     p: &Value,
     bin: u64,
     label: &'static str,
-    prepare: impl FnOnce(&std::path::Path, &[u8], u64) -> std::io::Result<(Vec<u8>, u64, Value)>,
+    prepare: impl FnOnce(&filmcraft_format::project_folder::FolderSnapshot, &[u8], u64) -> std::io::Result<(Vec<u8>, u64, Value)>,
 ) -> Result<Value> {
     use crate::folder_edit::FolderBase;
     use filmcraft_format::project_folder::{EditOrigin, ROOT};
@@ -113,7 +114,7 @@ fn apply_edit(
     let raw = f.baseline.origin.checkpoint(directory, &f.baseline.typed(), &current, &directory.join(ROOT)).map_err(error)?;
     let raw = s.history_document(raw, &current)?;
     let next = if f.snapshot.is_shared() { f.snapshot.cursor() } else { s.project.next_id };
-    let (document, cursor, result) = prepare(directory, &raw, next).map_err(error)?;
+    let (document, cursor, result) = prepare(&f.snapshot, &raw, next).map_err(error)?;
     let mut project = filmcraft_format::decode(&document).map_err(error)?.project;
     // The stock reader advances its allocator past all visible IDs. A bin writer
     // must continue inside its own reservation even when a peer has higher IDs.

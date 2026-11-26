@@ -80,6 +80,7 @@ impl Session {
             "project.renameBin"
             | "project.removeFromBin"
             | "project.fileInBin"
+            | "project.importExternalBin"
             | "project.pasteFromHistory"
             | "edit.label"
             | "metadata.set"

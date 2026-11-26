@@ -52,7 +52,16 @@ impl Import<'_> {
         selected.zip(namespace).ok_or_else(|| invalid("selected revision is outside the source history"))
     }
 
-    pub fn prepare(&self, destination: &Path, parent: u64, current: &[u8], mut next: u64) -> io::Result<ImportedBin> {
+    pub fn prepare(&self, destination: &Path, parent: u64, current: &[u8], next: u64) -> io::Result<ImportedBin> {
+        self.prepare_with_scope(destination, parent, current, next, None)
+    }
+
+    pub fn prepare_in_checkout(&self, destination: &super::FolderSnapshot, parent: u64, current: &[u8]) -> io::Result<ImportedBin> {
+        let scope = destination.scope().filter(|s| s.bin == parent).ok_or_else(|| invalid("check out the destination bin first"))?;
+        self.prepare_with_scope(destination.directory(), parent, current, destination.cursor(), Some(scope))
+    }
+
+    fn prepare_with_scope(&self, destination: &Path, parent: u64, current: &[u8], mut next: u64, scope: Option<&super::BinScope>) -> io::Result<ImportedBin> {
         let folder = self.folder.canonicalize()?;
         let destination = destination.canonicalize()?;
         if folder == destination {
@@ -67,7 +76,11 @@ impl Import<'_> {
             return Err(invalid(format!("missing destination bin {parent}")));
         }
         let selected = subset.filed.into_iter().collect::<Vec<_>>();
-        if live.envelope["project"]["next_id"].as_u64().is_none_or(|minimum| next < minimum) {
+        let valid = match scope {
+            Some(scope) => (scope.start..scope.end).contains(&next),
+            None => live.envelope["project"]["next_id"].as_u64().is_some_and(|minimum| next >= minimum),
+        };
+        if !valid {
             return Err(invalid("invalid destination ID cursor"));
         }
         let copied = copy_items(&source, &selected, CopyOrigin::External(&namespace), &mut live, &mut next)?;
@@ -77,6 +90,9 @@ impl Import<'_> {
         let mut bins = BTreeMap::new();
         for &id in source.bins.keys() {
             bins.insert(id, allocate(&mut next)?);
+        }
+        if scope.is_some_and(|scope| next > scope.end) {
+            return Err(invalid("import exceeds the checkout ID reservation"));
         }
         // A source may already have a home filing. Its row in the imported
         // bin then becomes an additional filing of that same destination ID.

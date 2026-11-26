@@ -1,7 +1,7 @@
 //! A shared-mode writer owns a bin and its direct sequences. Only publication and
 //! ID reservation serialize across otherwise independent checkouts.
 use super::{MANIFEST_LIMIT, Manifest, ProjectRecords, ROOT, digest, invalid, read_member, read_records, recovery, revisions};
-use filmcraft_project::{ItemId, Project};
+use filmcraft_project::{Bin, BinEntry, ItemId, Project};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -29,6 +29,7 @@ pub(super) struct Claim {
     /// Copies present in this checkout's last verified publication. A crashed checkout
     /// may encounter an unrelated item allocated in its old range by a whole-project writer.
     published_copies: BTreeSet<u64>,
+    subtree_locks: BTreeMap<u64, File>,
     _locks: Vec<File>,
 }
 
@@ -104,6 +105,13 @@ impl BinScope {
             };
             if bin {
                 check(self.bin)?;
+                // A recovered checkout must not roll back a child edited after the crash.
+                for &id in before.keys().filter(|id| self.owns_id(**id)) {
+                    check(id)?;
+                }
+                if after.keys().any(|id| self.owns_id(*id) && !before.contains_key(id)) {
+                    return Err(invalid("a published bin overlaps the checkout reservation"));
+                }
             } else {
                 self.sequences.iter().copied().try_for_each(check)?;
             }
@@ -182,7 +190,13 @@ impl BinScope {
             if !seen.insert(k) {
                 return Err(invalid("duplicate bin entry"));
             }
-            if let Some(child) = children.remove(&k) {
+            if let BinEntry::Bin(subtree) = entry
+                && self.owns_id(k.1)
+            {
+                self.check_subtree(subtree)?;
+                children.remove(&k);
+                old.children.push(entry.clone());
+            } else if let Some(child) = children.remove(&k) {
                 old.children.push(child);
             } else if !k.0
                 && ((self.owns_id(k.1) && after.items.contains_key(&ItemId(k.1)))
@@ -193,10 +207,25 @@ impl BinScope {
                 return Err(invalid("entry is outside the checked-out bin"));
             }
         }
-        if children.keys().any(|(bin, id)| *bin || (!self.owns_id(*id) && !self.filings.contains(id))) {
+        if children.keys().any(|(bin, id)| !self.owns_id(*id) && (*bin || !self.filings.contains(id))) {
             return Err(invalid(format!("edit changes records outside bin {}", self.bin)));
         }
         Ok(expected)
+    }
+
+    fn check_subtree(&self, root: &Bin) -> io::Result<()> {
+        let mut pending = vec![root];
+        while let Some(bin) = pending.pop() {
+            if !self.owns_id(bin.id.0) {
+                return Err(invalid("imported hierarchy includes a bin outside the reservation"));
+            }
+            for entry in &bin.children {
+                if let BinEntry::Bin(child) = entry {
+                    pending.push(child);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn apply(&self, latest: &mut ProjectRecords, draft: &ProjectRecords) -> io::Result<()> {
@@ -208,7 +237,9 @@ impl BinScope {
                 if !seen.insert(entry.to_string()) {
                     return Err(invalid("duplicate bin entry"));
                 }
-                if entry["Item"].as_u64().is_some_and(|id| self.filings.contains(&id) || self.owns_id(id)) {
+                if entry["Bin"].as_u64().is_some_and(|id| self.owns_id(id))
+                    || entry["Item"].as_u64().is_some_and(|id| self.filings.contains(&id) || self.owns_id(id))
+                {
                     continue;
                 }
                 keys.push(entry.to_string());
@@ -291,6 +322,13 @@ impl BinScope {
         if links.iter().any(|id| !latest.items.contains_key(&id.0)) || links.iter().collect::<BTreeSet<_>>().len() != links.len() {
             return Err(invalid("missing or repeated source filing"));
         }
+        latest.bins.retain(|id, _| !self.owns_id(*id) || draft.bins.contains_key(id));
+        for (&id, value) in draft.bins.range(self.start..self.end) {
+            latest.bins.insert(id, value.clone());
+        }
+        // Carry raw bin records so opaque extensions survive save, export and Redo.
+        latest.bins.retain(|id, _| !self.owns_id(*id) || draft.bins.contains_key(id));
+        latest.bins.extend(draft.bins.range(self.start..self.end).map(|(&id, raw)| (id, raw.clone())));
         let bin = latest.bins.get_mut(&self.bin).ok_or_else(|| invalid("missing bin"))?;
         if members(bin)? != members(new)? {
             return Err(invalid("bin membership changed"));
@@ -375,7 +413,14 @@ impl Claim {
         }
         let high = high_water(folder)?;
         let (mut scope, original) = if let Some((base, s)) = prior {
-            s.verify(&recovery::at(folder, base)?, &m)?;
+            let base = recovery::at(folder, base)?;
+            s.verify(&base, &m)?;
+            if base.bins.iter().any(|(id, _)| s.owns_id(*id)) {
+                let current_items = super::record_index(&m.items);
+                if base.items.iter().filter(|(id, _)| s.owns_id(*id)).any(|(id, hash)| current_items.get(id).copied().flatten() != Some(hash)) {
+                    return Err(invalid("a previously published import changed since the checkpoint"));
+                }
+            }
             if s.bin != bin
                 || s.sequences != sequences.iter().copied().filter(|id| !s.owns_id(*id)).collect()
                 || s.end.checked_sub(s.start) != Some(RESERVATION_SIZE)
@@ -417,7 +462,9 @@ impl Claim {
         } else {
             BTreeSet::new()
         };
-        Ok((Self { scope, original_ids, published_copies, _locks: locks }, rev, raw))
+        let mut claim = Self { scope, original_ids, published_copies, _locks: locks, subtree_locks: BTreeMap::new() };
+        claim.subtree_locks = claim.lock_new_bins(folder, &raw)?;
+        Ok((claim, rev, raw))
     }
 
     pub fn project_draft(&self, current: &ProjectRecords, draft: &ProjectRecords, cursor: u64) -> io::Result<ProjectRecords> {
@@ -430,7 +477,7 @@ impl Claim {
         // Filed rows and sequence links may legitimately reference a published copy.
         peer.items.retain(|id, _| !self.scope.sequences.contains(&id.0) && !self.published_copies.contains(&id.0));
         let mut collision = false;
-        peer.visit_ids(|id| collision |= self.scope.owns_id(id) && !self.published_copies.contains(&id));
+        peer.visit_ids(|id| collision |= self.scope.owns_id(id) && !self.published_copies.contains(&id) && !self.subtree_locks.contains_key(&id));
         if collision {
             return Err(invalid("reserved IDs overlap another project record"));
         }
@@ -440,6 +487,7 @@ impl Claim {
             merged.envelope["project"]["next_id"] = published_next.max(cursor).into();
         }
         let project = project(&merged)?;
+        self.verify_subtree(&project, &merged, cursor)?;
         // Verify references while the full set of sources is available.
         for id in &self.scope.sequences {
             let q = project.sequence(ItemId(*id)).ok_or_else(|| invalid("missing owned sequence"))?;
@@ -500,6 +548,64 @@ impl Claim {
         Ok(merged)
     }
 
+    fn verify_subtree(&self, project: &Project, merged: &ProjectRecords, cursor: u64) -> io::Result<()> {
+        let owned: BTreeSet<_> = merged.bins.range(self.scope.start..self.scope.end).map(|(&id, _)| id).collect();
+        if owned.is_empty() {
+            return Ok(());
+        }
+        let parent = project.root.find_bin(filmcraft_project::BinId(self.scope.bin)).ok_or_else(|| invalid("missing import destination"))?;
+        let mut pending: Vec<_> = parent
+            .children
+            .iter()
+            .filter_map(|c| match c {
+                BinEntry::Bin(bin) if owned.contains(&bin.id.0) => Some(bin),
+                _ => None,
+            })
+            .collect();
+        let mut remaining = owned;
+        let mut home_items = BTreeSet::new();
+        while let Some(bin) = pending.pop() {
+            if bin.id.0 >= cursor || !remaining.remove(&bin.id.0) {
+                return Err(invalid("imported bin outside its allocated hierarchy"));
+            }
+            for entry in &bin.children {
+                match entry {
+                    BinEntry::Bin(child) => pending.push(child),
+                    BinEntry::Item(id) => {
+                        let item = project.item(*id).ok_or_else(|| invalid("missing imported bin item"))?;
+                        if !home_items.insert(id.0) || (!self.scope.owns_id(id.0) && !item.is_source_clip()) {
+                            return Err(invalid("invalid home filing in imported hierarchy"));
+                        }
+                    }
+                }
+            }
+        }
+        for (&id, raw) in &merged.bins {
+            if !self.scope.owns_id(id) && raw["children"].as_array().into_iter().flatten().filter_map(|v| v["Item"].as_u64()).any(|id| home_items.contains(&id))
+            {
+                return Err(invalid("imported item already has a home filing"));
+            }
+        }
+        if !remaining.is_empty() {
+            return Err(invalid("imported bin outside the destination subtree"));
+        }
+        Ok(())
+    }
+
+    // Call under the publication lock, so the first visible revision of a child
+    // and its writer lease become visible to other checkouts together.
+    fn lock_new_bins(&self, folder: &Path, records: &ProjectRecords) -> io::Result<BTreeMap<u64, File>> {
+        let mut locks = BTreeMap::new();
+        for (&id, _) in records.bins.range(self.scope.start..self.scope.end) {
+            if !self.subtree_locks.contains_key(&id) {
+                let lock = revisions::lock_file(&folder.join(format!(".shared-bin-{id}.lock")))?;
+                lock.try_lock().map_err(|e| io::Error::new(io::Error::from(e).kind(), format!("bin {id} is busy")))?;
+                locks.insert(id, lock);
+            }
+        }
+        Ok(locks)
+    }
+
     pub fn publish(&mut self, folder: &Path, base: &str, draft: &ProjectRecords, cursor: u64) -> io::Result<(String, Project)> {
         let (rev, published) = self.publish_with(folder, base, draft, cursor, revisions::publish)?;
         self.published_copies = published_reservations(&published, &self.scope);
@@ -507,7 +613,7 @@ impl Claim {
     }
 
     fn publish_with(
-        &self,
+        &mut self,
         folder: &Path,
         base: &str,
         draft: &ProjectRecords,
@@ -523,7 +629,11 @@ impl Claim {
         let current = read_records(folder, &m)?;
         let merged = self.project_draft(&current, draft, cursor)?;
         let visible = project(&merged)?;
-        Ok((revisions::save_locked(folder, &head, &merged, write)?, visible))
+        let locks = self.lock_new_bins(folder, &merged)?;
+        let revision = revisions::save_locked(folder, &head, &merged, write)?;
+        self.subtree_locks.retain(|id, _| merged.bins.contains_key(id));
+        self.subtree_locks.extend(locks);
+        Ok((revision, visible))
     }
 }
 

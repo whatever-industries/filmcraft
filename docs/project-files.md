@@ -415,7 +415,9 @@ Open the destination with the local project-folder CLI. Call `project.previewExt
 
 Import copies the hierarchy with fresh bin and sequence IDs. Off-bin dependencies remain available through Show Reference Clips. Original and proxy paths continue to resolve from the destination, including offline paths. Repeat imports from the same source folder can reuse a matching media clip or subclip. Changing its metadata in either project makes the next import keep a separate source. Moving the source folder also starts a separate identity for subsequent imports.
 
-The destination requires a whole-project writer because the edit creates a bin hierarchy. Undo and Redo cover the entire import. Explicit Save publishes the destination revision.
+With desktop bin checkouts, open the destination bin for writing before calling the import command. Save publishes the imported hierarchy in one revision. Other editors can keep working in their bins and can read the published children. Release the destination checkout to let another editor check out an imported child independently. The whole-project writer also supports import.
+
+Undo and Redo cover the entire import. Recovering a checkpoint requires the published subtree to still match the checkpoint and its child locks to be available. A conflicting draft can be recovered to a separate `.fcproj`.
 
 ## Saving is atomic
 

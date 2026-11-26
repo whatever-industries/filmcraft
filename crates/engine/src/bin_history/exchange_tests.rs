@@ -143,3 +143,106 @@ fn import_rejects_a_busy_destination_and_scopes_source_identity_to_its_folder() 
     assert!(imported.children.is_empty());
     assert_eq!(fs::read(dest.join(ROOT)).unwrap(), saved_manifest);
 }
+
+#[test]
+fn desktop_bin_writer_can_import_save_undo_and_release_while_another_bin_is_edited() {
+    let t = tempfile::tempdir().unwrap();
+    let source = fixture(&t.path().join("source"), Path::new("offline"));
+    let destination = fixture(&t.path().join("dest"), Path::new("offline"));
+    let mut source_reader = open(&source);
+    let revision = source_reader.execute("project.binHistory", json!({})).unwrap()["revisions"][0][1].clone();
+    let desktop = |profile| {
+        let mut session = Session::desktop_project_editor(crate::autosave::AutosaveConfig::new(t.path().join(profile))).unwrap();
+        session.execute("file.open", json!({"path":destination.join(ROOT)})).unwrap();
+        session
+    };
+    let mut writer = desktop("writer");
+    let mut peer = desktop("peer");
+    writer.execute("project.checkoutBin", json!({"bin":71})).unwrap();
+    peer.execute("project.renameBin", json!({"bin":70,"name":"Peer cut"})).unwrap();
+    let args = request(&mut writer, &source, &revision, 70);
+    let (bin, cut, media) = apply(&mut writer, args);
+    let nested = match &writer.project.root.find_bin(bin).unwrap().children[1] {
+        BinEntry::Bin(b) => b.id,
+        _ => panic!("missing imported sub-bin"),
+    };
+    let export = t.path().join("draft.fcproj");
+    writer.execute("file.saveCopy", json!({"path":export})).unwrap();
+    let draft = filmcraft_format::decode(&fs::read(export).unwrap()).unwrap().project;
+    assert_eq!(draft.sequence(cut).unwrap().video_tracks[0].items[0].item, media);
+    assert!(draft.root.find_bin(nested).is_some());
+    writer.execute("file.save", json!({})).unwrap();
+    peer.execute("file.save", json!({})).unwrap();
+    assert_eq!(peer.execute("project.checkoutBin", json!({"bin":nested.0})).unwrap()["readOnly"], true);
+    peer.execute("project.releaseBin", json!({"bin":nested.0})).unwrap();
+
+    writer.execute("edit.undo", json!({})).unwrap();
+    writer.execute("file.save", json!({})).unwrap();
+    let reader = desktop("reader");
+    assert!(reader.project.root.find_bin(bin).is_none());
+    assert!(reader.project.item(cut).is_none());
+    assert_eq!(reader.project.root.find_bin(BinId(70)).unwrap().name, "Peer cut");
+    drop(reader);
+    writer.execute("edit.redo", json!({})).unwrap();
+    writer.execute("file.save", json!({})).unwrap();
+    writer.execute("project.releaseBin", json!({"bin":71})).unwrap();
+    assert_eq!(peer.execute("project.checkoutBin", json!({"bin":nested.0})).unwrap()["readOnly"], false);
+    peer.execute("project.renameBin", json!({"bin":nested.0,"name":"Pickup"})).unwrap();
+    peer.execute("file.save", json!({})).unwrap();
+    let reader = desktop("reopened");
+    assert_eq!(reader.project.root.find_bin(nested).unwrap().name, "Pickup");
+    assert_eq!(reader.project.root.find_bin(BinId(70)).unwrap().name, "Peer cut");
+    assert_eq!(reader.project.sequence(cut).unwrap().video_tracks[0].items[0].item, media);
+}
+
+#[test]
+fn checkout_import_uses_its_reserved_ids_and_recovers_only_while_the_published_subtree_matches() {
+    use filmcraft_format::project_folder::FolderSnapshot;
+
+    let t = tempfile::tempdir().unwrap();
+    let source = fixture(&t.path().join("source"), Path::new("offline"));
+    let dest = fixture(&t.path().join("dest"), Path::new("offline"));
+    let manifest = dest.join(ROOT);
+    let mut external = open(&source);
+    let rev = external.execute("project.binHistory", json!({})).unwrap()["revisions"][0][1].clone();
+    let mut writer = Session::desktop_project_editor(crate::autosave::AutosaveConfig::new(t.path().join("profile"))).unwrap();
+    writer.execute("file.open", json!({"path":manifest})).unwrap();
+    writer.execute("project.checkoutBin", json!({"bin":71})).unwrap();
+    let args = request(&mut writer, &source, &rev, 70);
+    writer.execute("project.checkoutBin", json!({"bin":70})).unwrap();
+    let mut high = args.clone();
+    high["bin"] = 70.into();
+    let (high_bin, _, shared) = apply(&mut writer, high);
+    writer.execute("file.save", json!({})).unwrap();
+    let (low_bin, cut, reused) = apply(&mut writer, args);
+    assert!(low_bin.0 < high_bin.0);
+    assert_eq!(reused, shared);
+    writer.execute("file.save", json!({})).unwrap();
+
+    let folder = writer.editing_folder.as_ref().unwrap();
+    let revision = folder.snapshot.revision().to_owned();
+    let scope = folder.snapshot.scope().unwrap().clone();
+    let cursor = folder.snapshot.cursor();
+    let draft = folder.baseline.origin.checkpoint(&dest, &folder.baseline.typed(), &folder.baseline.typed(), &manifest).unwrap();
+    drop(writer);
+    let recover = || {
+        let (mut snap, _) = FolderSnapshot::open_shared(&manifest).unwrap();
+        snap.checkout_bin(71, Some((&revision, &scope, &draft, cursor)))?;
+        Ok::<_, std::io::Error>(snap)
+    };
+    let resumed = recover().unwrap();
+    let (mut other, _) = FolderSnapshot::open_shared(&manifest).unwrap();
+    assert_eq!(other.checkout_bin(low_bin.0, None).unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    drop(resumed);
+
+    let mut peer = Session::desktop_project_editor(crate::autosave::AutosaveConfig::new(t.path().join("peer"))).unwrap();
+    peer.execute("file.open", json!({"path":manifest})).unwrap();
+    peer.execute("sequence.open", json!({"item":cut})).unwrap();
+    let clip = peer.project.sequence(cut).unwrap().video_tracks[0].items[0].id;
+    peer.execute("timeline.delete", json!({"clip":clip})).unwrap();
+    peer.execute("file.save", json!({})).unwrap();
+    drop(peer);
+    let before = fs::read(&manifest).unwrap();
+    assert!(recover().err().unwrap().to_string().contains("changed"));
+    assert_eq!(fs::read(manifest).unwrap(), before);
+}

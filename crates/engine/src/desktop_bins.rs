@@ -153,7 +153,7 @@ impl Session {
         if !self.editing_bins() {
             return Ok(());
         }
-        if id == "project.pasteFromHistory"
+        if matches!(id, "project.pasteFromHistory" | "project.importExternalBin")
             && p["epoch"].as_u64() == Some(self.document_epoch)
             && let Some(bin) = p["bin"].as_u64()
             && self.bin_access(bin) == Some(true)
