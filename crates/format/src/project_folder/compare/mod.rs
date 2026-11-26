@@ -1,4 +1,7 @@
 //! Read-only editorial comparison of two reachable saved revisions.
+mod fields;
+mod previous;
+pub use previous::previous;
 mod sequence;
 mod snapshot;
 use super::{bins::Entry, check_hash, invalid, recovery};
@@ -52,6 +55,13 @@ fn changes(a: &Snapshot, b: &Snapshot, selection: Selection, rows: &mut Vec<Valu
             (Some(p), Some(q)) if p != q && !a.ambiguous.contains(&key) && !b.ambiguous.contains(&key) => kinds.push("moved"),
             _ => (),
         }
+        if let Entry::Item(id) = key
+            && a.hierarchy_complete
+            && b.hierarchy_complete
+            && a.filings.get(&id) != b.filings.get(&id)
+        {
+            kinds.push("filingChanged");
+        }
         if let (Some(left), Some(right)) = (old, new) {
             if left["name"] != right["name"] {
                 kinds.push("renamed");
@@ -68,7 +78,7 @@ fn changes(a: &Snapshot, b: &Snapshot, selection: Selection, rows: &mut Vec<Valu
                         let before: Vec<_> = l.iter().filter(common).collect();
                         let after: Vec<_> = r.iter().filter(common).collect();
                         if before != after {
-                            rows.push(json!({"bin":id,"change":"reordered","before":before,"after":after}));
+                            rows.push(json!({"bin":id,"beforeName":left["name"],"afterName":right["name"],"change":"reordered","before":before,"after":after}));
                         }
                     }
                 }
@@ -84,7 +94,20 @@ fn changes(a: &Snapshot, b: &Snapshot, selection: Selection, rows: &mut Vec<Valu
         }
         if !kinds.is_empty() {
             let mut row = json!({"record":key,"changes":kinds,"beforeName":old.map(|v| &v["name"]),"afterName":new.map(|v| &v["name"]),
-                "beforeParent":parent_a,"afterParent":parent_b,"scope":if parent_a.is_none() && parent_b.is_none() {"dependency"}else{"selection"}});
+                "beforeParent":parent_a,"afterParent":parent_b,"scope":if parent_a.is_none() && parent_b.is_none() && !matches!(key, Entry::Item(id) if a.filings.contains_key(&id) || b.filings.contains_key(&id)) {"dependency"}else{"selection"}});
+            if let (Some(left), Some(right)) = (old, new) {
+                // Bin membership and relative ordering have dedicated rows.
+                if let Entry::Bin(_) = key {
+                    row["fields"] = fields::details(Some(&without(left, &["children"])), Some(&without(right, &["children"])));
+                } else {
+                    row["fields"] = fields::details(Some(left), Some(right));
+                }
+            }
+            if let Entry::Item(id) = key {
+                row["associatedFields"] = fields::details(a.sidecars.get(&id), b.sidecars.get(&id));
+                row["beforeFilings"] = json!(a.filings.get(&id));
+                row["afterFilings"] = json!(b.filings.get(&id));
+            }
             if old.into_iter().chain(new).any(|v| v.pointer("/kind/Sequence").is_some()) {
                 row["itemType"] = json!("sequence");
             }
@@ -104,6 +127,25 @@ fn changes(a: &Snapshot, b: &Snapshot, selection: Selection, rows: &mut Vec<Valu
 
 /// Writes deterministic JSON lines. A partial report ends with complete=false and an error return.
 pub fn compare(folder: &Path, from: &str, to: &str, selection: Selection, mut out: impl Write) -> io::Result<()> {
+    let data = report(folder, from, to, selection)?;
+    for row in &data.rows {
+        serde_json::to_writer(&mut out, row)?;
+        writeln!(out)?;
+    }
+    serde_json::to_writer(&mut out, &json!({"complete":data.complete,"from":from,"to":to,"selection":selection.key()}))?;
+    writeln!(out)?;
+    if data.complete { Ok(()) } else { Err(invalid("incomplete revision comparison")) }
+}
+
+#[derive(serde::Serialize)]
+pub struct Report {
+    pub complete: bool,
+    pub rows: Vec<Value>,
+    pub before_name: Option<String>,
+    pub after_name: Option<String>,
+}
+
+pub fn report(folder: &Path, from: &str, to: &str, selection: Selection) -> io::Result<Report> {
     check_hash(from)?;
     check_hash(to)?;
     let (mut left, mut right) = (None, None);
@@ -135,10 +177,6 @@ pub fn compare(folder: &Path, from: &str, to: &str, selection: Selection, mut ou
             break;
         }
     }
-    rows.push(json!({"complete":complete,"from":from,"to":to,"selection":key}));
-    for row in rows {
-        serde_json::to_writer(&mut out, &row)?;
-        writeln!(out)?;
-    }
-    if complete { Ok(()) } else { Err(invalid("incomplete revision comparison")) }
+    let name = |s: &Snapshot| s.records.get(&key)?.get("name")?.as_str().map(str::to_owned);
+    Ok(Report { complete, rows, before_name: name(a), after_name: name(b) })
 }

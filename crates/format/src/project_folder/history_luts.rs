@@ -36,6 +36,15 @@ fn values(raw: &mut Value, visit: &mut impl FnMut(&mut Value) -> io::Result<()>)
     Ok(())
 }
 
+pub(super) fn referenced(raw: &mut Value, ids: &mut std::collections::BTreeSet<String>) -> io::Result<()> {
+    values(raw, &mut |text| {
+        if let Some(id) = text.as_str().and_then(|s| s.strip_prefix("lib:")) {
+            ids.insert(id.to_owned());
+        }
+        Ok(())
+    })
+}
+
 pub(super) fn restore(raw: &mut Value, old: &ProjectRecords, live: &mut ProjectRecords, next: &mut u64) -> io::Result<()> {
     values(raw, &mut |text| {
         let Some(old_id) = text.as_str().and_then(|v| v.strip_prefix("lib:")) else {

@@ -45,7 +45,7 @@ impl Cut {
                     let source = ticks("source_in")?;
                     let start_frame = rate.frame_at(Tick(start)).checked_add(origin).ok_or_else(|| invalid(format!("clip {id}: timecode overflow")))?;
                     let detail = json!({"track":track_id,"source":raw["item"],"start":start,"duration":duration,"sourceIn":source,
-                        "startTimecode":tc(start_frame),"durationTimecode":tc(rate.frame_at(Tick(duration))),"sourceInAtSequenceRate":tc(rate.frame_at(Tick(source)))});
+                        "startTimecode":tc(start_frame),"durationFrames":rate.frame_at(Tick(duration)), "rate":rate,"durationTimecode":tc(rate.frame_at(Tick(duration))),"sourceInAtSequenceRate":tc(rate.frame_at(Tick(source)))});
                     let extra = without(&raw, &["id", "item", "start", "duration", "source_in"]);
                     if clips.insert(id, Clip { track: track_id, detail, extra }).is_some() {
                         return Err(invalid(format!("duplicate clip {id}")));
@@ -69,7 +69,7 @@ pub(super) fn compare(id: u64, a: &Cut, b: &Cut, rows: &mut Vec<Value>) {
         }
     }
     if other {
-        rows.push(json!({"sequence":id,"change":"other"}));
+        rows.push(json!({"sequence":id,"change":"other","fields":super::fields::details(Some(&a.other),Some(&b.other))}));
     }
     for &clip in a.clips.keys().chain(b.clips.keys()).collect::<BTreeSet<_>>() {
         let (old, new) = (a.clips.get(&clip), b.clips.get(&clip));
@@ -97,7 +97,7 @@ pub(super) fn compare(id: u64, a: &Cut, b: &Cut, rows: &mut Vec<Value>) {
             (None, None) => continue,
         };
         if !kinds.is_empty() {
-            rows.push(json!({"sequence":id,"clip":clip,"changes":kinds,"before":old.map(|c|&c.detail),"after":new.map(|c|&c.detail)}));
+            rows.push(json!({"sequence":id,"clip":clip,"changes":kinds,"fields":super::fields::details(old.map(|c|&c.extra),new.map(|c|&c.extra)),"before":old.map(|c|&c.detail),"after":new.map(|c|&c.detail)}));
         }
     }
 }

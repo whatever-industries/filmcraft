@@ -155,3 +155,97 @@ fn damage_preserves_independent_findings_and_never_implies_deletion() {
         }
     }
 }
+
+#[test]
+fn previous_uses_filings_at_each_save_and_skips_reference_only_logging() {
+    use filmcraft_format::project_folder::compare::previous;
+    for filed in [false, true] {
+        let t = tempdir().unwrap();
+        let mut doc = sample();
+        if filed {
+            doc["project"]["root"]["children"][0]["Bin"]["filed_sources"] = json!([5]);
+        }
+        let (folder, a) = start(t.path(), &doc);
+        let source = &mut doc["project"]["items"]["5"];
+        source["metadata"]["Unit"] = json!("B");
+        source["name"] = json!("Interview");
+        source["label"] = json!("Rose");
+        source["custom_label_color"] = json!("#AC3811");
+        let b = publish(&folder, &a, &doc);
+        let clip = &mut doc["project"]["items"]["21"]["kind"]["Sequence"]["video_tracks"][0]["items"][0];
+        clip["duration"] = json!(clip["duration"].as_i64().unwrap() - 5 * filmcraft_time::FrameRate::FPS_24.frame_duration().0);
+        let c = publish(&folder, &b, &doc);
+        assert_eq!(previous(&folder, &c, 1).unwrap().as_ref(), Some(if filed { &b } else { &a }));
+        assert!(previous(&folder, &a, 1).unwrap().is_none());
+        assert!(previous(&folder, &c, 999999).is_err());
+        let (mut native, before) = filmcraft_format::project_folder::FolderSnapshot::open(&folder.join("project.fcmod")).unwrap();
+        let mut changed: Value = serde_json::from_slice(&before).unwrap();
+        changed["project"]["root"]["children"][0]["Bin"]["filed_sources"] = if filed { json!([]) } else { json!([5]) };
+        native.save(&before, &serde_json::to_vec(&changed).unwrap()).unwrap();
+        let later = native.revision().to_owned();
+        assert_ne!(later, c);
+        assert_eq!(previous(&folder, &later, 1).unwrap().as_ref(), Some(&c));
+        assert_eq!(previous(&folder, &c, 1).unwrap().as_ref(), Some(if filed { &b } else { &a }));
+    }
+}
+
+#[test]
+fn compare_named_fields_secondary_filings_and_used_resources() {
+    let t = tempdir().unwrap();
+    let mut doc = sample();
+    let source = "/project/items/5";
+    doc["project"]["root"]["children"][0]["Bin"]["filed_sources"] = json!([5]);
+    doc["project"]["items"]["5"]["metadata"]["Unit/Team"] = "old".into();
+    let fx = &mut doc["project"]["items"]["21"]["kind"]["Sequence"]["video_tracks"][0]["items"][0]["effects"][0];
+    fx["params"]["look_lut"] = json!({"value":{"Text":"lib:lut999"}});
+    let (folder, a) = start(t.path(), &doc);
+    let item = doc.pointer_mut(source).unwrap();
+    item["metadata"].as_object_mut().unwrap().remove("Unit/Team");
+    item["future_field"] = json!({"unknown":3});
+    item["kind"]["Media"]["interpret"]["ignore_alpha"] = true.into();
+    doc["project"]["transcripts"]["5"]["language"] = "fr".into();
+    doc["project"]["luts"][0]["text"] = "revised grade".into();
+    let b = publish(&folder, &a, &doc);
+    let rows = report(&folder, &a, &b, Selection::Bin(1), true);
+    let by_id = |id| rows.iter().find(|r| r["record"] == json!({"Item":id})).unwrap();
+    let row = by_id(5);
+    let field = |key: &str| row["fields"].as_array().unwrap().iter().find(|v| v["path"] == key).unwrap();
+    assert_eq!(field("/metadata/Unit~1Team")["before"], "old");
+    assert!(field("/metadata/Unit~1Team").get("after").is_none());
+    assert_eq!(field("/future_field/unknown")["after"], 3);
+    assert_eq!(field("/kind/Media/interpret/ignore_alpha")["after"], true);
+    assert!(row["associatedFields"].as_array().unwrap().iter().any(|f| f["path"] == "/transcripts/language"));
+    assert!(by_id(21)["associatedFields"].as_array().unwrap().iter().any(|f| f["path"] == "/luts/lut999/text"));
+    doc["project"]["luts"][0]["text"] = format!("{}A", "0 ".repeat(4096)).into();
+    let c = publish(&folder, &b, &doc);
+    doc["project"]["luts"][0]["text"] = format!("{}B", "0 ".repeat(4096)).into();
+    let d = publish(&folder, &c, &doc);
+    let rows = report(&folder, &c, &d, Selection::Bin(1), true);
+    let used = rows.iter().find(|r| r["record"] == json!({"Item":21})).unwrap();
+    assert!(used["associatedFields"].as_array().unwrap().iter().any(|f| f["path"] == "/luts/lut999/text/sha256" && f["before"] != f["after"]));
+}
+
+#[test]
+fn previous_follows_bin_identity_through_rename_deletion_and_damaged_history() {
+    use filmcraft_format::project_folder::compare::previous;
+    let t = tempdir().unwrap();
+    let mut doc = sample();
+    let (folder, a) = start(t.path(), &doc);
+    let root = doc["project"]["root"]["children"].as_array_mut().unwrap();
+    root.push(bin(90, "Dailies", json!([])));
+    let b = publish(&folder, &a, &doc);
+    assert!(previous(&folder, &b, 90).unwrap().is_none());
+    doc["project"]["root"]["children"][2]["Bin"]["name"] = "Renamed".into();
+    let c = publish(&folder, &b, &doc);
+    let old = filmcraft_format::project_folder::compare::report(&folder, &b, &c, Selection::Bin(90)).unwrap();
+    assert_eq!(old.before_name.as_deref(), Some("Dailies"));
+    assert_eq!(old.after_name.as_deref(), Some("Renamed"));
+    let mut m = manifest(&folder);
+    let damaged = folder.join(payload(&mut m, "bins", 90).as_str().unwrap());
+    doc["project"]["root"]["children"].as_array_mut().unwrap().pop();
+    let _head = publish(&folder, &c, &doc);
+    assert_eq!(previous(&folder, &c, 90).unwrap(), Some(b));
+    fs::remove_file(damaged).unwrap();
+    let gap = previous(&folder, &c, 90).unwrap_err().to_string();
+    assert!(gap.contains(&c) && gap.contains("90"), "{gap}");
+}
