@@ -2092,3 +2092,69 @@ fn find_uses_jumps_to_the_filed_cut_in_the_pinned_save() {
     d.wait_for("binHistory.noUses");
     assert_eq!(d.label("binHistory.noUses"), "No sequences use this item in this save");
 }
+
+#[test]
+fn import_saved_bin_previews_dependencies_and_requires_refresh_after_source_changes() {
+    use filmcraft_format::project_folder::{FolderSnapshot, ROOT, pack};
+    let dir = tempfile::tempdir().unwrap();
+    let mut demo = demo_session();
+    let cut = demo.state.active_sequence.unwrap();
+    let cuts = demo.project.root.parent_of(cut).unwrap();
+    let cut_name = demo.project.item(cut).unwrap().name.clone();
+    let stock = dir.path().join("demo.fcproj");
+    demo.execute("file.saveAs", json!({"path":stock})).unwrap();
+    let source = dir.path().join("rushes");
+    let destination = dir.path().join("edit");
+    for path in [&source, &destination] {
+        pack(&stock, path, filmcraft_format::atomic_write_new).unwrap();
+    }
+    let mut session = Session::desktop_project_editor(filmcraft_engine::autosave::AutosaveConfig::new(dir.path().join("profile"))).unwrap();
+    session.execute("file.open", json!({"path":destination.join(ROOT)})).unwrap();
+    let mut d = Driver::with(session);
+    d.ok("ui.panel.show", json!({"panel":"Project"}));
+    d.ok("ui.set", json!({"focused":"Project"}));
+    d.ok("ui.menu.invoke", json!({"id":"window.maximizeFrame"}));
+    d.ok("ui.menu.invoke", json!({"id":"projectPanel.openBin","params":{"bin":cuts,"how":"inPlace"}}));
+    d.frames(3);
+    let folder_choice = source.to_string_lossy().into_owned();
+    d.app().hooks.pick_folder = Some(Box::new(move || Some(folder_choice.clone())));
+    let before = d.app().session.project.root.find_bin(cuts).unwrap().clone();
+    let preview = |d: &mut Driver| {
+        click_project_option(d, "project.importSavedBin");
+        let select = format!("binImport.bin.{}", cuts.0);
+        d.wait_for("binImport.revision.0");
+        d.click("binImport.revision.0");
+        d.wait_for(&select);
+        d.click(&select);
+        d.wait_for("binImport.apply");
+    };
+    preview(&mut d);
+    d.key("Escape");
+    assert!(!d.has("binImport.apply"));
+    assert_eq!(d.app().session.project.root.find_bin(cuts), Some(&before));
+    preview(&mut d);
+    assert!(d.parts().0.query_by_label(&cut_name).is_some());
+    assert!(d.parts().0.query_by_label_contains("Referenced Items (").is_some());
+    assert_eq!(d.app().session.project.root.find_bin(cuts), Some(&before));
+    d.snapshot("project-import-saved-bin", None);
+
+    let (mut writer, bytes) = FolderSnapshot::open(&source.join(ROOT)).unwrap();
+    let mut newer = filmcraft_format::decode(&bytes).unwrap().project;
+    newer.root.find_bin_mut(cuts).unwrap().name = "Newer cuts".into();
+    writer.save(&bytes, &filmcraft_format::encode(&newer, false)).unwrap();
+    d.click("binImport.apply");
+    d.wait_for("binImport.error");
+    assert!(d.label("binImport.error").contains("preview"));
+    assert_eq!(d.app().session.project.root.find_bin(cuts), Some(&before));
+    d.click("binImport.retry");
+    d.wait_for("binImport.apply");
+    d.click("binImport.apply");
+    assert!(!d.has("binImport.apply"));
+    let children = &d.app().session.project.root.find_bin(cuts).unwrap().children;
+    assert_eq!(children.len(), before.children.len() + 1);
+    let BinEntry::Bin(imported) = children.last().unwrap() else { panic!("expected the imported bin") };
+    assert_eq!(imported.name, before.name, "refresh retains the selected historical revision");
+    assert_ne!(imported.id, cuts);
+    d.exec("edit.undo", json!({}));
+    assert_eq!(d.app().session.project.root.find_bin(cuts), Some(&before));
+}

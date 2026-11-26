@@ -446,6 +446,10 @@ fn bin_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, v: &View, bin: u64, actio
         super::bin_history::open(app, Some(bin));
         ui.close();
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    if super::bin_history::exchange::menu(app, ui, bin) {
+        ui.close();
+    }
     if super::bin_history::paste_button(app, ui, bin) {
         ui.close();
     }

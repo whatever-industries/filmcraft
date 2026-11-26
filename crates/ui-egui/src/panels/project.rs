@@ -100,6 +100,9 @@ pub struct ProjectPanelUi {
     pub history_clipboard: Option<super::bin_history::Clipboard>,
     #[serde(skip)]
     pub history_browser: Option<super::bin_history::Browser>,
+    #[cfg(not(target_arch = "wasm32"))]
+    #[serde(skip)]
+    pub(crate) external_import: Option<super::bin_history::exchange::Browser>,
     pub rename: Option<Rename>,
     pub dialog: Option<ProjectDialog>,
     pub hover: Option<Hover>,
@@ -873,6 +876,10 @@ pub fn panel_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui) -> bool {
     let v = view_of(app, inst);
     if app.session.is_modular_document() && super::bin_history::button(app, ui, "project.menu.projectHistory", tl!("Project History")) {
         super::bin_history::open(app, None);
+        return true;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if super::bin_history::exchange::menu(app, ui, v.bin.0) {
         return true;
     }
     if super::bin_history::paste_button(app, ui, v.bin.0) {

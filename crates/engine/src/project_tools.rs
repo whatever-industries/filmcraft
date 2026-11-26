@@ -102,7 +102,7 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             "Preview Saved Bin",
             &[],
             None,
-            r#"{"folder":str,"revision":digest,"sourceBin":id}"#,
+            r#"{"folder":str,"revision":digest?,"sourceBin":id?}"#,
             always,
             crate::bin_history::preview_external,
         ),

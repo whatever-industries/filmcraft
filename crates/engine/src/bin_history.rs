@@ -66,13 +66,7 @@ pub(super) fn paste(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 pub(super) fn preview_external(s: &mut Session, p: &Value) -> Result<Value> {
-    s.history_folder()?;
-    let folder = p["folder"].as_str().ok_or_else(|| error("expected a source folder"))?;
-    let revision = p["revision"].as_str().ok_or_else(|| error("expected a saved revision"))?;
-    let bin = p["sourceBin"].as_u64().ok_or_else(|| error("choose a source bin"))?;
-    let mut result = serde_json::to_value(bins::preview_bin(folder.as_ref(), revision, bin).map_err(error)?).map_err(error)?;
-    result["epoch"] = s.document_epoch.into();
-    Ok(result)
+    s.prepare_external_bin_preview(p)?()
 }
 
 pub(super) fn import_external(s: &mut Session, p: &Value) -> Result<Value> {
@@ -149,6 +143,38 @@ pub(super) fn compare_versions(s: &mut Session, p: &Value) -> Result<Value> {
 impl Session {
     fn history_folder(&self) -> Result<&std::path::Path> {
         Ok(self.editing_folder.as_ref().ok_or_else(|| error("open a modular project first"))?.snapshot.directory())
+    }
+
+    /// Capture the destination session and source selection before scanning on a worker.
+    pub fn prepare_external_bin_preview(&self, p: &Value) -> Result<impl FnOnce() -> Result<Value> + Send + 'static + use<>> {
+        let destination = self.history_folder()?.to_owned();
+        let folder = std::path::PathBuf::from(p["folder"].as_str().ok_or_else(|| error("expected a source folder"))?);
+        let revision = p.get("revision").map(|v| v.as_str().map(str::to_owned).ok_or_else(|| error("expected a saved revision"))).transpose()?;
+        let bin = p.get("sourceBin").map(|v| v.as_u64().ok_or_else(|| error("expected a source bin ID"))).transpose()?;
+        let epoch = self.document_epoch;
+        Ok(move || {
+            if revision.is_none() && folder.canonicalize().map_err(error)? == destination.canonicalize().map_err(error)? {
+                return Err(error("choose a different source project"));
+            }
+            let mut result = match (revision, bin) {
+                (None, None) => json!({"revisions":bin_history::revisions(&folder,None).map_err(error)?}),
+                (Some(rev), None) => serde_json::to_value(bins::saved_bins(&folder, &rev).map_err(error)?).map_err(error)?,
+                (Some(rev), Some(id)) => serde_json::to_value(bins::preview_bin(&folder, &rev, id).map_err(error)?).map_err(error)?,
+                (None, Some(_)) => return Err(error("choose a saved revision first")),
+            };
+            result["epoch"] = epoch.into();
+            Ok(result)
+        })
+    }
+
+    /// A parked writable checkout is also available as an explicit import destination.
+    pub fn can_import_into_bin(&self, bin: u64) -> bool {
+        if self.editing_bins() {
+            self.bin_access(bin) == Some(true)
+        } else {
+            self.editing_folder.as_ref().is_some_and(|f| f.snapshot.writable() && f.snapshot.scope().is_none_or(|scope| scope.bin == bin))
+                && self.project.root.find_bin(filmcraft_project::BinId(bin)).is_some()
+        }
     }
 
     /// Pin the search to this document and save before handing it to a worker.

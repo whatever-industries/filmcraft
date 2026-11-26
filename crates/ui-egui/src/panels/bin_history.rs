@@ -1,4 +1,6 @@
 //! A pinned historical view, separate from the live bin selection and checkout.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) mod exchange;
 mod uses;
 mod versions;
 mod worker;

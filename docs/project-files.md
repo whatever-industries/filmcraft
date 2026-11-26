@@ -411,7 +411,9 @@ ID. A missing required record stops the export before the destination is created
 
 ### Import a saved bin from another modular project
 
-Open the destination with the local project-folder CLI. Call `project.previewExternalBin` with the source `folder`, saved `revision` digest and `sourceBin` ID. Pass those same values to `project.importExternalBin`, together with the preview’s `head` and `epoch` and the destination parent’s `bin` ID. The result gives the new bin ID. If the source publishes another save, preview again. You can still choose the earlier revision.
+In the Project panel, open the destination bin for writing, then choose **Import Saved Bin…** from the panel menu. You can also open the menu on a bin you already have checked out. Choose the other project’s folder, select a saved revision, then select a bin by its path and ID. The preview lists the bins, filed items and additional references. **Import** adds the selection to the destination. **Cancel** closes the preview. If the source publishes another save during review, choose **Refresh** to check the selected version again.
+
+From the local project-folder CLI, use `project.previewExternalBin` with just `folder` to list saved revisions. Add `revision` to list the bins in that save. Call `project.previewExternalBin` with the source `folder`, saved `revision` digest and `sourceBin` ID. Pass those same values to `project.importExternalBin`, together with the preview’s `head` and `epoch` and the destination parent’s `bin` ID. The result gives the new bin ID. If the source publishes another save, preview again. You can still choose the earlier revision.
 
 Import copies the hierarchy with fresh bin and sequence IDs. Off-bin dependencies remain available through Show Reference Clips. Original and proxy paths continue to resolve from the destination, including offline paths. Repeat imports from the same source folder can reuse a matching media clip or subclip. Changing its metadata in either project makes the next import keep a separate source. Moving the source folder also starts a separate identity for subsequent imports.
 
