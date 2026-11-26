@@ -10,9 +10,9 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::{io, path::Path};
 
-const SIDECARS: [&str; 3] = ["transcripts", "source_graphics", "narrations"];
+pub(super) const SIDECARS: [&str; 3] = ["transcripts", "source_graphics", "narrations"];
 
-fn walk(folder: &Path, mut visit: impl FnMut(&str, &Manifest) -> io::Result<bool>) -> io::Result<Option<Manifest>> {
+pub(super) fn walk(folder: &Path, mut visit: impl FnMut(&str, &Manifest) -> io::Result<bool>) -> io::Result<Option<Manifest>> {
     let mut bytes = read_member(&folder.join(ROOT), MANIFEST_LIMIT)?;
     let mut hash = digest(&bytes);
     let mut expected_number = None;
@@ -50,7 +50,7 @@ pub(super) fn at(folder: &Path, requested: &str) -> io::Result<Manifest> {
     walk(folder, |hash, _| Ok(requested == hash))?.ok_or_else(|| invalid("selected revision is outside the current project history"))
 }
 
-fn references(item: &ProjectItem, pending: &mut Vec<u64>) {
+pub(super) fn references(item: &ProjectItem, pending: &mut Vec<u64>) {
     match &item.kind {
         ItemKind::Subclip { parent, .. } => pending.push(parent.0),
         ItemKind::Sequence(seq) => {
@@ -69,26 +69,42 @@ pub(super) fn metadata(folder: &Path, manifest: &Manifest, budget: &mut u64) -> 
     Ok((envelope, root))
 }
 
-pub(super) fn extract_items(folder: &Path, manifest: &Manifest, mut envelope: Value, budget: &mut u64, mut pending: Vec<u64>) -> io::Result<ProjectRecords> {
-    let project = envelope.get_mut("project").and_then(Value::as_object_mut).ok_or_else(|| invalid("missing project metadata"))?;
-    let inventory: Vec<u64> = serde_json::from_value(project.get("items").ok_or_else(|| invalid("missing item inventory"))?.clone())?;
+pub(super) fn inventory(value: Option<&Value>) -> io::Result<BTreeSet<u64>> {
+    let inventory: Vec<u64> = serde_json::from_value(value.ok_or_else(|| invalid("missing item inventory"))?.clone())?;
     let inventory_len = inventory.len();
     let inventory: BTreeSet<_> = inventory.into_iter().collect();
     if inventory.len() != inventory_len {
         return Err(invalid("duplicate item in project inventory"));
     }
+    Ok(inventory)
+}
+
+pub(super) fn read_item(
+    folder: &Path,
+    hashes: &super::RecordIndex<'_>,
+    inventory: &BTreeSet<u64>,
+    id: u64,
+    budget: &mut u64,
+) -> io::Result<(ProjectItem, Value)> {
+    let hash = hashes.get(&id).copied().flatten().filter(|_| inventory.contains(&id)).ok_or_else(|| invalid(format!("missing or repeated item {id}")))?;
+    let value = load_payload(folder, hash, budget).map_err(|e| invalid(format!("item {id}: {e}")))?;
+    let item: ProjectItem = serde::Deserialize::deserialize(&value).map_err(|e| invalid(format!("item {id}: {e}")))?;
+    if item.id.0 != id {
+        return Err(invalid(format!("mismatched item {id}")));
+    }
+    Ok((item, value))
+}
+
+pub(super) fn extract_items(folder: &Path, manifest: &Manifest, mut envelope: Value, budget: &mut u64, mut pending: Vec<u64>) -> io::Result<ProjectRecords> {
+    let project = envelope.get_mut("project").and_then(Value::as_object_mut).ok_or_else(|| invalid("missing project metadata"))?;
+    let inventory = inventory(project.get("items"))?;
     let hashes = record_index(&manifest.items);
     let mut items = BTreeMap::new();
     while let Some(id) = pending.pop() {
         if items.contains_key(&id) {
             continue;
         }
-        let hash = hashes.get(&id).copied().flatten().filter(|_| inventory.contains(&id)).ok_or_else(|| invalid(format!("missing or repeated item {id}")))?;
-        let value = load_payload(folder, hash, budget).map_err(|e| invalid(format!("item {id}: {e}")))?;
-        let item: ProjectItem = serde::Deserialize::deserialize(&value).map_err(|e| invalid(format!("item {id}: {e}")))?;
-        if item.id.0 != id {
-            return Err(invalid(format!("mismatched item {id}")));
-        }
+        let (item, value) = read_item(folder, &hashes, &inventory, id, budget)?;
         references(&item, &mut pending);
         items.insert(id, value);
     }

@@ -11,6 +11,7 @@ use std::io;
 use std::path::Path;
 
 pub mod bins;
+pub mod compare;
 mod paths;
 pub mod recovery;
 pub mod revisions;

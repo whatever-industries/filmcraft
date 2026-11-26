@@ -10,22 +10,22 @@ use std::io::{self, Write};
 use std::path::Path;
 
 // The shared record codec caps reassembled bin nesting at 64.
-const MAX_DEPTH: usize = 64;
+pub(super) const MAX_DEPTH: usize = 64;
 
-#[derive(Deserialize)]
-enum Entry {
+#[derive(Clone, Copy, Debug, Deserialize, serde::Serialize, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Entry {
     Bin(u64),
     Item(u64),
 }
 
 #[derive(Deserialize)]
-struct Bin {
-    id: u64,
-    name: String,
-    children: Vec<Entry>,
+pub(super) struct Bin {
+    pub(super) id: u64,
+    pub(super) name: String,
+    pub(super) children: Vec<Entry>,
 }
 
-fn read_bin(folder: &Path, ids: &RecordIndex<'_>, id: u64, budget: &mut u64) -> io::Result<(Bin, Value)> {
+pub(super) fn read_bin(folder: &Path, ids: &RecordIndex<'_>, id: u64, budget: &mut u64) -> io::Result<(Bin, Value)> {
     let hash = ids.get(&id).copied().flatten().ok_or_else(|| invalid(format!("missing or repeated bin {id}")))?;
     let value = load_payload(folder, hash, budget).map_err(|e| invalid(format!("bin {id}: {e}")))?;
     let bin = Bin::deserialize(&value).map_err(|e| invalid(format!("bin {id}: {e}")))?;

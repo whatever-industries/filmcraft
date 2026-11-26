@@ -313,6 +313,34 @@ The modular exports retained the fixture’s unknown clip fields. Stock FilmCraf
 or its original export when those fields matter. Network leases, multi-machine
 reconnect and simultaneous edits within a sequence need separate trials.
 
+### Compare two saved revisions
+
+Use two full revision digests from `project_folder history FOLDER`. For a deleted bin,
+run `project_folder list-bins FOLDER FROM` on an earlier revision to find its ID.
+
+```text
+project_folder compare-bin FOLDER FROM TO BIN_ID
+project_folder compare-sequence FOLDER FROM TO SEQUENCE_ID
+project_folder rescue-bin FOLDER CHOSEN_REVISION BIN_ID NEW.fcproj
+```
+
+The bin report follows descendants, matches stable IDs, and lists changed sequences
+by name and ID. Drill into a sequence to see clip and source IDs, track IDs, start,
+duration, and source in-point on each side. Times are exact FilmCraft ticks. Timeline
+timecode uses that revision’s sequence rate, drop-frame setting, and start timecode.
+Source in-points also have a display value at sequence rate. A source-only relink
+produces a dependency row. The `other` change covers stored properties outside
+the detailed edit list, including unknown fields.
+
+Both comparison commands emit JSON lines in deterministic order, from `FROM` to
+`TO`. A member removed from the selected bin may still exist elsewhere in the
+project. The removal row’s `absentFromProject` flag distinguishes these cases.
+A final `complete: true` row and exit code zero indicate a verified report, even
+when the revisions differ. If a required record is unreadable, inspect the error
+rows for its ID and revision. The report retains verified findings and exits nonzero.
+An invalid revision or unreadable manifest can stop comparison before a report is
+available. Comparison reads saved project metadata and works with offline media.
+
 ### Recover a sequence
 
 Run `project_folder history FOLDER` to list revision numbers and digests, newest first.

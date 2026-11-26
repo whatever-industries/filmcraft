@@ -3,6 +3,7 @@ use filmcraft_format::project_folder as converter;
 
 use converter::{
     bins::{list_bins, rescue_bin},
+    compare::{Selection, compare},
     pack,
     recovery::{history, rescue, restore_copy},
     revisions::{checkout, save},
@@ -47,6 +48,13 @@ fn run() -> io::Result<()> {
     {
         return list_bins(Path::new(folder), revision, io::stdout().lock());
     }
+    if let [command, folder, from, to, id] = args.as_slice()
+        && (command == "compare-bin" || command == "compare-sequence")
+        && let (Some(from), Some(to), Some(id)) = (from.to_str(), to.to_str(), id.to_str().and_then(|s| s.parse().ok()))
+    {
+        let selection = if command == "compare-bin" { Selection::Bin(id) } else { Selection::Sequence(id) };
+        return compare(Path::new(folder), from, to, selection, io::stdout().lock());
+    }
     if let [command, folder, base, revision, id] = args.as_slice()
         && command == "restore-copy"
         && let (Some(base), Some(revision), Some(id)) = (base.to_str(), revision.to_str(), id.to_str().and_then(|s| s.parse().ok()))
@@ -66,7 +74,7 @@ fn run() -> io::Result<()> {
     }
     Err(io::Error::new(
         io::ErrorKind::InvalidInput,
-        "usage: project_folder pack SOURCE.fcproj NEW_FOLDER | unpack FOLDER NEW_FILE.fcproj | checkout FOLDER NEW_FILE.fcproj | save FOLDER BASE_REVISION EDITED.fcproj | history FOLDER | restore-copy FOLDER BASE_REVISION HISTORICAL_REVISION SEQUENCE_ID | rescue FOLDER REVISION SEQUENCE_ID NEW_FILE.fcproj | list-bins FOLDER REVISION | rescue-bin FOLDER REVISION BIN_ID NEW.fcproj",
+        "usage: project_folder pack SOURCE.fcproj NEW_FOLDER | unpack FOLDER NEW_FILE.fcproj | checkout FOLDER NEW_FILE.fcproj | save FOLDER BASE_REVISION EDITED.fcproj | history FOLDER | compare-bin FOLDER FROM TO BIN_ID | compare-sequence FOLDER FROM TO SEQUENCE_ID | restore-copy FOLDER BASE_REVISION HISTORICAL_REVISION SEQUENCE_ID | rescue FOLDER REVISION SEQUENCE_ID NEW_FILE.fcproj | list-bins FOLDER REVISION | rescue-bin FOLDER REVISION BIN_ID NEW.fcproj",
     ))
 }
 

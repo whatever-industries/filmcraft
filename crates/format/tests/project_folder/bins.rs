@@ -171,3 +171,6 @@ fn required_damage_or_a_bin_cycle_refuses_publication() {
     assert!(!out.exists());
     assert_eq!(snapshot(&folder), before);
 }
+
+#[path = "compare.rs"]
+mod comparison;
