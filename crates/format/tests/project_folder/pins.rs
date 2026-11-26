@@ -98,3 +98,48 @@ fn invalid_pins_do_not_replace_good_marks_or_publish_a_misleading_backup() {
         assert_eq!(fs::read(&sidecar).unwrap(), bad);
     }
 }
+
+#[test]
+fn competing_milestone_renames_preserve_the_pin_and_reject_stale_labels() {
+    use converter::{backup, pins, retention};
+    use std::{num::NonZeroUsize, sync::Barrier};
+    let tmp = tempdir().unwrap();
+    let folder = tmp.path().join("project");
+    let edit = tmp.path().join("edit.fcproj");
+    let mut doc = current();
+    write_doc(&edit, &doc);
+    pack(&edit, &folder, atomic_write_new).unwrap();
+    let base = checkout(&folder, &tmp.path().join("copy.fcproj")).unwrap();
+    pins::pin(&folder, &base, "Rough cut").unwrap();
+    doc["project"]["items"]["73"]["name"] = "New cut".into();
+    write_doc(&edit, &doc);
+    let head = save(&folder, &base, &edit).unwrap();
+    pins::pin(&folder, &head, "Rough cut").unwrap();
+
+    let barrier = Barrier::new(2);
+    let rename = |label| {
+        barrier.wait();
+        pins::rename(&folder, &base, "Rough cut", label).is_ok()
+    };
+    let (first, second) = std::thread::scope(|scope| {
+        let a = scope.spawn(|| rename("Review A"));
+        let b = scope.spawn(|| rename("Review B"));
+        (a.join().unwrap(), b.join().unwrap())
+    });
+    assert_ne!(first, second);
+    let winner = if first { "Review A" } else { "Review B" };
+    let sidecar = folder.join("revision-pins.json");
+    let before = fs::read(&sidecar).unwrap();
+    assert!(pins::rename(&folder, &base, winner, "  ").is_err());
+    pins::rename(&folder, &base, winner, winner).unwrap();
+    assert_eq!(fs::read(&sidecar).unwrap(), before);
+
+    let saved = tmp.path().join("backup");
+    assert_eq!(backup::published_history(&folder, &saved).unwrap(), head);
+    let report = retention::preview(&saved, NonZeroUsize::MIN, &[], &[]).unwrap();
+    assert!(report.saves.iter().any(|r| r.revision == base && r.label.as_deref() == Some(winner) && r.holds.milestone && !r.holds.recent));
+    assert!(report.saves.iter().any(|r| r.revision == head && r.label.as_deref() == Some("Rough cut")));
+    pins::unpin(&folder, &base).unwrap();
+    assert!(pins::rename(&folder, &base, winner, "Revived").is_err());
+    assert_eq!(pins::list(&folder).unwrap(), [pins::Pin { revision: head, label: "Rough cut".into() }]);
+}

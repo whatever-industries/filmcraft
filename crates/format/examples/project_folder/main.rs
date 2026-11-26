@@ -78,6 +78,12 @@ fn run() -> io::Result<()> {
     {
         return converter::pins::pin(Path::new(folder), revision, label);
     }
+    if let [command, folder, revision, expected, new_label] = args.as_slice()
+        && command == "rename-pin"
+        && let (Some(revision), Some(expected), Some(new_label)) = (revision.to_str(), expected.to_str(), new_label.to_str())
+    {
+        return converter::pins::rename(Path::new(folder), revision, expected, new_label);
+    }
     if let [command, folder, revision] = args.as_slice()
         && command == "unpin"
         && let Some(revision) = revision.to_str()
@@ -165,7 +171,7 @@ fn run() -> io::Result<()> {
     }
     Err(io::Error::new(
         io::ErrorKind::InvalidInput,
-        "usage: project_folder pack SOURCE.fcproj NEW_FOLDER | backup FOLDER NEW_FOLDER | unpack FOLDER NEW_FILE.fcproj | checkout FOLDER NEW_FILE.fcproj | save FOLDER BASE_REVISION EDITED.fcproj | history FOLDER | pin FOLDER REVISION LABEL | list-pins FOLDER | retention-preview FOLDER KEEP_LATEST [--reader REVISION] [--draft SESSION_DIRECTORY] [--profile DATA_DIRECTORY] | unpin FOLDER REVISION | media-availability FOLDER REVISION | compare-bin FOLDER FROM TO BIN_ID | compare-sequence FOLDER FROM TO SEQUENCE_ID | restore-copy FOLDER BASE_REVISION HISTORICAL_REVISION SEQUENCE_ID | rescue FOLDER REVISION SEQUENCE_ID NEW_FILE.fcproj | list-bins FOLDER REVISION | find-uses FOLDER REVISION ITEM_ID | preview-bin FOLDER REVISION BIN_ID | rescue-bin FOLDER REVISION BIN_ID NEW.fcproj",
+        "usage: project_folder pack SOURCE.fcproj NEW_FOLDER | backup FOLDER NEW_FOLDER | unpack FOLDER NEW_FILE.fcproj | checkout FOLDER NEW_FILE.fcproj | save FOLDER BASE_REVISION EDITED.fcproj | history FOLDER | pin FOLDER REVISION LABEL | rename-pin FOLDER REVISION OLD_LABEL NEW_LABEL | list-pins FOLDER | retention-preview FOLDER KEEP_LATEST [--reader REVISION] [--draft SESSION_DIRECTORY] [--profile DATA_DIRECTORY] | unpin FOLDER REVISION | media-availability FOLDER REVISION | compare-bin FOLDER FROM TO BIN_ID | compare-sequence FOLDER FROM TO SEQUENCE_ID | restore-copy FOLDER BASE_REVISION HISTORICAL_REVISION SEQUENCE_ID | rescue FOLDER REVISION SEQUENCE_ID NEW_FILE.fcproj | list-bins FOLDER REVISION | find-uses FOLDER REVISION ITEM_ID | preview-bin FOLDER REVISION BIN_ID | rescue-bin FOLDER REVISION BIN_ID NEW.fcproj",
     ))
 }
 

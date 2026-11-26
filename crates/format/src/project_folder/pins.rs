@@ -63,14 +63,26 @@ pub fn list(folder: &Path) -> io::Result<Vec<Pin>> {
 
 pub fn pin(folder: &Path, revision: &str, label: &str) -> io::Result<()> {
     check_label(label)?;
-    update(folder, revision, Some(label))
+    update(folder, revision, Change::Pin(label))
 }
 
 pub fn unpin(folder: &Path, revision: &str) -> io::Result<()> {
-    update(folder, revision, None)
+    update(folder, revision, Change::Unpin)
 }
 
-fn update(folder: &Path, revision: &str, label: Option<&str>) -> io::Result<()> {
+/// Relabel the pin only if its stored label still matches the caller's observation.
+pub fn rename(folder: &Path, revision: &str, expected: &str, new_label: &str) -> io::Result<()> {
+    check_label(new_label)?;
+    update(folder, revision, Change::Rename { expected, new_label })
+}
+
+enum Change<'a> {
+    Pin(&'a str),
+    Unpin,
+    Rename { expected: &'a str, new_label: &'a str },
+}
+
+fn update(folder: &Path, revision: &str, change: Change<'_>) -> io::Result<()> {
     check_hash(revision)?;
     if !folder.join(ROOT).symlink_metadata()?.is_file() {
         return Err(invalid("missing regular project manifest"));
@@ -81,13 +93,23 @@ fn update(folder: &Path, revision: &str, label: Option<&str>) -> io::Result<()> 
     let mut pins = read(folder)?;
     let root = read_member(&folder.join(ROOT), MANIFEST_LIMIT)?;
     let index = pins.iter().position(|pin| pin.revision == revision);
-    match (index, label) {
-        (Some(i), Some(label)) if pins[i].label != label => return Err(invalid(format!("revision {revision} already has a different pin label"))),
-        (Some(_), Some(_)) | (None, None) => return verify(folder, root, &pins),
-        (Some(i), None) => {
+    match (change, index) {
+        (Change::Pin(label), Some(i)) if pins[i].label != label => return Err(invalid(format!("revision {revision} already has a different pin label"))),
+        (Change::Pin(_), Some(_)) | (Change::Unpin, None) => return verify(folder, root, &pins),
+        (Change::Pin(label), None) => pins.push(Pin { revision: revision.to_owned(), label: label.to_owned() }),
+        (Change::Unpin, Some(i)) => {
             pins.remove(i);
         }
-        (None, Some(label)) => pins.push(Pin { revision: revision.to_owned(), label: label.to_owned() }),
+        (Change::Rename { .. }, None) => return Err(invalid(format!("revision {revision} is not pinned"))),
+        (Change::Rename { expected, new_label }, Some(i)) => {
+            if pins[i].label != expected {
+                return Err(invalid(format!("pin label changed for revision {revision}; list pins and retry")));
+            }
+            if expected == new_label {
+                return verify(folder, root, &pins);
+            }
+            new_label.clone_into(&mut pins[i].label);
+        }
     }
     verify(folder, root, &pins)?;
     let bytes = serde_json::to_vec(&pins)?;

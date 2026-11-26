@@ -352,10 +352,11 @@ Choose a revision digest from `project_folder history FOLDER`. Give that exact s
 ```sh
 project_folder pin FOLDER REVISION "Picture lock"
 project_folder list-pins FOLDER
+project_folder rename-pin FOLDER REVISION "Picture lock" "Approved cut"
 project_folder unpin FOLDER REVISION
 ```
 
-`list-pins` prints JSON entries with a revision digest and label. The digest identifies the save even if two milestones have the same label. Repeating the same pin is safe. To change a label, unpin the digest and pin it again. Removing a pin leaves the save available in history.
+`list-pins` prints JSON entries with a revision digest and label. The digest identifies the save even if two milestones have the same label. Repeating the same pin is safe. Use `rename-pin` to change a label while keeping the revision pinned. Supply the exact current label from `list-pins`. If the stored label differs or the pin is missing, the command reports the conflict and preserves the current state. Removing a pin leaves the save available in history.
 
 Pins live in `revision-pins.json` alongside the project manifest. A separate local lock serializes pin changes while an editor has the project open. Pinning leaves the published revision and any private edits intact. All published history is retained today. A future retention tool must honor these pins.
 
