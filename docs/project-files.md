@@ -265,7 +265,32 @@ discard one draft. For example:
 
 Add `path` to export a folder draft when in-place recovery is unsafe. To discard every
 candidate of one kind, pass `storage` and `all: true` to `file.discardRecovery`.
-The desktop buttons and file pickers are a separate milestone.
+
+### Editing project folders in the fork desktop app
+
+Choose **File → Open Project Folder…** and select the directory containing
+`project.fcmod`. Open a non-root bin in the Project panel, or open one of its
+sequences in the Timeline. The bin header shows **Writable** when this session owns
+the bin and its directly filed sequences. A busy bin opens **Read-only**. To try for
+ownership after another editor releases it, close the bin and open it again.
+
+Open several bins to keep independent edits and Undo histories. **Save** publishes
+the focused bin. **Save All** publishes each dirty bin. **Close Bin** publishes its
+edits and releases its lease. Closing a sequence tab leaves its bin open. Switching
+projects or quitting saves the open bins in ID order. If a save fails, the editor
+reports the bin ID and keeps the document and its leases open. Earlier successful
+bin saves remain published. Correct the cause and retry.
+
+**File → Export Standard Project…** creates a new independent `.fcproj` from the
+latest published project and the open bin drafts. After a crash, select a draft by
+project, bin name, ID and time. **Recover** reopens that bin for editing. **Recover to
+File…** writes an independent copy when the bin is busy or its published content
+has diverged. Use a new filename outside the project folder.
+
+This workflow targets processes on a local disk. The root is a browsing view.
+The supported edits include renaming and reordering a checked-out bin and editing
+its directly filed sequences. Source records and project-wide structure have
+separate ownership requirements.
 
 ### Recover a sequence
 

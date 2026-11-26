@@ -132,7 +132,7 @@ pub fn route(app: &mut FilmcraftApp, id: &str, params: &Value) -> Option<Result<
     if id == "file.saveAll" && app.session.path.is_none() {
         return Some(app.file_dialog("file.save", params));
     }
-    if (id == "file.closeProject" && !app.session.is_dirty()) || id == "app.quit" {
+    if (id == "file.closeProject" && (app.session.editing_bins() || !app.session.is_dirty())) || id == "app.quit" {
         return None;
     }
     meta(id)?;
@@ -154,7 +154,7 @@ pub fn route(app: &mut FilmcraftApp, id: &str, params: &Value) -> Option<Result<
 /// asked first, as for Close Project (#3843), and the project opens once the answer lets it.
 /// None when there is nothing unsaved, so the caller opens it now.
 pub fn ask_before_open(app: &mut FilmcraftApp, path: &str) -> Option<Result<Value, String>> {
-    if !app.session.is_dirty() {
+    if app.session.editing_bins() || !app.session.is_dirty() {
         return None;
     }
     app.ui.clip_dialog =
@@ -166,6 +166,13 @@ pub fn ask_before_open(app: &mut FilmcraftApp, path: &str) -> Option<Result<Valu
 /// changes it is cancelled and Save / Don't Save / Cancel is asked first, as in Premiere (#266).
 /// Returns whether the close must be cancelled.
 pub fn intercept_quit(app: &mut FilmcraftApp) -> bool {
+    if app.session.editing_bins() {
+        if let Err(e) = app.session.execute("file.saveAll", json!({})) {
+            app.ui.status = e.to_string();
+            return true;
+        }
+        return false;
+    }
     if app.quit_confirmed || !app.session.is_dirty() {
         return false;
     }

@@ -145,6 +145,11 @@ impl FilmcraftApp {
         if !replaced && sequence == self.ime_active_sequence {
             return;
         }
+        if replaced && self.session.supports_desktop_bins() {
+            self.ui.project_panel = Default::default();
+            self.ui.project_panel.bin = self.session.focused_bin();
+            self.ui.expanded_bins.clear();
+        }
         self.ime_document_epoch = document;
         self.ime_active_sequence = sequence;
         self.restart_ime_target();

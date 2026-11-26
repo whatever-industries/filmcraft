@@ -21,7 +21,11 @@ impl FilmcraftApp {
     /// directory and seeding IME epoch/sequence identity.
     pub fn new(mut session: Session) -> Self {
         session.shortcuts.register_external(menus::external_commands());
-        let recovery = !session.recovery_candidates().is_empty();
+        let mut file_dialogs = crate::panels::file_dialogs::FileDialogState::default();
+        let recovery = file_dialogs.refresh(&mut session).unwrap_or_else(|e| {
+            log::warn!("cannot list recovery sessions: {e}");
+            false
+        });
         let frames = Arc::new(FrameServer::new(session.media.clone(), session.services.clone(), session.previews.clone(), FrameServer::default_workers()));
         let workspaces =
             session.prefs_path.as_ref().and_then(|p| p.parent()).map(|d| dock::WorkspacePrefs::load(&d.join(dock::WORKSPACES_FILE))).unwrap_or_default();
@@ -44,7 +48,7 @@ impl FilmcraftApp {
             // Unsaved changes left by a session that died are offered first thing.
             dialog: recovery.then_some(Dialog::Recovery),
             updates_rt: Default::default(),
-            file_dialogs: Default::default(),
+            file_dialogs,
             native_dialog: None,
             overwrite_prompt: None,
             auto: Default::default(),

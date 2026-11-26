@@ -192,6 +192,16 @@ pub fn set_mode(app: &mut FilmcraftApp, inst: Inst, mode: ViewMode, actions: &mu
 /// Show a bin in place in a panel instance (None = its top: the root or the tab's bin).
 pub fn navigate(app: &mut FilmcraftApp, inst: Inst, bin: Option<u64>) {
     let root = app.session.project.root.id.0;
+    let dest = bin.unwrap_or_else(|| match inst {
+        Inst::Tab(k) => app.ui.project_panel.tabs.get(k).map_or(root, |t| t.bin),
+        Inst::Main => root,
+    });
+    if app.session.editing_bins()
+        && let Err(e) = app.session.execute("project.checkoutBin", json!({"bin":dest}))
+    {
+        app.ui.status = e.to_string();
+        return;
+    }
     match inst {
         Inst::Main => app.ui.project_panel.bin = bin.filter(|b| *b != root),
         Inst::Tab(k) => {
@@ -208,6 +218,9 @@ pub fn navigate(app: &mut FilmcraftApp, inst: Inst, bin: Option<u64>) {
 pub fn open_bin(app: &mut FilmcraftApp, inst: Inst, bin: u64, how: Option<&str>, mods: egui::Modifiers) -> Result<Value, String> {
     if app.session.project.root.find_bin(BinId(bin)).is_none() {
         return Err(format!("no bin {bin}"));
+    }
+    if app.session.editing_bins() {
+        app.session.execute("project.checkoutBin", json!({"bin":bin})).map_err(|e| e.to_string())?;
     }
     let g = &app.session.prefs.general;
     let how = how.map(str::to_string).unwrap_or_else(|| {
@@ -250,6 +263,16 @@ pub fn open_bin(app: &mut FilmcraftApp, inst: Inst, bin: u64, how: Option<&str>,
 pub fn close_tab(app: &mut FilmcraftApp, k: usize) {
     let pp = &mut app.ui.project_panel;
     if k >= pp.tabs.len() {
+        return;
+    }
+    let bin = pp.tabs[k].bin;
+    if app.session.editing_bins()
+        && app.session.bin_access(bin).is_some()
+        && pp.bin != Some(bin)
+        && !pp.tabs.iter().enumerate().any(|(i, t)| i != k && (t.nav == Some(bin) || t.bin == bin))
+        && let Err(e) = app.session.execute("project.releaseBin", json!({"bin":bin}))
+    {
+        app.ui.status = e.to_string();
         return;
     }
     pp.tabs.remove(k);
@@ -327,7 +350,14 @@ fn tab_strip(app: &mut FilmcraftApp, ui: &mut egui::Ui, strip: Rect, docked: &[u
         }
         ui.painter().galley(pos2(r.min.x + 8.0, r.center().y - g.size().y / 2.0), g, if is_active { t.tab_text_active } else { t.tab_text });
         if resp.clicked() {
-            app.ui.project_panel.active_tab = k;
+            let bin = view_of(app, k.map_or(Inst::Main, Inst::Tab)).bin.0;
+            if app.session.editing_bins()
+                && let Err(e) = app.session.execute("project.checkoutBin", json!({"bin":bin}))
+            {
+                app.ui.status = e.to_string();
+            } else {
+                app.ui.project_panel.active_tab = k;
+            }
         }
         if let Some(k) = k {
             let cr = Rect::from_center_size(pos2(r.max.x - 11.0, r.center().y), vec2(12.0, 12.0));
@@ -420,15 +450,37 @@ fn body(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, v: &View, actions
         let parent = parent_bin(&app.session.project.root, v.bin);
         navigate(app, v.inst, parent.map(|b| b.0));
     }
-    let mut crumb = format!("{}.fcproj", app.session.project.name);
+    let mut crumb = if app.session.editing_bins() { app.session.project.name.clone() } else { format!("{}.fcproj", app.session.project.name) };
     for b in bin_path(&app.session.project.root, v.bin) {
         crumb.push_str(" / ");
         crumb.push_str(&b);
     }
+    if app.session.editing_bins() {
+        let access = app.session.bin_access(v.bin.0);
+        let state = if access == Some(true) { tl!("Writable") } else { tl!("Read-only") };
+        crumb = format!("{state} · {crumb}");
+        if access.is_some() {
+            let rect = Rect::from_min_size(pos2(head.right() - 80.0, head.top()), vec2(80.0, head.height()));
+            let r = ui.put(rect, egui::Button::new(tl!("Close Bin")));
+            app.auto.add(&format!("{pre}.closeBin"), r.rect, tl!("Close Bin"));
+            if r.clicked() {
+                actions.push(("projectPanel.closeBin".into(), json!({"bin":v.bin.0})));
+            }
+        }
+    }
     let fs = font(app);
-    let cr = ui.painter().with_clip_rect(head);
-    cr.text(pos2(up.max.x + 8.0, head.center().y), Align2::LEFT_CENTER, &crumb, Tokens::ui(fs - 0.5), t.text_dim);
-    app.auto.add(&format!("{pre}.breadcrumb"), head, &crumb);
+    let mut label_rect = head;
+    if app.session.bin_access(v.bin.0).is_some() {
+        label_rect.max.x -= 84.0;
+    }
+    if app.session.editing_bins() {
+        label_rect.min.x = up.max.x + 8.0;
+        ui.put(label_rect, egui::Label::new(egui::RichText::new(&crumb).size(fs - 0.5).color(t.text)).truncate().halign(egui::Align::Min));
+    } else {
+        let cr = ui.painter().with_clip_rect(head);
+        cr.text(pos2(up.max.x + 8.0, head.center().y), Align2::LEFT_CENTER, &crumb, Tokens::ui(fs - 0.5), t.text_dim);
+    }
+    app.auto.add(&format!("{pre}.breadcrumb"), label_rect, &crumb);
 
     // search row: field, Find, item count
     let row = Rect::from_min_size(pos2(rect.min.x + 8.0, head.max.y + 2.0), vec2(rect.width() - 16.0, 24.0));
@@ -939,12 +991,34 @@ pub fn route(app: &mut FilmcraftApp, ctx: &egui::Context, op: &str, params: &Val
             navigate(app, inst, parent.map(|b| b.0));
             Ok(json!({"bin": view_of(app, inst).bin.0}))
         }
+        "closeBin" => {
+            let bin = params["bin"].as_u64().unwrap_or(view_of(app, inst).bin.0);
+            match app.session.execute("project.releaseBin", json!({"bin":bin})) {
+                Ok(result) => {
+                    let p = &mut app.ui.project_panel;
+                    if p.bin == Some(bin) {
+                        p.bin = None;
+                    }
+                    for tab in &mut p.tabs {
+                        if tab.nav == Some(bin) {
+                            tab.nav = None;
+                        }
+                    }
+                    let active = p.active_tab.and_then(|k| p.tabs.get(k)).map(|t| (t.bin, t.floating));
+                    p.tabs.retain(|t| t.bin != bin);
+                    p.active_tab = active.and_then(|key| p.tabs.iter().position(|t| (t.bin, t.floating) == key));
+                    Ok(result)
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        }
         "closeBinTab" => {
             let k = params.get("tab").and_then(Value::as_u64).map(|k| k as usize).or(app.ui.project_panel.active_tab);
             match k {
                 Some(k) if k < app.ui.project_panel.tabs.len() => {
+                    let count = app.ui.project_panel.tabs.len();
                     close_tab(app, k);
-                    Ok(Value::Null)
+                    if app.ui.project_panel.tabs.len() == count { Err(app.ui.status.clone()) } else { Ok(Value::Null) }
                 }
                 _ => Err("no such bin tab".into()),
             }

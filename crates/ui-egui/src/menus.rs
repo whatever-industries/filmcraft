@@ -208,6 +208,22 @@ pub(crate) fn menu_items_with_focus(app: &FilmcraftApp, ctx: &egui::Context) -> 
 
 /// Execute a UI or engine command by id.
 pub fn invoke_command(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params: Value) -> Result<Value, String> {
+    if id == "file.openProjectFolder" && app.session.supports_desktop_bins() {
+        return app.file_dialog(id, &params);
+    }
+    if id == "file.exportStandardProject" && app.session.editing_bins() {
+        return app.file_dialog("file.saveCopy", &params);
+    }
+    if !app.engine_call && app.session.editing_bins() && matches!(id, "edit.undo" | "edit.redo" | "file.save") {
+        let bin = match app.ui.focused {
+            PanelKind::Timeline => app.session.state.active_sequence.and_then(|s| app.session.project.root.parent_of(s)).map(|id| id.0),
+            PanelKind::Project => Some(app.import_bin().0),
+            _ => None,
+        };
+        if let Some(bin) = bin {
+            app.session.execute("project.checkoutBin", json!({"bin":bin})).map_err(|e| e.to_string())?;
+        }
+    }
     // Select All / Deselect All act on the Project panel's items when it has focus (#168), only
     // what the shown bin lists (#456). Here and not in the key handling: on macOS the native menu
     // takes Cmd+A once Select All is enabled (a sequence is open) and sends the id here (#1752).
@@ -646,10 +662,9 @@ pub fn invoke_command(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut
             }
         }
         "file.recover" if params.as_object().is_none_or(|m| m.is_empty()) => {
-            if app.session.recovery_candidates().is_empty() {
+            if !app.file_dialogs.refresh(&mut app.session)? {
                 return Err("there are no unsaved changes to recover".into());
             }
-            app.file_dialogs.recovery_choice = 0;
             app.dialog = Some(crate::Dialog::Recovery);
             return Ok(json!({"dialog": "recovery"}));
         }
@@ -1006,6 +1021,13 @@ fn engine_toggle(session: &filmcraft_engine::Session, id: &str) -> Option<bool> 
 /// native menu too, built once at launch) before the first project is saved.
 fn open_recent(items: &mut Vec<MenuItem>, session: &filmcraft_engine::Session, tr: impl Fn(&str) -> String) {
     let Some(at) = items.iter().position(|it| it.id == "file.open") else { return };
+    if session.supports_desktop_bins() {
+        for (id, label, enabled) in
+            [("file.exportStandardProject", "Export Standard Project…", session.editing_bins()), ("file.openProjectFolder", "Open Project Folder…", true)]
+        {
+            items.insert(at + 1, MenuItem { id: id.into(), label: tr(label), path: vec!["File".into()], shortcut: None, enabled, checked: None });
+        }
+    }
     let path: Vec<String> = vec!["File".into(), "Open Recent".into()];
     let recent = &session.prefs.general.recent_projects;
     let mut sub: Vec<MenuItem> = recent
@@ -1019,7 +1041,9 @@ fn open_recent(items: &mut Vec<MenuItem>, session: &filmcraft_engine::Session, t
 
 /// A recent project as listed in File ▸ Open Recent and on Home: its file name.
 pub fn recent_name(path: &str) -> String {
-    std::path::Path::new(path).file_name().map_or_else(|| path.to_string(), |n| n.to_string_lossy().into_owned())
+    let file = std::path::Path::new(path);
+    let file = if file.file_name().is_some_and(|n| n == "project.fcmod") { file.parent().unwrap_or(file) } else { file };
+    file.file_name().map_or_else(|| path.to_string(), |n| n.to_string_lossy().into_owned())
 }
 
 /// The menu bar as it ships, without a running app: English labels, default preferences, the

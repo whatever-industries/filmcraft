@@ -516,8 +516,14 @@ fn app_creator(
         if let Some(dir) = data_dir.clone().or_else(default_data_dir) {
             let mut cfg = AutosaveConfig::new(dir);
             cfg.local_offset = local_offset;
-            if let Err(e) = session.start_autosave(cfg) {
-                log::warn!("auto-save and crash recovery unavailable: {e}");
+            match Session::desktop_project_editor(cfg.clone()) {
+                Ok(editor) => session = editor,
+                Err(e) => {
+                    log::warn!("project folder editing unavailable: {e}");
+                    if let Err(e) = session.start_autosave(cfg) {
+                        log::warn!("auto-save unavailable: {e}");
+                    }
+                }
             }
         }
         // voice-over recording reads the microphone through cpal
@@ -547,9 +553,11 @@ fn app_creator(
         if !media.is_empty() {
             let _ = session.execute("file.import", json!({"paths": media}));
         }
-        if recover == Some(true) && !session.recovery_candidates().is_empty() {
-            let id = session.recovery_candidates()[0].id.clone();
-            match session.execute("file.recover", json!({"id": id})) {
+        if recover == Some(true)
+            && let Ok(rows) = session.execute("file.recoveryList", json!({}))
+            && let Some([candidate]) = rows.as_array().map(Vec::as_slice)
+        {
+            match session.execute("file.recover", candidate.clone()) {
                 Ok(r) => log::info!("recovered {r}"),
                 Err(e) => log::error!("recovery failed: {e}"),
             }

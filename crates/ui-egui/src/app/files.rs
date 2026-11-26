@@ -65,6 +65,15 @@ impl FilmcraftApp {
                     r
                 })
             }
+            "file.openProjectFolder" => self.pick(FileDialog::Folder { at: None }, |app, paths| {
+                let Some(dir) = paths.into_iter().next() else { return Ok(Value::Null) };
+                let path = std::path::Path::new(&dir).join("project.fcmod");
+                let path = path.to_str().ok_or("invalid project folder path")?;
+                if let Some(asked) = crate::panels::clip_dialogs::ask_before_open(app, path) {
+                    return asked;
+                }
+                app.session.execute("file.open", json!({"path":path})).map_err(|e| e.to_string())
+            }),
             "file.open" => self.pick(FileDialog::OpenProject, |app, paths| {
                 let Some(path) = paths.into_iter().next() else { return Ok(Value::Null) };
                 if let Some(asked) = crate::panels::clip_dialogs::ask_before_open(app, &path) {

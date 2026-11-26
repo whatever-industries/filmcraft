@@ -14,7 +14,19 @@ use crate::{Dialog, FilmcraftApp};
 /// Dialog-local state.
 #[derive(Default)]
 pub struct FileDialogState {
-    pub recovery_choice: usize,
+    entries: Vec<serde_json::Value>,
+    recovery_choice: Option<usize>,
+    recovery_error: String,
+}
+
+impl FileDialogState {
+    pub(crate) fn refresh(&mut self, session: &mut filmcraft_engine::Session) -> Result<bool, String> {
+        let rows = session.execute("file.recoveryList", json!({})).map_err(|e| e.to_string())?;
+        self.entries = rows.as_array().cloned().unwrap_or_default();
+        self.recovery_choice = (self.entries.len() == 1).then_some(0);
+        self.recovery_error.clear();
+        Ok(!self.entries.is_empty())
+    }
 }
 
 pub(crate) fn modal_frame(t: &Tokens) -> Frame {
@@ -34,14 +46,34 @@ pub(crate) fn button(app: &mut FilmcraftApp, ui: &mut Ui, id: &str, label: &str,
     r.clicked()
 }
 
+fn recovery_key(row: &serde_json::Value) -> serde_json::Value {
+    let mut key = json!({"id":row["id"]});
+    if row["storage"].is_string() {
+        key["storage"] = row["storage"].clone();
+    }
+    key
+}
+
+fn recovery_label(row: &serde_json::Value) -> String {
+    let name = row["projectName"].as_str().unwrap_or(tl!("Untitled"));
+    let kind = if let Some(bin) = row["bin"].as_u64() {
+        if let Some(label) = row["binName"].as_str() { format!("{label} (#{bin})") } else { tlf!("Bin {bin}", bin) }
+    } else if row["storage"] == "projectFolder" {
+        tl!("Project Folder").to_string()
+    } else {
+        tl!("Project File").to_string()
+    };
+    format!("{name} — {kind} — {}", row["savedAt"].as_str().unwrap_or(""))
+}
+
 pub fn show_recovery(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
     let t = app.tokens;
-    let list = app.session.execute("file.recoveryList", json!({})).unwrap_or_default();
-    let items = list.as_array().cloned().unwrap_or_default();
+    let items = app.file_dialogs.entries.clone();
     if items.is_empty() {
         return false;
     }
-    let mut choice = app.file_dialogs.recovery_choice.min(items.len() - 1);
+    let mut choice = app.file_dialogs.recovery_choice;
+    let mut refresh = false;
     let mut open = true;
     egui::Modal::new(egui::Id::unique("recovery-modal")).frame(modal_frame(&t)).show(ctx, |ui| {
         ui.set_width(520.0);
@@ -50,48 +82,84 @@ pub fn show_recovery(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
             ui.add_space(6.0);
             ui.separator();
             ui.add_space(6.0);
-            let c = &items[choice];
-            let name = c["projectName"].as_str().unwrap_or(tl!("Untitled"));
-            let when = c["savedAt"].as_str().unwrap_or("");
-            let why = if c["cleanExit"].as_bool() == Some(true) {
-                tlf!("FilmCraft was closed while “{name}” had unsaved changes.", name)
-            } else {
-                tlf!("FilmCraft quit unexpectedly while “{name}” had unsaved changes.", name)
-            };
-            ui.label(RichText::new(why).size(13.5).color(t.text));
-            ui.add_space(4.0);
-            ui.label(RichText::new(tlf!("Recover unsaved changes from {when}?", when)).size(13.5).color(t.text));
-            if let Some(p) = c["projectPath"].as_str() {
-                ui.label(RichText::new(p).size(11.5).color(t.text_dim));
-            } else {
-                ui.label(RichText::new(tl!("The project had not been saved yet.")).size(11.5).color(t.text_dim));
+            if let Some(c) = choice.and_then(|i| items.get(i)) {
+                ui.label(recovery_label(c));
+                if let Some(path) = c["projectPath"].as_str() {
+                    ui.label(path);
+                }
+                if let Some(e) = c["error"].as_str() {
+                    ui.label(e);
+                }
             }
             if items.len() > 1 {
                 ui.add_space(8.0);
                 ui.label(RichText::new(tlf!("{n} sessions have unsaved changes:", n = items.len())).size(12.0).color(t.text_dim));
                 for (i, it) in items.iter().enumerate() {
-                    let label = format!("{} — {}", it["projectName"].as_str().unwrap_or(tl!("Untitled")), it["savedAt"].as_str().unwrap_or(""));
-                    let r = ui.radio(choice == i, RichText::new(&label).size(12.5));
+                    let label = recovery_label(it);
+                    let r = ui.radio(choice == Some(i), RichText::new(&label).size(12.5));
                     app.auto.add(&format!("recovery.item.{i}"), r.rect, &label);
                     if r.clicked() {
-                        choice = i;
+                        choice = Some(i);
+                        app.file_dialogs.recovery_choice = choice;
+                        app.file_dialogs.recovery_error.clear();
                     }
                 }
             }
+            if !app.file_dialogs.recovery_error.is_empty() {
+                ui.label(&app.file_dialogs.recovery_error);
+            }
             ui.add_space(18.0);
-            let id = items[choice]["id"].as_str().unwrap_or("").to_string();
+            let selected = choice.and_then(|i| items.get(i)).cloned();
             ui.horizontal(|ui| {
-                if button(app, ui, "recovery.discard", tl!("Discard"), false) {
-                    if let Err(e) = app.session.execute("file.discardRecovery", json!({ "id": id })) {
-                        app.ui.status = e.to_string();
+                ui.add_enabled_ui(selected.is_some(), |ui| {
+                    if button(app, ui, "recovery.discard", tl!("Discard"), false)
+                        && let Some(row) = &selected
+                    {
+                        match app.session.execute("file.discardRecovery", recovery_key(row)) {
+                            Ok(_) => refresh = true,
+                            Err(e) => {
+                                app.ui.status = e.to_string();
+                                app.file_dialogs.recovery_error = app.ui.status.clone();
+                            }
+                        }
                     }
-                    choice = 0;
-                }
+                });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if button(app, ui, "recovery.recover", tl!("Recover"), true) {
-                        match app.session.execute("file.recover", json!({ "id": id })) {
-                            Ok(_) => open = false,
-                            Err(e) => app.ui.status = e.to_string(),
+                    ui.add_enabled_ui(selected.is_some(), |ui| {
+                        if button(app, ui, "recovery.recover", tl!("Recover"), true)
+                            && let Some(row) = &selected
+                        {
+                            match app.session.execute("file.recover", recovery_key(row)) {
+                                Ok(result) => {
+                                    if let Some(bin) = result["bin"].as_u64() {
+                                        app.ui.project_panel.bin = Some(bin);
+                                        app.ui.project_panel.active_tab = None;
+                                    }
+                                    refresh = true;
+                                }
+                                Err(e) => {
+                                    app.ui.status = e.to_string();
+                                    app.file_dialogs.recovery_error = app.ui.status.clone();
+                                }
+                            }
+                        }
+                    });
+                    if let Some(row) = &selected
+                        && row["storage"] == "projectFolder"
+                        && button(app, ui, "recovery.export", tl!("Recover to File…"), false)
+                    {
+                        let mut key = recovery_key(row);
+                        if let Err(e) = app.pick(crate::native_dialogs::FileDialog::SaveProject { name: "Recovered.fcproj".into() }, move |app, paths| {
+                            let Some(path) = paths.into_iter().next() else { return Ok(serde_json::Value::Null) };
+                            key["path"] = path.into();
+                            let result = app.session.execute("file.recover", key).map_err(|e| {
+                                app.file_dialogs.recovery_error = e.to_string();
+                                e.to_string()
+                            })?;
+                            app.file_dialogs.refresh(&mut app.session)?;
+                            Ok(result)
+                        }) {
+                            app.ui.status = e;
                         }
                     }
                     if button(app, ui, "recovery.later", tl!("Not Now"), false) {
@@ -101,8 +169,13 @@ pub fn show_recovery(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
             });
         });
     });
-    app.file_dialogs.recovery_choice = choice;
-    open && !app.session.recovery_candidates().is_empty()
+    if refresh {
+        match app.file_dialogs.refresh(&mut app.session) {
+            Ok(any) => return open && any,
+            Err(e) => app.ui.status = e,
+        }
+    }
+    open
 }
 
 pub fn show_revert(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {

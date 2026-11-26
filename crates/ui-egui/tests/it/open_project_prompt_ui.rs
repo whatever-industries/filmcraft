@@ -303,3 +303,82 @@ fn a_save_prompt_closes_when_a_script_replaces_its_project() {
     assert!(d.app().session.is_dirty());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn desktop_folder_menu_bin_close_and_standard_export() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("ordinary.fcproj");
+    let mut p = filmcraft_engine::project::Project::new("Editorial");
+    let bin = p.add_bin("Daily", None);
+    std::fs::write(&path, filmcraft_format::encode(&p, false)).unwrap();
+    let folder = temp.path().join("editorial");
+    filmcraft_format::project_folder::pack(&path, &folder, filmcraft_format::atomic_write_new).unwrap();
+    let s = filmcraft_engine::Session::desktop_project_editor(filmcraft_engine::autosave::AutosaveConfig::new(temp.path().join("user"))).unwrap();
+    let mut d = Driver::open(s, crate::support::with_shots(crate::support::builder()));
+    let dir = folder.to_string_lossy().into_owned();
+    d.app().hooks.pick_folder = Some(Box::new(move || Some(dir.clone())));
+    d.menu("file.openProjectFolder");
+    assert!(d.app().session.editing_bins());
+    d.ok("ui.menu.invoke", json!({"id":"projectPanel.openBin","params":{"how":"tab","bin":bin.0}}));
+    d.frames(3);
+    use egui_kittest::kittest::Queryable;
+    let _ = d.harness.get_by_role_and_label(egui::accesskit::Role::Button, "Close Bin");
+    crate::support::save_shot(&mut d, 2, "desktop-bin.png");
+    assert_eq!(d.app().session.bin_access(bin.0), Some(true));
+    d.exec("project.renameBin", json!({"bin":bin.0,"name":"Edited"}));
+    let dest = temp.path().join("copy.fcproj");
+    let filename = dest.to_string_lossy().into_owned();
+    d.app().hooks.pick_save = Some(Box::new(move |_| Some(filename.clone())));
+    d.menu("file.exportStandardProject");
+    assert_eq!(filmcraft_format::decode(&std::fs::read(dest).unwrap()).unwrap().project.root.find_bin(bin).unwrap().name, "Edited");
+    d.click("projectBin.0.closeBin");
+    assert!(d.app().session.bin_access(bin.0).is_none());
+    let flat = temp.path().join("stock.fcproj");
+    filmcraft_format::project_folder::unpack(&folder, &flat).unwrap();
+    assert_eq!(filmcraft_format::decode(&std::fs::read(flat).unwrap()).unwrap().project.root.find_bin(bin).unwrap().name, "Edited");
+}
+
+#[test]
+fn desktop_recovery_selects_a_bin_and_exports_while_another_editor_owns_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let cfg = filmcraft_engine::autosave::AutosaveConfig::new(temp.path().join("user"));
+    let src = temp.path().join("ordinary.fcproj");
+    let folder = temp.path().join("cut");
+    let mut project = filmcraft_project::Project::new("Rushes");
+    let a = project.add_bin("First", None);
+    let b = project.add_bin("Second", None);
+    std::fs::write(&src, filmcraft_format::encode(&project, false)).unwrap();
+    filmcraft_format::project_folder::pack(&src, &folder, filmcraft_format::atomic_write_new).unwrap();
+    let manifest = folder.join("project.fcmod");
+    let mut abandoned = filmcraft_engine::Session::desktop_project_editor(cfg.clone()).unwrap();
+    abandoned.execute("file.open", json!({"path":manifest})).unwrap();
+    for bin in [a, b] {
+        abandoned.execute("project.renameBin", json!({"bin":bin.0,"name":format!("Draft {}",bin.0)})).unwrap();
+        abandoned.flush_folder_recovery().unwrap();
+    }
+    drop(abandoned);
+    let mut peer = filmcraft_engine::Session::desktop_project_editor(cfg.clone()).unwrap();
+    peer.execute("file.open", json!({"path":manifest})).unwrap();
+    peer.execute("project.checkoutBin", json!({"bin":a.0})).unwrap();
+    let mut next = filmcraft_engine::Session::desktop_project_editor(cfg).unwrap();
+    let rows = next.execute("file.recoveryList", json!({})).unwrap();
+    let i = rows.as_array().unwrap().iter().position(|r| r["bin"] == a.0).unwrap();
+    let mut d = Driver::open(next, crate::support::with_shots(crate::support::builder()));
+    d.click(&format!("recovery.item.{i}"));
+    use egui_kittest::kittest::Queryable;
+    let _ = d.harness.get_by_role_and_label(egui::accesskit::Role::Button, "Recover to File…");
+    crate::support::save_shot(&mut d, 2, "bin-recovery.png");
+    d.click("recovery.recover");
+    assert!(d.app().ui.status.contains("busy"), "{}", d.app().ui.status);
+    let out = temp.path().join("rescued.fcproj");
+    let path = out.to_string_lossy().to_string();
+    d.app().hooks.pick_save = Some(Box::new(move |_| Some(path.clone())));
+    d.click("recovery.export");
+    let saved = filmcraft_format::decode(&std::fs::read(out).unwrap()).unwrap().project;
+    assert_eq!(saved.root.find_bin(a).unwrap().name, format!("Draft {}", a.0));
+    let rows = d.exec("file.recoveryList", json!({}));
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["bin"], b.0);
+    d.click("recovery.recover");
+    assert_eq!(d.app().session.bin_access(b.0), Some(true));
+}

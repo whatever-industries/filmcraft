@@ -107,6 +107,7 @@ pub const COMMANDS: &[UiCommand] = &[
     uic!("projectPanel.rename", "Rename", [], None),
     uic!("projectPanel.openBin", "Open Bin", [], None),
     uic!("projectPanel.up", "Up One Level", [], None),
+    uic!("projectPanel.closeBin", "Close Open Bin", [], None),
     uic!("projectPanel.closeBinTab", "Close Bin", [], None),
     uic!("projectPanel.metadataDisplay", "Metadata Display…", [], None),
     uic!("projectPanel.saveViewPresetAs", "Save As New View Preset", [], None),

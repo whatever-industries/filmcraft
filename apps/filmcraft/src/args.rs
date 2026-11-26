@@ -123,7 +123,10 @@ pub fn parse(env_control_port: Option<String>, args: impl IntoIterator<Item = Os
 /// Whether a launch file is a FilmCraft project. The extension's case does not matter: Windows file
 /// associations and the Linux MIME glob start the app for `CUT.FCPROJ` too (#850).
 pub fn is_project(path: &str) -> bool {
-    Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("fcproj"))
+    let path = Path::new(path);
+    path.file_name().is_some_and(|n| n == "project.fcmod")
+        || path.join("project.fcmod").is_file()
+        || path.extension().is_some_and(|e| e.eq_ignore_ascii_case("fcproj"))
 }
 
 /// `path` made absolute against the working directory, so a project or media file named relative
@@ -137,7 +140,10 @@ pub fn absolute(path: &str) -> String {
 /// The launch files as the project to open (the first one, see [`is_project`]) and the media files
 /// to import (every file that is not a project), all made [`absolute`].
 pub fn project_and_media(files: &[String]) -> (Option<String>, Vec<String>) {
-    let project = files.iter().find(|f| is_project(f)).map(|f| absolute(f));
+    let project = files.iter().find(|f| is_project(f)).map(|f| {
+        let p = Path::new(f).join("project.fcmod");
+        if p.is_file() { absolute(&p.to_string_lossy()) } else { absolute(f) }
+    });
     let media = files.iter().filter(|f| !is_project(f)).map(|f| absolute(f)).collect();
     (project, media)
 }
