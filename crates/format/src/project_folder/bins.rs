@@ -133,6 +133,9 @@ pub fn rescue_bin(folder: &Path, revision: &str, selected: u64, output: &Path) -
             return Err(invalid(format!("invalid bin hierarchy at bin {id} (repeated bin or excessive depth)")));
         }
         let (bin, value) = read_bin(folder, &ids, id, &mut budget)?;
+        if let Some(extra) = value.get("filed_sources") {
+            members.extend(serde_json::from_value::<Vec<u64>>(extra.clone())?);
+        }
         for child in bin.children {
             match child {
                 Entry::Bin(id) => pending.push((id, depth + 1)),
@@ -173,5 +176,5 @@ pub fn rescue_bin(folder: &Path, revision: &str, selected: u64, output: &Path) -
             .push(json!({"Bin":{"id":id,"name":name,"children":external}}));
         project["next_id"] = json!(id + 1);
     }
-    atomic_write_new(output, &checked_bytes(&doc)?)
+    atomic_write_new(output, &super::standard_document(&checked_bytes(&doc)?)?)
 }

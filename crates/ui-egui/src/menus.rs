@@ -206,10 +206,17 @@ pub(crate) fn menu_items_with_focus(app: &FilmcraftApp, ctx: &egui::Context) -> 
     items
 }
 
-/// Execute a UI or engine command by id.
-pub fn invoke_command(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params: Value) -> Result<Value, String> {
+fn bin_row_command<'a>(app: &FilmcraftApp, id: &'a str, params: &mut Value) -> Result<&'a str, String> {
     // Project-panel delete in a modular session removes the filing in its owning bin.
     let mut id = id;
+    if id == "edit.duplicate"
+        && app.session.editing_bins()
+        && !app.engine_call
+        && let Some((source, bin)) = app.ui.project_panel.row_origin
+        && app.session.state.project_selection.contains(&source)
+    {
+        params["bin"] = bin.0.into();
+    }
     if id == "project.delete" && app.session.editing_bins() && !app.engine_call {
         let ids: Vec<u64> = match params.get("items") {
             Some(value) => serde_json::from_value(value.clone()).map_err(|e| e.to_string())?,
@@ -217,10 +224,24 @@ pub fn invoke_command(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut
         };
         let tree = &app.session.project.root;
         let first = ids.first().ok_or_else(|| tl!("Select a filed clip").to_string())?;
-        let bin = tree.parent_of(filmcraft_project::ItemId(*first)).ok_or_else(|| tl!("Open a writable source bin to remove a clip").to_string())?;
+        let source = filmcraft_project::ItemId(*first);
+        let bin = app
+            .ui
+            .project_panel
+            .row_origin
+            .filter(|(id, _)| ids.contains(&id.0))
+            .map(|(_, bin)| bin)
+            .or_else(|| tree.parent_of(source))
+            .ok_or_else(|| tl!("Open a writable source bin to remove a clip").to_string())?;
         id = "project.removeFromBin";
-        params = json!({"bin":bin.0, "items":ids});
+        *params = json!({"bin":bin.0, "items":ids});
     }
+    Ok(id)
+}
+
+/// Execute a UI or engine command by id.
+pub fn invoke_command(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params: Value) -> Result<Value, String> {
+    let id = bin_row_command(app, id, &mut params)?;
     if id == "project.removeFromBin" && app.session.editing_bins() && !app.engine_call {
         let owner = params["bin"].as_u64().ok_or_else(|| tl!("Select a filed clip").to_string())?;
         let result = app.session.execute(id, params).map_err(|e| e.to_string())?;

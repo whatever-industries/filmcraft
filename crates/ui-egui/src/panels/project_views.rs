@@ -144,7 +144,11 @@ pub fn items_in_view(app: &FilmcraftApp, v: &View, filter: &str) -> Vec<ItemId> 
             let sort = &app.session.prefs.project_panel.view.sort;
             let mut out = Vec::new();
             fn walk(app: &FilmcraftApp, b: &Bin, sort: &SortSpec, filter: &str, out: &mut Vec<ItemId>) {
-                let (bins, items) = pp::bin_children(&app.session.project, b, sort);
+                let (bins, mut items) = pp::bin_children(&app.session.project, b, sort);
+                if app.session.prefs.project_panel.show_reference_clips {
+                    items.extend(pp::reference_clips(&app.session.project, b));
+                    pp::sort_items(&app.session.project, &mut items, sort);
+                }
                 for bid in bins {
                     if (app.ui.expanded_bins.contains(&bid.0) || !filter.is_empty())
                         && let Some(sub) = app.session.project.root.find_bin(bid)
@@ -167,6 +171,7 @@ pub fn items_in_view(app: &FilmcraftApp, v: &View, filter: &str) -> Vec<ItemId> 
                     ids.push(*i);
                 }
             }
+            ids.extend(bin.filed_sources.iter().copied().filter(|i| matches_filter(app, *i, filter)));
             ids
         }
     }
@@ -185,6 +190,7 @@ fn icon_order(app: &FilmcraftApp, bin: &Bin, filter: &str) -> Vec<ItemId> {
     } else {
         bin.all_items(&mut ids);
     }
+    ids.extend_from_slice(&bin.filed_sources);
     ids.retain(|i| matches_filter(app, *i, filter));
     pp::sort_items(&app.session.project, &mut ids, &app.session.prefs.project_panel.view.icon_sort);
     ids
@@ -248,11 +254,13 @@ pub(super) struct ItemInteraction<'a> {
     kind: &'a ItemKind,
     allow_drag: bool,
     allow_menu: bool,
+    bin: BinId,
 }
 
 pub(super) fn item_interactions(app: &mut FilmcraftApp, ui: &egui::Ui, actions: &mut Actions, interaction: ItemInteraction<'_>) {
-    let ItemInteraction { view: v, response: resp, item: id, kind, allow_drag: drag, allow_menu: menu } = interaction;
+    let ItemInteraction { view: v, response: resp, item: id, kind, allow_drag: drag, allow_menu: menu, bin } = interaction;
     if resp.clicked() {
+        app.ui.project_panel.row_origin = Some((id, bin));
         let mods = click_modifiers(ui);
         let order = if mods.shift { items_in_view(app, v, &app.ui.project_search.to_ascii_lowercase()) } else { Vec::new() };
         let anchor = app.ui.project_panel.anchor.map(ItemId);
@@ -279,11 +287,28 @@ pub(super) fn item_interactions(app: &mut FilmcraftApp, ui: &egui::Ui, actions: 
         crate::panels::start_drag_item(ui, id);
     }
     if menu {
-        resp.context_menu(|ui| item_menu(app, ui, id, kind, actions));
+        resp.context_menu(|ui| item_menu(app, ui, id, kind, bin, actions));
     }
 }
 
-fn item_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, id: ItemId, kind: &ItemKind, actions: &mut Actions) {
+pub(super) fn file_reference(ui: &mut egui::Ui, bin: BinId, id: ItemId, enabled: bool, actions: &mut Actions) -> Rect {
+    let button = ui.add_enabled(enabled, egui::Button::new(tl!("File in This Bin")));
+    if button.clicked() {
+        actions.push(("project.fileInBin".into(), json!({"bin":bin.0,"item":id.0})));
+        ui.close();
+    }
+    button.rect
+}
+
+fn item_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, id: ItemId, kind: &ItemKind, displayed: BinId, actions: &mut Actions) {
+    let parent = displayed;
+    let project = app.session.project.clone();
+    let b = project.root.find_bin(parent);
+    let filed = |item: ItemId| b.is_some_and(|b| b.children.contains(&BinEntry::Item(item)) || b.filed_sources.contains(&item));
+    if !filed(id) && app.session.is_modular_document() {
+        let rect = file_reference(ui, parent, id, app.session.bin_access(parent.0) != Some(false), actions);
+        app.auto.add("project.itemMenu.fileInBin", rect, tl!("File in This Bin"));
+    }
     let sel = || json!({"items": [id.0]});
     if ui.button(tl!("Rename")).clicked() {
         actions.push(("projectPanel.rename".into(), json!({"item": id.0})));
@@ -354,7 +379,7 @@ fn item_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, id: ItemId, kind: &ItemK
         for l in filmcraft_project::Label::ALL {
             if crate::menus::label_choice(ui, &mut app.auto, &labels, l, "project.itemMenu.label").clicked() {
                 actions.push(("project.select".into(), json!({"items": [id.0]})));
-                actions.push(("edit.label".into(), json!({"label": l.name()})));
+                actions.push(("edit.label".into(), json!({"label": l.name(),"items":[id.0],"bin":displayed.0})));
                 ui.close();
             }
         }
@@ -399,11 +424,10 @@ fn item_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, id: ItemId, kind: &ItemK
         app.auto.add("project.itemMenu.proxy", r.response.rect, tl!("Proxy"));
     }
     ui.separator();
-    if let Some(parent) = app.session.project.root.parent_of(id) {
+    if filed(id) {
         let ids = menu_targets(&app.session.state.project_selection, id);
-        let enabled = ids.iter().all(|item| {
-            app.session.project.root.parent_of(*item) == Some(parent) && (!app.session.editing_bins() || app.session.project.sequence(*item).is_none())
-        }) && (!app.session.editing_bins() || (parent != app.session.project.root.id && app.session.bin_access(parent.0) != Some(false)));
+        let enabled = ids.iter().all(|item| filed(*item) && (!app.session.editing_bins() || app.session.project.sequence(*item).is_none()))
+            && (!app.session.editing_bins() || (parent != app.session.project.root.id && app.session.bin_access(parent.0) != Some(false)));
         let remove = ui.add_enabled(enabled, egui::Button::new(tl!("Remove from Bin")));
         app.auto.add("project.itemMenu.removeFromBin", remove.rect, tl!("Remove from Bin"));
         if remove.clicked() {
@@ -807,7 +831,14 @@ fn background_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, v: &View, bin: Opt
 #[allow(clippy::too_many_arguments)]
 fn list_bin(app: &mut FilmcraftApp, ui: &mut egui::Ui, bin: &Bin, depth: usize, filter: &str, row: &mut usize, actions: &mut Actions, v: &View, lc: &ListCtx) {
     let t = app.tokens;
-    let (bins, items) = pp::bin_children(&app.session.project, bin, &app.session.prefs.project_panel.view.sort);
+    let sort = &app.session.prefs.project_panel.view.sort;
+    let (bins, mut items) = pp::bin_children(&app.session.project, bin, sort);
+    let references = if app.session.prefs.project_panel.show_reference_clips { pp::reference_clips(&app.session.project, bin) } else { vec![] };
+    if !references.is_empty() {
+        items.extend_from_slice(&references);
+        pp::sort_items(&app.session.project, &mut items, sort);
+    }
+    let references: std::collections::BTreeSet<_> = references.into_iter().collect();
     for bid in bins {
         let Some(b) = app.session.project.root.find_bin(bid).cloned() else { continue };
         let open = app.ui.expanded_bins.contains(&b.id.0) || !filter.is_empty();
@@ -889,6 +920,14 @@ fn list_bin(app: &mut FilmcraftApp, ui: &mut egui::Ui, bin: &Bin, depth: usize, 
         }
         icons::paint(ui.painter(), Rect::from_center_size(pos2(icon_x + 7.0, r.center().y), vec2(14.0, 14.0)), item_icon(&it.kind), t.icon);
         let name_r = Rect::from_min_max(pos2(icon_x + 18.0, r.min.y + 2.0), pos2(x + name_w - 4.0, r.max.y - 2.0));
+        let mut name_r = name_r;
+        if references.contains(&id) {
+            let marker = ui.painter().layout_no_wrap(tl!("Reference").to_string(), Tokens::ui(lc.font - 1.0), t.text_dim);
+            let pos = pos2(name_r.right() - marker.size().x, r.center().y - marker.size().y / 2.0);
+            ui.painter().with_clip_rect(name_r).galley(pos, marker, t.text_dim);
+            name_r.max.x = (pos.x - 5.0).max(name_r.min.x);
+            app.auto.add(&format!("{}.reference.{}", v.prefix, id.0), r.intersect(ui.clip_rect()), &it.name);
+        }
         let badge = media_badge(app, &it);
         if !rename_field(app, ui, name_r, Some(id.0), None, &v.prefix) {
             let (text_r, badges) = name_room(&badge, name_r);
@@ -929,7 +968,12 @@ fn list_bin(app: &mut FilmcraftApp, ui: &mut egui::Ui, bin: &Bin, depth: usize, 
             app.auto.add(&format!("{}.item.{}.selected", v.prefix, id.0), r.intersect(ui.clip_rect()), "Selected");
         }
         slow_click_rename(app, ui, &resp, name_r, id, selected);
-        item_interactions(app, ui, actions, ItemInteraction { view: v, response: &resp, item: id, kind: &it.kind, allow_drag: true, allow_menu: true });
+        item_interactions(
+            app,
+            ui,
+            actions,
+            ItemInteraction { view: v, response: &resp, item: id, kind: &it.kind, allow_drag: true, allow_menu: true, bin: bin.id },
+        );
     }
 }
 
@@ -1159,7 +1203,7 @@ pub fn icon_view(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, v: &View
                         app,
                         ui,
                         actions,
-                        ItemInteraction { view: v, response: &resp, item: id, kind: &kind, allow_drag: true, allow_menu: true },
+                        ItemInteraction { view: v, response: &resp, item: id, kind: &kind, allow_drag: true, allow_menu: true, bin: v.bin },
                     );
                 }
             }
@@ -1257,7 +1301,7 @@ pub fn freeform_view(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, v: &
                 app,
                 ui,
                 actions,
-                ItemInteraction { view: v, response: &resp, item: ItemId(c.item), kind: &kind, allow_drag: false, allow_menu: false },
+                ItemInteraction { view: v, response: &resp, item: ItemId(c.item), kind: &kind, allow_drag: false, allow_menu: false, bin: v.bin },
             );
             // Escape puts the cards back and drops nothing until the button comes up (#580); egui
             // also ends the drag on Escape, so it arrives as a stop as often as during the drag
@@ -1380,7 +1424,7 @@ fn card_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, v: &View, item: u64, wid
     ui.separator();
     let kind = app.session.project.item(ItemId(item)).map(|x| x.kind.clone());
     if let Some(kind) = kind {
-        item_menu(app, ui, ItemId(item), &kind, actions);
+        item_menu(app, ui, ItemId(item), &kind, v.bin, actions);
     }
 }
 

@@ -125,6 +125,7 @@ pub fn run(s: &mut Session, p: &Value) -> Result<Value> {
         for i in drop {
             proj.items.remove(&i);
             proj.root.remove_item(i);
+            proj.root.remove_extra_filings(i);
         }
     }
     // ---- work list and estimate

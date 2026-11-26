@@ -75,6 +75,10 @@ impl Session {
             "file.open" | "file.revert" | "file.recover" | "file.closeProject" if !self.is_dirty() => Ok(()),
             "project.renameBin"
             | "project.removeFromBin"
+            | "project.fileInBin"
+            | "edit.label"
+            | "metadata.set"
+            | "edit.duplicate"
             | "project.reorderBin"
             | "timeline.move"
             | "timeline.trim"

@@ -313,6 +313,8 @@ pub struct ProjectSnapshot {
     pub project: Arc<Project>,
     #[cfg(not(target_arch = "wasm32"))]
     folder_base: Option<Arc<folder_edit::FolderBase>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    metadata_fields: Option<Vec<(ItemId, String)>>,
 }
 
 /// Undo history of whole-project snapshots. Each step is its label, the project before (undo) or
@@ -950,6 +952,16 @@ impl Session {
         None
     }
 
+    pub fn is_modular_document(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.editing_folder.is_some()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
+    }
     pub fn is_dirty(&self) -> bool {
         self.revision != self.saved_revision
     }
@@ -1177,6 +1189,8 @@ impl Session {
         ProjectSnapshot {
             project: self.project.clone(),
             #[cfg(not(target_arch = "wasm32"))]
+            metadata_fields: None,
+            #[cfg(not(target_arch = "wasm32"))]
             folder_base: self.editing_folder.as_ref().map(|f| f.baseline.clone()),
         }
     }
@@ -1187,6 +1201,35 @@ impl Session {
     }
 
     fn swap_snapshot(&mut self, mut state: ProjectSnapshot) -> Option<ProjectSnapshot> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(fields) = &mut state.metadata_fields
+            && let Some(folder) = &self.editing_folder
+        {
+            let bin = folder.snapshot.scope().map_or(self.project.root.id, |s| filmcraft_project::BinId(s.bin));
+            let mut restore = self.project.clone();
+            let observed = fields.iter().filter_map(|(id, key)| self.project.item(*id)?.field_edits.get(key)).map(|s| s.order).max().unwrap_or(0);
+            let stamp = match folder.snapshot.next_field_order(observed) {
+                Ok(order) => filmcraft_project::FieldEdit { order, bin },
+                Err(e) => {
+                    self.toast(format!("Cannot restore metadata: {e}"));
+                    return None;
+                }
+            };
+            // Only the fields touched by this command participate in Undo and Redo.
+            fields.retain(|(id, key)| {
+                let Some(src) = state.project.item(*id) else { return false };
+                let Some(dest) = Arc::make_mut(&mut restore).item_mut(*id) else { return false };
+                if dest.field_edits.get(key).is_none_or(|s| s.bin != bin) {
+                    return false;
+                }
+                dest.copy_editorial_field(src, key);
+                dest.field_edits.insert(key.clone(), stamp);
+                true
+            });
+            std::mem::swap(&mut self.project, &mut restore);
+            state.project = restore;
+            return Some(state);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if self.editing_bins()
             && let Some(scope) = self.editing_folder.as_ref().and_then(|f| f.snapshot.scope())

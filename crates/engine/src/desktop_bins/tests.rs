@@ -227,6 +227,7 @@ fn removing_source_filing_preserves_two_cuts_on_cold_reopen() {
         s.execute("edit.redo", json!({})).unwrap();
         s.execute("file.save", json!({})).unwrap();
     }
+    check_shared_source(dir, &stock, source, sources, cuts, |s| assert!(render(s) == expected));
     // The exclusive folder writer can unfile the entire hierarchy in one edit.
     let second_folder = dir.join("whole-bin");
     pack(&stock, &second_folder, filmcraft_format::atomic_write_new).unwrap();
@@ -258,5 +259,101 @@ fn removing_source_filing_preserves_two_cuts_on_cold_reopen() {
         assert!(!s.is_dirty());
         assert_eq!(s.project.item(source).unwrap().name, source_name);
         assert!(render(&mut s) == pictures, "decoded pictures changed (proxy {use_proxy})");
+    }
+}
+
+fn check_shared_source(dir: &Path, stock: &Path, source: ItemId, sources: BinId, cuts: BinId, verify_playback: impl Fn(&mut Session)) {
+    // Two independent editors share a source, even though only one bin owns its home filing.
+    let collaboration = dir.join("collaboration");
+    pack(stock, &collaboration, filmcraft_format::atomic_write_new).unwrap();
+    let head = collaboration.join(ROOT);
+    reverse_save_order(dir, &head, source, sources, cuts);
+    let duplicate;
+    {
+        let mut b = editor(dir);
+        open(&mut b, &head);
+        b.open_desktop_bin(cuts.0).unwrap();
+        let item = b.project.item(source).unwrap();
+        assert_eq!(item.metadata["Comments"], "approved");
+        assert_eq!(item.name, "Approved interview");
+        assert_eq!(item.custom_label_color, filmcraft_project::HexColor::parse("#BBCCDD"));
+        assert_eq!(item.metadata["Scene"], "kitchen");
+        assert_eq!(item.metadata["Camera"], "B");
+        assert!(!item.metadata.contains_key("Take"));
+        assert_eq!(b.project.root.parent_of(source), Some(sources));
+        b.execute("project.removeFromBin", json!({"bin":cuts.0,"items":[source.0]})).unwrap();
+        assert!(crate::project_panel::reference_clips(&b.project, b.project.root.find_bin(cuts).unwrap()).contains(&source));
+        assert_eq!(b.project.root.parent_of(source), Some(sources));
+        b.execute("edit.undo", json!({})).unwrap();
+        let cut_bin = b.project.root.find_bin(cuts).unwrap();
+        assert_eq!(cut_bin.filed_sources, [source]);
+        assert!(!crate::project_panel::reference_clips(&b.project, cut_bin).contains(&source));
+        b.execute("project.select", json!({"items":[source.0]})).unwrap();
+        let ids = b.execute("edit.duplicate", json!({})).unwrap();
+        duplicate = filmcraft_project::ItemId(ids["items"][0].as_u64().unwrap());
+        assert_ne!(duplicate, source);
+        assert_eq!(b.project.item(duplicate).unwrap().metadata, b.project.item(source).unwrap().metadata);
+        b.execute("file.save", json!({})).unwrap();
+        set_fields(&mut b, duplicate, json!({"Comments":"independent copy"}));
+        set_fields(&mut b, source, json!({"Camera":"A"}));
+        b.execute("file.save", json!({})).unwrap();
+    }
+    {
+        let mut s = editor(dir);
+        open(&mut s, &head);
+        for bin in [cuts, sources] {
+            assert!(crate::project_panel::bin_children(&s.project, s.project.root.find_bin(bin).unwrap(), &Default::default()).1.contains(&source));
+        }
+        assert_eq!(s.project.item(source).unwrap().metadata["Comments"], "approved");
+        assert_eq!(s.project.item(duplicate).unwrap().metadata["Comments"], "independent copy");
+        assert_eq!(s.project.item(source).unwrap().metadata["Camera"], "A");
+        assert_eq!(s.project.item(duplicate).unwrap().metadata["Camera"], "B");
+        verify_playback(&mut s);
+        let dest = dir.join("collaboration-export.fcproj");
+        s.execute("file.saveCopy", json!({"path":dest})).unwrap();
+        let bytes = fs::read(&dest).unwrap();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        assert!(!text.contains("\"filed_sources\"") && !text.contains("\"field_edits\""));
+        let mut ordinary = Session::default();
+        open(&mut ordinary, &dest);
+        assert_eq!(ordinary.project.root.parent_of(source), Some(sources));
+        verify_playback(&mut ordinary);
+    }
+}
+
+fn set_fields(s: &mut Session, id: ItemId, fields: Value) {
+    s.execute("metadata.set", json!({"item":id.0,"fields":fields})).unwrap();
+}
+
+fn reverse_save_order(dir: &Path, head: &Path, source: ItemId, sources: BinId, cuts: BinId) {
+    {
+        let mut a = editor(&dir.join("first-editor"));
+        let mut b = editor(&dir.join("second-editor"));
+        open(&mut a, head);
+        open(&mut b, head);
+        a.open_desktop_bin(sources.0).unwrap();
+        b.open_desktop_bin(cuts.0).unwrap();
+        let cut_bin = b.project.root.find_bin(cuts).unwrap();
+        assert!(crate::project_panel::reference_clips(&b.project, cut_bin).contains(&source));
+        assert!(!crate::project_panel::bin_children(&b.project, cut_bin, &Default::default()).1.contains(&source));
+        for changed in [true, false] {
+            assert_eq!(b.execute("project.fileInBin", json!({"item":source.0,"bin":cuts.0})).unwrap()["changed"], changed);
+        }
+        set_fields(&mut a, source, json!({"Comments":"older","Scene":"kitchen","Take":"first","Name":"first pass","Label":"#223344"}));
+        set_fields(&mut b, source, json!({"Comments":"approved","Camera":"B","Take":"second","Name":"Approved interview"}));
+        b.execute("edit.label", json!({"items":[source.0],"label":"#BBCCDD"})).unwrap();
+        set_fields(&mut b, source, json!({"Take":""}));
+        b.execute("file.save", json!({})).unwrap();
+        a.execute("file.save", json!({})).unwrap();
+        assert_eq!(a.project.item(source).unwrap().metadata["Comments"], "approved");
+        assert!(!a.project.item(source).unwrap().metadata.contains_key("Take"));
+        a.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(a.project.item(source).unwrap().metadata["Comments"], "approved");
+        assert!(!a.project.item(source).unwrap().metadata.contains_key("Scene"));
+        a.execute("file.save", json!({})).unwrap();
+        a.execute("edit.redo", json!({})).unwrap();
+        a.execute("file.save", json!({})).unwrap();
+        // A competing reader cannot remove the second filing.
+        assert!(a.execute("project.removeFromBin", json!({"bin":cuts.0,"items":[source.0]})).is_err());
     }
 }

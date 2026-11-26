@@ -1023,8 +1023,12 @@ pub fn search_bin_rows(
             }
         });
         if open {
-            let bin =
-                filmcraft_project::Bin { id: sb.id, name: sb.name.clone(), children: matches.into_iter().map(filmcraft_project::BinEntry::Item).collect() };
+            let bin = filmcraft_project::Bin {
+                filed_sources: Vec::new(),
+                id: sb.id,
+                name: sb.name.clone(),
+                children: matches.into_iter().map(filmcraft_project::BinEntry::Item).collect(),
+            };
             draw_items(app, ui, &bin, row, actions);
         }
     }

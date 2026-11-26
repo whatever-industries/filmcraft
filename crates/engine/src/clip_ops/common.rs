@@ -183,6 +183,7 @@ pub(super) fn remove_items(p: &mut Project, ids: &[ItemId]) {
     for i in ids {
         p.items.remove(i);
         p.root.remove_item(*i);
+        p.root.remove_extra_filings(*i);
     }
 }
 

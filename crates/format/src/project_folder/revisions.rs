@@ -58,7 +58,7 @@ pub(super) fn lock_file(path: &Path) -> io::Result<File> {
 pub fn checkout(folder: &Path, destination: &Path) -> io::Result<String> {
     let bytes = read_member(&folder.join(ROOT), MANIFEST_LIMIT)?;
     let manifest = serde_json::from_slice(&bytes)?;
-    atomic_write_new(destination, &assemble(folder, &manifest, destination)?)?;
+    atomic_write_new(destination, &super::standard_document(&assemble(folder, &manifest, destination)?)?)?;
     Ok(digest(&bytes))
 }
 
@@ -67,7 +67,64 @@ pub(super) fn publish(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 pub fn save(folder: &Path, expected: &str, source: &Path) -> io::Result<String> {
-    save_with(folder, expected, records_from(source, folder)?, publish)
+    let _guard = writer(folder)?;
+    let mut incoming = records_from(source, folder)?;
+    let bytes = read_member(&folder.join(ROOT), MANIFEST_LIMIT)?;
+    let current = digest(&bytes);
+    if current != expected {
+        return Err(io::Error::other(format!("stale project revision; current revision is {current}")));
+    }
+    let manifest = serde_json::from_slice(&bytes)?;
+    let base = super::read_records(folder, &manifest)?;
+    // A stock editor carries only the home row. Keep surviving secondary filings and
+    // field clocks when a checkout returns, subject to the existing revision check.
+    let homes: std::collections::BTreeSet<_> = incoming
+        .bins
+        .iter()
+        .flat_map(|(bin, v)| v["children"].as_array().into_iter().flatten().filter_map(move |e| e["Item"].as_u64().map(|id| (*bin, id))))
+        .collect();
+    for (id, bin) in &mut incoming.bins {
+        if let Some(links) = base.bins.get(id).and_then(|b| b.get("filed_sources")) {
+            let mut links: Vec<u64> = serde_json::from_value(links.clone())?;
+            links.retain(|item| incoming.items.contains_key(item) && !homes.contains(&(*id, *item)));
+            if !links.is_empty() {
+                bin["filed_sources"] = serde_json::to_value(links)?;
+            }
+        }
+    }
+    apply_imported_metadata(folder, &base, &mut incoming)?;
+    save_locked(folder, expected, &incoming, publish)
+}
+
+/// Stock edits acquire their order when the user imports the checkout.
+fn apply_imported_metadata(folder: &Path, base: &ProjectRecords, incoming: &mut ProjectRecords) -> io::Result<()> {
+    let mut stamp = None;
+    let root = base.envelope["project"]["root"].as_u64().ok_or_else(|| invalid("missing root bin"))?;
+    let observed =
+        base.items.values().filter_map(|v| v["field_edits"].as_object()).flat_map(|o| o.values()).filter_map(|v| v["order"].as_u64()).max().unwrap_or(0);
+    for (id, item) in &mut incoming.items {
+        let Some(old) = base.items.get(id) else { continue };
+        if let Some(clocks) = old.get("field_edits") {
+            item["field_edits"] = clocks.clone();
+        }
+        let fields = old["metadata"]
+            .as_object()
+            .into_iter()
+            .chain(item["metadata"].as_object())
+            .flat_map(|o| o.keys())
+            .filter(|k| old["metadata"][*k] != item["metadata"][*k])
+            .cloned()
+            .chain((old["name"] != item["name"]).then(|| "Name".into()))
+            .chain((old["label"] != item["label"] || old["custom_label_color"] != item["custom_label_color"]).then(|| "Label".into()))
+            .collect::<std::collections::BTreeSet<String>>();
+        for field in fields {
+            if stamp.is_none() {
+                stamp = Some(super::shared::field_order(folder, observed)?);
+            }
+            item["field_edits"][field] = serde_json::json!({"order":stamp,"bin":root});
+        }
+    }
+    Ok(())
 }
 
 pub fn save_with(folder: &Path, expected: &str, records: ProjectRecords, write: impl FnMut(&Path, &[u8]) -> io::Result<()>) -> io::Result<String> {

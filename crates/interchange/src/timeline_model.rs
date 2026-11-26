@@ -494,6 +494,7 @@ fn from_media(m: &shared::MediaClip, ext: &shared::Ext) -> Result<film::MediaCli
 
 fn from_bin(bin: &shared::Bin) -> film::Bin {
     film::Bin {
+        filed_sources: Vec::new(),
         id: film::BinId(bin.id.0),
         name: bin.name.clone(),
         children: bin
@@ -572,6 +573,7 @@ fn from_project(project: &shared::Project) -> Result<film::Project, serde_json::
             }
         };
         let mut out_item = film::ProjectItem {
+            field_edits: Default::default(),
             id: film::ItemId(id.0),
             name: item.name.clone(),
             label: film::Label::from_name(item.label.name()).unwrap_or(film::Label::Iris),

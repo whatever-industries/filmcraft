@@ -93,6 +93,9 @@ pub struct ProjectPanelUi {
     pub selected_bin: Option<u64>,
     /// The item a Shift-click selects a range from: the last one clicked without Shift.
     pub anchor: Option<u64>,
+    /// Actual bin row clicked, since one source can be shown in several bins.
+    #[serde(skip)]
+    pub row_origin: Option<(ItemId, BinId)>,
     pub rename: Option<Rename>,
     pub dialog: Option<ProjectDialog>,
     pub hover: Option<Hover>,
@@ -515,7 +518,7 @@ fn body(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, v: &View, actions
         y = pr.max.y + 6.0;
     }
     let mut content = Rect::from_min_max(pos2(rect.min.x + 4.0, y), pos2(rect.max.x - 4.0, rect.max.y - FOOTER_H));
-    if app.session.prefs.project_panel.show_reference_clips {
+    if v.mode != ViewMode::List && app.session.prefs.project_panel.show_reference_clips {
         reference_rows(app, ui, v, &filter, &mut content, actions);
     }
     ui.painter().rect_filled(content, 4.0, t.panel_bg.gamma_multiply(0.92));
@@ -533,7 +536,7 @@ fn body(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, v: &View, actions
     footer(app, ui, Rect::from_min_max(pos2(rect.min.x, rect.max.y - FOOTER_H), rect.max), v, actions);
 }
 
-/// A read-only list shared by all three views. Reference rows can open sources without filing them.
+/// Supplementary source links in card views. Reference rows can open sources without filing them.
 fn reference_rows(app: &mut FilmcraftApp, ui: &mut egui::Ui, v: &View, filter: &str, content: &mut Rect, actions: &mut Actions) {
     use std::sync::{Arc, Weak};
     type Cache = (Weak<filmcraft_project::Project>, BinId, Arc<Vec<ItemId>>);
@@ -574,6 +577,11 @@ fn reference_rows(app: &mut FilmcraftApp, ui: &mut egui::Ui, v: &View, filter: &
             let item = &project.items[id];
             let response = ui.button(&item.name);
             app.auto.add(&format!("{}.reference.{}", v.prefix, id.0), response.rect.intersect(ui.clip_rect()), &item.name);
+            if app.session.is_modular_document() {
+                response.context_menu(|ui| {
+                    super::project_views::file_reference(ui, v.bin, *id, app.session.bin_access(v.bin.0) != Some(false), actions);
+                });
+            }
             if response.clicked() {
                 actions.push((if item.as_sequence().is_some() { "sequence.open" } else { "source.open" }.into(), json!({"item":id.0})));
             }
@@ -1211,7 +1219,12 @@ pub fn commit_rename(app: &mut FilmcraftApp) {
     }
     let res = match (r.item, r.bin) {
         (Some(i), _) if app.session.project.item(ItemId(i)).is_some_and(|x| x.name != name) => {
-            app.session.execute("clip.rename", json!({"item": i, "name": name}))
+            if app.session.is_modular_document() {
+                let bin = app.ui.project_panel.row_origin.filter(|(id, _)| id.0 == i).map(|(_, b)| b.0);
+                app.session.execute("metadata.set", json!({"item":i,"field":"Name","value":name,"bin":bin}))
+            } else {
+                app.session.execute("clip.rename", json!({"item": i, "name": name}))
+            }
         }
         (_, Some(b)) if app.session.project.root.find_bin(BinId(b)).is_some_and(|x| x.name != name) => {
             app.session.execute("project.renameBin", json!({"bin": b, "name": name}))

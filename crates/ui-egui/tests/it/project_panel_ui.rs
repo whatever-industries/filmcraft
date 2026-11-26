@@ -94,6 +94,39 @@ fn double_click_bin(d: &mut Driver, bin: u64, alt: bool) {
 }
 
 #[test]
+fn file_reference_from_list_row_keeps_both_filings() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut demo = demo_session();
+    let sequence = demo.state.active_sequence.unwrap();
+    let cuts = demo.project.root.parent_of(sequence).unwrap();
+    let id = demo.execute("project.referenceClips", json!({"bin":cuts.0})).unwrap()["items"][0].as_u64().unwrap();
+    let home = demo.project.root.parent_of(ItemId(id)).unwrap();
+    let stock = dir.path().join("original.fcproj");
+    demo.execute("file.saveAs", json!({"path":stock})).unwrap();
+    let folder = dir.path().join("folder");
+    filmcraft_format::project_folder::pack(&stock, &folder, filmcraft_format::atomic_write_new).unwrap();
+    let mut editor = Session::desktop_project_editor(filmcraft_engine::autosave::AutosaveConfig::new(dir.path().join("data"))).unwrap();
+    editor.execute("file.open", json!({"path":folder.join(filmcraft_format::project_folder::ROOT)})).unwrap();
+    let mut d = Driver::with(editor);
+    d.ok("ui.panel.show", json!({"panel":"Project"}));
+    d.ok("ui.set", json!({"focused":"Project"}));
+    d.ok("ui.menu.invoke", json!({"id":"window.maximizeFrame"}));
+    d.ok("ui.menu.invoke", json!({"id":"projectPanel.openBin","params":{"bin":cuts.0,"how":"inPlace"}}));
+    d.exec("project.view.set", json!({"view":"list","showReferenceClips":true}));
+    d.frames(3);
+    let row = format!("project.reference.{id}");
+    assert!(d.has(&row));
+    d.ok("ui.click", json!({"id":row,"button":"right"}));
+    d.click("project.itemMenu.fileInBin");
+    d.exec("project.view.set", json!({"showReferenceClips":false}));
+    d.frames(2);
+    assert!(!d.has(&row));
+    assert!(d.has(&format!("project.item.{id}")));
+    assert_eq!(d.app().session.project.root.find_bin(cuts).unwrap().filed_sources, [ItemId(id)]);
+    assert_eq!(d.app().session.project.root.parent_of(ItemId(id)), Some(home));
+}
+
+#[test]
 fn reference_clips_are_view_only_and_open_the_existing_source() {
     let mut d = project_driver();
     let sequence = d.app().session.state.active_sequence.unwrap();

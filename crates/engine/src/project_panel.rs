@@ -492,9 +492,17 @@ pub fn reference_clips(project: &Project, bin: &Bin) -> Vec<ItemId> {
             item.visit_references(|source| pending.push(source));
         }
     }
-    let mut ids: Vec<_> = seen.difference(&filed).copied().filter(|id| project.items.contains_key(id)).collect();
+    let mut ids: Vec<_> =
+        seen.difference(&filed).copied().filter(|id| !bin.filed_sources.contains(id) && project.item(*id).is_some_and(|it| listed(project, it))).collect();
     ids.sort_by_cached_key(|id| project.items[id].name.to_lowercase());
     ids
+}
+
+pub(crate) fn visible_source(project: &Project, bin: BinId, id: ItemId) -> bool {
+    project
+        .root
+        .find_bin(bin)
+        .is_some_and(|b| b.children.contains(&BinEntry::Item(id)) || b.filed_sources.contains(&id) || reference_clips(project, b).contains(&id))
 }
 
 /// A bin's direct sub-bins and items (items sorted by `sort`; bins by name, following the
@@ -518,6 +526,7 @@ pub fn bin_children(p: &Project, bin: &Bin, sort: &SortSpec) -> (Vec<BinId>, Vec
             bins.reverse();
         }
     }
+    items.extend(bin.filed_sources.iter().copied().filter(|id| p.item(*id).is_some_and(|it| listed(p, it))));
     sort_items(p, &mut items, sort);
     (bins.into_iter().map(|b| b.1).collect(), items)
 }
@@ -570,6 +579,7 @@ fn freeform_items(p: &Project, bin: Option<BinId>) -> Vec<ItemId> {
             BinEntry::Item(i) if p.item(*i).is_some_and(|it| listed(p, it)) => Some(*i),
             _ => None,
         })
+        .chain(b.filed_sources.iter().copied().filter(|i| p.item(*i).is_some_and(|it| listed(p, it))))
         .collect()
 }
 

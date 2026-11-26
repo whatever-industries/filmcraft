@@ -286,7 +286,7 @@ fn metadata_get(s: &mut Session, p: &Value) -> Result<Value> {
 /// `metadata.set {item?, field, value}` or `{item?, fields: {name: value}}`: one undo step.
 /// Name renames the item, Label sets its label, every other name is a log field (an empty value
 /// removes it).
-fn metadata_set(s: &mut Session, p: &Value) -> Result<Value> {
+pub(super) fn metadata_set(s: &mut Session, p: &Value) -> Result<Value> {
     let id = metadata_target(s, p).ok_or_else(|| bad("metadata.set", "no item: pass `item` or `clip`, or select one"))?;
     let mut changes: Vec<(String, String)> = Vec::new();
     if let Some(f) = str_p(p, "field") {
@@ -317,22 +317,49 @@ fn metadata_set(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let unchanged = {
         let it = s.project.item(id).ok_or_else(|| bad("metadata.set", "no such item"))?;
-        changes.iter().all(|(k, v)| match k.to_ascii_lowercase().as_str() {
-            "name" => it.name == *v,
+        changes.retain(|(k, v)| match k.to_ascii_lowercase().as_str() {
+            "name" => it.name != v.trim(),
             "label" => {
                 if let Some(color) = filmcraft_project::HexColor::parse(v) {
-                    it.custom_label_color == Some(color)
+                    it.custom_label_color != Some(color)
                 } else {
-                    it.custom_label_color.is_none() && Label::from_color_name(v) == Some(it.label)
+                    it.custom_label_color.is_some() || Label::from_color_name(v) != Some(it.label)
                 }
             }
-            _ => it.metadata.get(k).map(String::as_str).unwrap_or("") == v.as_str(),
-        })
+            _ => it.metadata.get(k).map(String::as_str).unwrap_or("") != v,
+        });
+        changes.is_empty()
     };
     if !unchanged {
+        #[cfg(not(target_arch = "wasm32"))]
+        let stamp = if let Some(folder) = &s.editing_folder {
+            let bin = folder.snapshot.scope().map_or(s.project.root.id, |scope| filmcraft_project::BinId(scope.bin));
+            if folder.snapshot.scope().is_some()
+                && (!crate::project_panel::visible_source(&s.project, bin, id)
+                    || (s.project.sequence(id).is_some() && s.project.root.parent_of(id) != Some(bin)))
+            {
+                return Err(bad("metadata.set", "select a source in the writable bin"));
+            }
+            let observed = s.project.item(id).into_iter().flat_map(|it| it.field_edits.values()).map(|v| v.order).max().unwrap_or(0);
+            Some(filmcraft_project::FieldEdit { bin, order: folder.snapshot.next_field_order(observed).map_err(|e| bad("metadata.set", e.to_string()))? })
+        } else {
+            None
+        };
+        #[cfg(target_arch = "wasm32")]
+        let stamp: Option<filmcraft_project::FieldEdit> = None;
         s.edit("Edit Metadata", |pr, _| {
             let it = pr.item_mut(id).ok_or_else(|| bad("metadata.set", "no such item"))?;
             for (k, v) in &changes {
+                if let Some(stamp) = stamp {
+                    let field = if k.eq_ignore_ascii_case("name") {
+                        "Name"
+                    } else if k.eq_ignore_ascii_case("label") {
+                        "Label"
+                    } else {
+                        k
+                    };
+                    it.field_edits.insert(field.to_owned(), stamp);
+                }
                 match k.to_ascii_lowercase().as_str() {
                     "name" => it.name = v.trim().to_string(),
                     "label" => {
@@ -351,6 +378,28 @@ fn metadata_set(s: &mut Session, p: &Value) -> Result<Value> {
             }
             Ok(())
         })?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if stamp.is_some()
+            && let Some((_, snapshot, _)) = s.history.undo.last_mut()
+        {
+            snapshot.metadata_fields = Some(
+                changes
+                    .iter()
+                    .map(|(key, _)| {
+                        (
+                            id,
+                            if key.eq_ignore_ascii_case("name") {
+                                "Name".into()
+                            } else if key.eq_ignore_ascii_case("label") {
+                                "Label".into()
+                            } else {
+                                key.clone()
+                            },
+                        )
+                    })
+                    .collect(),
+            );
+        }
     }
     let it = s.project.item(id).ok_or_else(|| bad("metadata.set", "no such item"))?;
     Ok(json!({"item": id.0, "name": it.name, "label": it.label_value(), "metadata": it.metadata, "changed": !unchanged}))

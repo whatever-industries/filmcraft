@@ -120,6 +120,44 @@ fn checked_bytes(document: &Value) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Convert the modular bin memberships and edit clock to an ordinary single-filing document.
+pub fn standard_document(bytes: &[u8]) -> io::Result<Vec<u8>> {
+    let mut doc: Value = serde_json::from_slice(bytes)?;
+    if let Some(items) = doc["project"]["items"].as_object_mut() {
+        for item in items.values_mut().filter_map(Value::as_object_mut) {
+            item.remove("field_edits");
+        }
+    }
+    // Keep home rows when available. A rescued subtree may contain only a secondary filing.
+    let mut filed = std::collections::BTreeSet::new();
+    let mut pending = vec![&doc["project"]["root"]];
+    while let Some(bin) = pending.pop() {
+        for entry in bin["children"].as_array().into_iter().flatten() {
+            if let Some(id) = entry["Item"].as_u64() {
+                filed.insert(id);
+            }
+            if let Some(child) = entry.get("Bin") {
+                pending.push(child);
+            }
+        }
+    }
+    fn clean(bin: &mut Value, filed: &mut std::collections::BTreeSet<u64>) -> io::Result<()> {
+        if let Some(links) = bin.as_object_mut().and_then(|b| b.remove("filed_sources")) {
+            let ids: Vec<u64> = serde_json::from_value(links)?;
+            let children = bin["children"].as_array_mut().ok_or_else(|| invalid("expected bin children"))?;
+            children.extend(ids.into_iter().filter(|id| filed.insert(*id)).map(|id| serde_json::json!({"Item":id})));
+        }
+        if let Some(children) = bin["children"].as_array_mut() {
+            for child in children.iter_mut().filter_map(|v| v.get_mut("Bin")) {
+                clean(child, filed)?;
+            }
+        }
+        Ok(())
+    }
+    clean(&mut doc["project"]["root"], &mut filed)?;
+    checked_bytes(&doc)
+}
+
 fn encode_at(folder: &Path, records: ProjectRecords, destination: &Path) -> io::Result<Vec<u8>> {
     checked_bytes(&document_at(folder, records, destination)?)
 }
@@ -200,7 +238,7 @@ pub fn pack(source: &Path, folder: &Path, mut write_new: impl FnMut(&Path, &[u8]
 
 pub fn unpack(folder: &Path, destination: &Path) -> io::Result<()> {
     let manifest = serde_json::from_slice(&read_member(&folder.join(ROOT), MANIFEST_LIMIT)?)?;
-    atomic_write_new(destination, &assemble(folder, &manifest, destination)?)
+    atomic_write_new(destination, &standard_document(&assemble(folder, &manifest, destination)?)?)
 }
 
 fn outside_folder(folder: &Path, output: &Path) -> io::Result<()> {

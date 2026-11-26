@@ -202,7 +202,9 @@ Each editor can rename the checked-out bin, reorder its existing entries with
 `project.reorderBin`, and place, move, trim, split or delete clips in its sequences.
 **Remove from Bin** unfiles source entries directly in the writable bin. Cuts retain their source records and can still play from the original or an enabled proxy. Undo restores the filing, including across Save. Deleting a whole bin hierarchy or moving entries between bins requires the whole-project editor. For example, `project.removeFromBin {"bin":70,"items":[5]}` removes item 5’s filing in bin 70. Under an exclusive writer, `{"bin":0,"bins":[70]}` unfiles the entire bin from the root.
 
-Enable **Show Reference Clips** in the Project panel menu to see the additional sources used by sequences in the displayed bin. A source shared by two cuts appears once. Click its name to open it. This view works in read-only bins and creates no project entries. Automation can query the same list with `project.referenceClips {"bin":70}`.
+Enable **Show Reference Clips** to reveal sources used by sequences in the bin. Two cuts using the same source produce one Reference row. List view shows the usual metadata columns. Right-click the row and choose **File in This Bin** to keep it visible when reference display is off. Removing this filing leaves the source in its other bins and both cuts still use it.
+
+In modular projects, each filing points to the same source ID. Changing Comments, Scene, Take, Name or Label updates that field for every filing once the editor sees the revision. Clearing a value counts as an edit. The folder orders edits when accepted, so an editor who saves an older draft later cannot overwrite a newer field. **Duplicate** gives the copy its own ID and editable metadata while sharing the footage. A standard project export keeps one home filing for each source and preserves both cuts.
 
 Save publishes the owned records against the latest manifest. This preserves other editors'
 completed saves. `project.refresh` loads their changes into a clean session and resets Undo

@@ -74,6 +74,7 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             always,
             new_search_bin,
         ),
+        spec("project.fileInBin", "File in This Bin", &[], None, r#"{"bin":id,"item":id}"#, always, file_in_bin),
         spec("project.removeFromBin", "Remove from Bin", &[], None, r#"{"bin":id,"items":[id]?,"bins":[id]?}"#, always, remove_from_bin),
         query("project.searchBinItems", "Search Bin Contents", &[], None, r#"{"bin":id}"#, always, search_bin_items),
         spec(
@@ -462,6 +463,27 @@ fn new_search_bin(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(search_bin_json(&s.project, &b))
 }
 
+fn file_in_bin(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "project.fileInBin";
+    if !s.is_modular_document() {
+        return Err(bad(cmd, "open a modular project"));
+    }
+    let bin = filmcraft_project::BinId(u64_p(p, "bin").ok_or_else(|| bad(cmd, "expected bin ID"))?);
+    let item = ItemId(u64_p(p, "item").ok_or_else(|| bad(cmd, "expected source ID"))?);
+    let dest = s.project.root.find_bin(bin).ok_or_else(|| bad(cmd, "unknown bin"))?;
+    if dest.children.contains(&BinEntry::Item(item)) || dest.filed_sources.contains(&item) {
+        return Ok(json!({"item":item.0,"changed":false}));
+    }
+    if !crate::project_panel::reference_clips(&s.project, dest).contains(&item) {
+        return Err(bad(cmd, "expected a source referenced by this bin"));
+    }
+    s.edit("File in This Bin", |project, _| {
+        project.root.find_bin_mut(bin).ok_or_else(|| bad(cmd, "unknown bin"))?.filed_sources.push(item);
+        Ok(())
+    })?;
+    Ok(json!({"item":item.0,"changed":true}))
+}
+
 /// Unfile direct entries. Their records and media are independent of the bin hierarchy.
 fn remove_from_bin(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "project.removeFromBin";
@@ -485,12 +507,13 @@ fn remove_from_bin(s: &mut Session, p: &Value) -> Result<Value> {
     }
     s.edit("Remove from Bin", |project, state| {
         let parent = project.root.find_bin_mut(bin).ok_or_else(|| bad(cmd, "unknown parent bin"))?;
-        let before = parent.children.len();
+        let before = parent.children.len() + parent.filed_sources.len();
+        parent.filed_sources.retain(|id| !items.contains(&id.0));
         parent.children.retain(|e| match e {
             BinEntry::Item(id) => !items.contains(&id.0),
             BinEntry::Bin(child) => !bins.contains(&child.id.0),
         });
-        if before - parent.children.len() != count {
+        if before - parent.children.len() - parent.filed_sources.len() != count {
             return Err(bad(cmd, "selection includes an entry outside the bin"));
         }
         state.project_selection.retain(|id| !items.contains(&id.0));

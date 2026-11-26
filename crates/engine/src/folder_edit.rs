@@ -129,11 +129,18 @@ impl Session {
             if let Some(journal) = &folder.journal {
                 journal.verify_location(&folder.snapshot)?;
             }
-            let origin = folder
+            let (origin, published) = folder
                 .snapshot
                 .save_edit_with_origin(&folder.baseline.origin, &folder.baseline.typed(), &next)
                 .map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
             folder.baseline = Arc::new(FolderBase { origin, project: scoped, view });
+            if let Some(published) = published {
+                for (id, updated) in published.items.iter().filter(|(_, it)| !it.field_edits.is_empty()) {
+                    if let Some(local) = Arc::make_mut(&mut self.project).item_mut(*id) {
+                        local.merge_editorial_fields(updated, None);
+                    }
+                }
+            }
             if let Some(j) = folder.journal.as_mut() {
                 j.pending_cleanup = true;
             }

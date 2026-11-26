@@ -151,6 +151,9 @@ pub struct ProjectItem {
     /// Free-form metadata (Description, Scene, Shot, Log Note…).
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
+    /// Per-field edit order and authoring bin for modular project publication.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub field_edits: BTreeMap<String, FieldEdit>,
     /// Import time counter (for "Date Created"/sorting), not wall clock.
     #[serde(default)]
     pub created: u64,
@@ -160,7 +163,41 @@ pub struct ProjectItem {
     pub split: SplitMarks,
 }
 
+/// The project clock orders accepted edits before either editor saves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldEdit {
+    pub order: u64,
+    pub bin: BinId,
+}
+
 impl ProjectItem {
+    pub fn copy_editorial_field(&mut self, source: &Self, key: &str) {
+        match key {
+            "Name" => self.name.clone_from(&source.name),
+            "Label" => {
+                self.label = source.label;
+                self.custom_label_color = source.custom_label_color;
+            }
+            _ => match source.metadata.get(key) {
+                Some(v) => {
+                    self.metadata.insert(key.to_owned(), v.clone());
+                }
+                None => {
+                    self.metadata.remove(key);
+                }
+            },
+        }
+    }
+
+    pub fn merge_editorial_fields(&mut self, source: &Self, bin: Option<BinId>) {
+        for (key, stamp) in &source.field_edits {
+            if bin.is_none_or(|b| b == stamp.bin) && self.field_edits.get(key).is_none_or(|old| old.order < stamp.order) {
+                self.copy_editorial_field(source, key);
+                self.field_edits.insert(key.clone(), *stamp);
+            }
+        }
+    }
+
     /// Visit direct project-item dependencies. Track IDs, clip instance IDs and media paths are not project-item links.
     pub fn visit_references(&self, mut visit: impl FnMut(ItemId)) {
         match &self.kind {
@@ -182,6 +219,10 @@ impl ProjectItem {
         }
     }
 
+    /// A source clip can have independent editorial metadata while sharing its footage.
+    pub fn is_source_clip(&self) -> bool {
+        matches!(self.kind, ItemKind::Media(_) | ItemKind::Subclip { .. })
+    }
     pub fn as_media(&self) -> Option<&MediaClip> {
         match &self.kind {
             ItemKind::Media(m) => Some(m),
@@ -268,6 +309,9 @@ pub struct Bin {
     pub id: BinId,
     pub name: String,
     pub children: Vec<BinEntry>,
+    /// Additional filings of existing sources in a modular project.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filed_sources: Vec<ItemId>,
 }
 
 impl Bin {
@@ -298,6 +342,15 @@ impl Bin {
             return true;
         }
         self.children.iter_mut().any(|c| if let BinEntry::Bin(b) = c { b.remove_item(id) } else { false })
+    }
+    /// Drop any additional filings when the underlying project item is deleted.
+    pub fn remove_extra_filings(&mut self, id: ItemId) {
+        self.filed_sources.retain(|item| *item != id);
+        for entry in &mut self.children {
+            if let BinEntry::Bin(b) = entry {
+                b.remove_extra_filings(id)
+            }
+        }
     }
     /// Take a sub-bin, and everything in it, out of the tree. The bin itself is never removed from itself.
     pub fn remove_bin(&mut self, id: BinId) -> Option<Bin> {

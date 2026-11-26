@@ -127,7 +127,7 @@ fn extract(folder: &Path, manifest: &Manifest, sequence: u64) -> io::Result<Proj
 
 pub fn rescue(folder: &Path, revision: &str, sequence: u64, output: &Path) -> io::Result<()> {
     let records = extract(folder, &at(folder, revision)?, sequence)?;
-    atomic_write_new(output, &encode_at(folder, records, output)?)
+    atomic_write_new(output, &super::standard_document(&encode_at(folder, records, output)?)?)
 }
 
 pub fn restore_copy(folder: &Path, expected: &str, historical: &str, sequence: u64) -> io::Result<(u64, String)> {

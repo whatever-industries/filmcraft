@@ -63,7 +63,7 @@ mod source;
 mod track;
 mod view;
 
-pub use item::{AudioChannelMap, Bin, BinEntry, Interpretation, ItemKind, MediaClip, MediaIdentity, MediaRef, ProjectItem};
+pub use item::{AudioChannelMap, Bin, BinEntry, FieldEdit, Interpretation, ItemKind, MediaClip, MediaIdentity, MediaRef, ProjectItem};
 pub use label::Label;
 pub(crate) use sequence::bounded_time_range;
 pub use sequence::{
@@ -184,7 +184,7 @@ impl Project {
             custom_colors: Vec::new(),
             custom_color_names: BTreeMap::new(),
             settings: ProjectSettings::default(),
-            root: Bin { id: BinId(0), name: name.into(), children: Vec::new() },
+            root: Bin { id: BinId(0), name: name.into(), children: Vec::new(), filed_sources: Vec::new() },
             items: BTreeMap::new(),
             next_id: 1,
             luts: Vec::new(),
@@ -217,6 +217,7 @@ impl Project {
         let mut bins = vec![&self.root];
         while let Some(bin) = bins.pop() {
             see(bin.id.0);
+            bin.filed_sources.iter().for_each(|id| see(id.0));
             for c in &bin.children {
                 match c {
                     BinEntry::Item(i) => see(i.0),
@@ -241,7 +242,17 @@ impl Project {
         let created = id.0;
         self.items.insert(
             id,
-            ProjectItem { id, name: name.into(), label, custom_label_color: None, kind, metadata: BTreeMap::new(), created, split: SplitMarks::default() },
+            ProjectItem {
+                id,
+                name: name.into(),
+                label,
+                custom_label_color: None,
+                kind,
+                metadata: BTreeMap::new(),
+                field_edits: Default::default(),
+                created,
+                split: SplitMarks::default(),
+            },
         );
         if let Some(b) = bin.and_then(|b| self.root.find_bin_mut(b)) {
             b.children.push(BinEntry::Item(id));
@@ -253,7 +264,7 @@ impl Project {
 
     pub fn add_bin(&mut self, name: &str, parent: Option<BinId>) -> BinId {
         let id = BinId(self.alloc_id());
-        let bin = Bin { id, name: name.into(), children: Vec::new() };
+        let bin = Bin { id, name: name.into(), children: Vec::new(), filed_sources: Vec::new() };
         match parent.and_then(|p| self.root.find_bin_mut(p)) {
             Some(p) => p.children.push(BinEntry::Bin(bin)),
             None => self.root.children.push(BinEntry::Bin(bin)),
@@ -285,7 +296,10 @@ impl Project {
                 BinEntry::Bin(sub)
             };
             match self.root.find_bin_mut(target) {
-                Some(t) => t.children.push(entry),
+                Some(t) => {
+                    t.filed_sources.retain(|other| *other != id);
+                    t.children.push(entry);
+                }
                 // cannot happen (the target is outside what was taken out), but never lose it
                 None => self.root.children.push(entry),
             }

@@ -26,6 +26,9 @@ pub struct BinScope {
 pub(super) struct Claim {
     pub scope: BinScope,
     original_ids: BTreeSet<u64>,
+    /// Copies present in this checkout's last verified publication. A crashed checkout
+    /// may encounter an unrelated item allocated in its old range by a whole-project writer.
+    published_copies: BTreeSet<u64>,
     _locks: Vec<File>,
 }
 
@@ -57,9 +60,29 @@ fn project(records: &ProjectRecords) -> io::Result<Project> {
     crate::decode(&bytes).map(|loaded| loaded.project).map_err(invalid)
 }
 
+/// Allocate at edit time under the same interprocess lock as publication. A later Save
+/// cannot mint a newer version for an older value. Microseconds are a lower bound only.
+pub(super) fn field_order(folder: &Path, observed: u64) -> io::Result<u64> {
+    let _guard = publication(folder)?;
+    let path = folder.join(".field-edit-clock");
+    let last: u64 = match read_member(&path, 64) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => 0,
+        Err(e) => return Err(e),
+    };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(invalid)?.as_micros();
+    let order = last.max(observed).checked_add(1).ok_or_else(|| invalid("field edit clock exhausted"))?.max(u64::try_from(now).map_err(invalid)?);
+    crate::atomic_write_no_follow(&path, &serde_json::to_vec(&order)?)?;
+    Ok(order)
+}
+
 const RESERVATION_SIZE: u64 = 65_536;
 
 impl BinScope {
+    fn owns_id(&self, id: u64) -> bool {
+        (self.start..self.end).contains(&id)
+    }
+
     pub(super) fn verify(&self, base: &Manifest, latest: &Manifest) -> io::Result<()> {
         for bin in [true, false] {
             fn index(m: &Manifest, bin: bool) -> super::RecordIndex<'_> {
@@ -99,6 +122,20 @@ impl BinScope {
     pub fn project_onto(&self, before: &Project, after: &Project) -> io::Result<Project> {
         let mut expected = before.clone();
         expected.next_id = after.next_id;
+        let owner = filmcraft_project::BinId(self.bin);
+        // Items created by this checkout live in its exclusive reservation.
+        expected.items.retain(|id, _| !self.owns_id(id.0) || after.items.contains_key(id));
+        for (id, src) in &after.items {
+            if self.owns_id(id.0) && src.is_source_clip() {
+                if let Some(dest) = expected.items.get_mut(id) {
+                    dest.merge_editorial_fields(src, Some(owner));
+                } else {
+                    expected.items.insert(*id, src.clone());
+                }
+            } else if let Some(dest) = expected.items.get_mut(id) {
+                dest.merge_editorial_fields(src, Some(owner));
+            }
+        }
         for id in &self.sequences {
             let id = ItemId(*id);
             let Some(filmcraft_project::ItemKind::Sequence(seq)) = after.items.get(&id).map(|i| &i.kind) else {
@@ -114,6 +151,7 @@ impl BinScope {
         let old = expected.root.find_bin_mut(id).ok_or_else(|| invalid("missing checked-out bin"))?;
         let new = after.root.find_bin(id).ok_or_else(|| invalid("checked-out bin was removed"))?;
         old.name.clone_from(&new.name);
+        old.filed_sources.clone_from(&new.filed_sources);
         let key = |entry: &filmcraft_project::BinEntry| match entry {
             filmcraft_project::BinEntry::Bin(b) => (true, b.id.0),
             filmcraft_project::BinEntry::Item(i) => (false, i.0),
@@ -127,13 +165,16 @@ impl BinScope {
             }
             if let Some(child) = children.remove(&k) {
                 old.children.push(child);
-            } else if !k.0 && self.filings.contains(&k.1) && before.root.parent_of(ItemId(k.1)).is_none() && before.items.contains_key(&ItemId(k.1)) {
+            } else if !k.0
+                && ((self.owns_id(k.1) && after.items.get(&ItemId(k.1)).is_some_and(|it| it.is_source_clip()))
+                    || (self.filings.contains(&k.1) && before.root.parent_of(ItemId(k.1)).is_none() && before.items.contains_key(&ItemId(k.1))))
+            {
                 old.children.push(filmcraft_project::BinEntry::Item(ItemId(k.1)));
             } else {
                 return Err(invalid("entry is outside the checked-out bin"));
             }
         }
-        if children.keys().any(|(bin, id)| *bin || !self.filings.contains(id)) {
+        if children.keys().any(|(bin, id)| *bin || (!self.owns_id(*id) && !self.filings.contains(id))) {
             return Err(invalid(format!("edit changes records outside bin {}", self.bin)));
         }
         Ok(expected)
@@ -148,7 +189,7 @@ impl BinScope {
                 if !seen.insert(entry.to_string()) {
                     return Err(invalid("duplicate bin entry"));
                 }
-                if entry["Item"].as_u64().is_some_and(|id| self.filings.contains(&id)) {
+                if entry["Item"].as_u64().is_some_and(|id| self.filings.contains(&id) || self.owns_id(id)) {
                     continue;
                 }
                 keys.push(entry.to_string());
@@ -171,9 +212,37 @@ impl BinScope {
         {
             return Err(invalid("source filing is missing or belongs to another bin"));
         }
+        let deleted: BTreeSet<_> = latest.items.keys().filter(|id| self.owns_id(**id) && !draft.items.contains_key(*id)).copied().collect();
+        for id in &deleted {
+            latest.items.remove(id);
+        }
+        for (&id, src) in &draft.items {
+            if self.owns_id(id) {
+                if (src.pointer("/kind/Media").is_none() && src.pointer("/kind/Subclip").is_none()) || src["id"].as_u64() != Some(id) {
+                    return Err(invalid("invalid duplicated media item"));
+                }
+                latest.items.entry(id).or_insert_with(|| src.clone());
+            }
+            if let Some(dest) = latest.items.get_mut(&id) {
+                merge_fields(dest, src, self.bin)?;
+            }
+        }
+        let inventory = latest.envelope["project"]["items"].as_array_mut().ok_or_else(|| invalid("missing item inventory"))?;
+        inventory.retain(|v| v.as_u64().is_none_or(|id| !deleted.contains(&id)));
+        let existing: BTreeSet<_> = inventory.iter().filter_map(Value::as_u64).collect();
+        inventory.extend(draft.items.keys().filter(|id| self.owns_id(**id) && !existing.contains(id)).copied().map(Value::from));
+        let links: Vec<ItemId> = serde_json::from_value(new.get("filed_sources").cloned().unwrap_or_else(|| serde_json::json!([])))?;
+        if links.iter().any(|id| !latest.items.contains_key(&id.0)) || links.iter().collect::<BTreeSet<_>>().len() != links.len() {
+            return Err(invalid("missing or repeated source filing"));
+        }
         let bin = latest.bins.get_mut(&self.bin).ok_or_else(|| invalid("missing bin"))?;
         if members(bin)? != members(new)? {
             return Err(invalid("bin membership changed"));
+        }
+        if links.is_empty() {
+            bin.as_object_mut().ok_or_else(|| invalid("expected bin"))?.remove("filed_sources");
+        } else {
+            bin["filed_sources"] = serde_json::to_value(links)?;
         }
         bin["name"] = new["name"].clone();
         bin["children"] = new["children"].clone();
@@ -185,6 +254,37 @@ impl BinScope {
         }
         Ok(())
     }
+}
+
+/// Update only the winning fields in the raw record, retaining unknown extensions.
+fn merge_fields(dest: &mut Value, src: &Value, bin: u64) -> io::Result<()> {
+    let Some(fields) = src.get("field_edits").and_then(Value::as_object) else { return Ok(()) };
+    for (key, value) in fields {
+        let stamp: filmcraft_project::FieldEdit = serde_json::from_value(value.clone())?;
+        if stamp.bin.0 != bin || dest["field_edits"][key]["order"].as_u64().unwrap_or(0) >= stamp.order {
+            continue;
+        }
+        match key.as_str() {
+            "Name" => dest["name"] = src["name"].clone(),
+            "Label" => {
+                dest["label"] = src["label"].clone();
+                if let Some(color) = src.get("custom_label_color") {
+                    dest["custom_label_color"] = color.clone();
+                } else if let Some(obj) = dest.as_object_mut() {
+                    obj.remove("custom_label_color");
+                }
+            }
+            _ => {
+                if let Some(v) = src["metadata"].get(key) {
+                    dest["metadata"][key] = v.clone();
+                } else if let Some(obj) = dest["metadata"].as_object_mut() {
+                    obj.remove(key);
+                }
+            }
+        }
+        dest["field_edits"][key] = value.clone();
+    }
+    Ok(())
 }
 
 impl Claim {
@@ -241,7 +341,12 @@ impl Claim {
                 original_ids.insert(id);
             });
         }
-        Ok((Self { scope, original_ids, _locks: locks }, rev, raw))
+        let published_copies = if let Some((base, _)) = prior {
+            read_records(folder, &recovery::at(folder, base)?)?.items.into_keys().filter(|id| scope.owns_id(*id)).collect()
+        } else {
+            BTreeSet::new()
+        };
+        Ok((Self { scope, original_ids, published_copies, _locks: locks }, rev, raw))
     }
 
     pub fn project_draft(&self, current: &ProjectRecords, draft: &ProjectRecords, cursor: u64) -> io::Result<ProjectRecords> {
@@ -251,9 +356,10 @@ impl Claim {
         }
         let mut peer = project(current)?;
         let published_next = peer.next_id;
-        peer.items.retain(|id, _| !self.scope.sequences.contains(&id.0));
+        // Filed rows and sequence links may legitimately reference a published copy.
+        peer.items.retain(|id, _| !self.scope.sequences.contains(&id.0) && !self.published_copies.contains(&id.0));
         let mut collision = false;
-        peer.visit_ids(|id| collision |= (self.scope.start..self.scope.end).contains(&id));
+        peer.visit_ids(|id| collision |= self.scope.owns_id(id) && !self.published_copies.contains(&id));
         if collision {
             return Err(invalid("reserved IDs overlap another project record"));
         }
@@ -276,6 +382,25 @@ impl Claim {
                 return Err(invalid(format!("sequence {id} references a missing item")));
             }
         }
+        for (&id, item) in &project.items {
+            if self.scope.owns_id(id.0) {
+                let invalid_id = !(self.scope.start..cursor).contains(&id.0)
+                    || item.as_media().is_some_and(|m| m.markers.iter().any(|mark| !(self.scope.start..cursor).contains(&mark.id.0)));
+                if invalid_id {
+                    return Err(invalid("duplicate clip ID outside reservation"));
+                }
+            }
+            let mut missing = false;
+            item.visit_references(|source| missing |= self.scope.owns_id(source.0) && !project.items.contains_key(&source));
+            if missing {
+                return Err(invalid("another clip still uses the duplicate"));
+            }
+        }
+        for bin in merged.bins.values() {
+            if bin["filed_sources"].as_array().into_iter().flatten().filter_map(Value::as_u64).any(|id| !merged.items.contains_key(&id)) {
+                return Err(invalid("another bin still files the duplicate"));
+            }
+        }
         if project.nest_cycle().is_some() {
             return Err(invalid("combined edits would contain a sequence nesting cycle"));
         }
@@ -295,8 +420,10 @@ impl Claim {
         Ok(merged)
     }
 
-    pub fn publish(&self, folder: &Path, base: &str, draft: &ProjectRecords, cursor: u64) -> io::Result<String> {
-        self.publish_with(folder, base, draft, cursor, revisions::publish)
+    pub fn publish(&mut self, folder: &Path, base: &str, draft: &ProjectRecords, cursor: u64) -> io::Result<(String, Project)> {
+        let (rev, published) = self.publish_with(folder, base, draft, cursor, revisions::publish)?;
+        self.published_copies = published.items.keys().filter(|id| self.scope.owns_id(id.0)).map(|id| id.0).collect();
+        Ok((rev, published))
     }
 
     fn publish_with(
@@ -306,7 +433,7 @@ impl Claim {
         draft: &ProjectRecords,
         cursor: u64,
         write: impl FnMut(&Path, &[u8]) -> io::Result<()>,
-    ) -> io::Result<String> {
+    ) -> io::Result<(String, Project)> {
         let _publication = publication(folder)?;
         if high_water(folder)? < self.scope.end {
             return Err(invalid("checkout ID reservation is missing"));
@@ -315,7 +442,8 @@ impl Claim {
         self.scope.verify(&recovery::at(folder, base)?, &m)?;
         let current = read_records(folder, &m)?;
         let merged = self.project_draft(&current, draft, cursor)?;
-        revisions::save_locked(folder, &head, &merged, write)
+        let visible = project(&merged)?;
+        Ok((revisions::save_locked(folder, &head, &merged, write)?, visible))
     }
 }
 
@@ -330,7 +458,15 @@ mod tests {
         std::fs::write(&input, include_bytes!("../../tests/fixtures/v1-edit.fcproj")).unwrap();
         let folder = tmp.path().join("cut");
         super::super::pack(&input, &folder, crate::atomic_write_new).unwrap();
-        let (claim, base, mut draft) = Claim::acquire(&folder, 1, None).unwrap();
+        let (mut claim, base, mut draft) = Claim::acquire(&folder, 1, None).unwrap();
+        // An unrelated media record can occupy an unpublished reservation after a crash.
+        let mut collided = copy_records(&draft);
+        let id = claim.scope.start;
+        let mut media = collided.items[&5].clone();
+        media["id"] = id.into();
+        collided.items.insert(id, media);
+        collided.envelope["project"]["items"].as_array_mut().unwrap().push(id.into());
+        assert!(claim.project_draft(&collided, &draft, id).err().unwrap().to_string().contains("reserved IDs overlap"));
         draft.bins.get_mut(&1).unwrap()["name"] = "Dailies".into();
         let before = std::fs::read(folder.join(ROOT)).unwrap();
         let err = claim
@@ -344,7 +480,7 @@ mod tests {
         assert!(err.to_string().contains("interrupted before manifest rename"));
         assert_eq!(std::fs::read(folder.join(ROOT)).unwrap(), before);
         assert!(Claim::acquire(&folder, 1, None).is_err());
-        let next = claim.publish(&folder, &base, &draft, claim.scope.start).unwrap();
+        let (next, _) = claim.publish(&folder, &base, &draft, claim.scope.start).unwrap();
         assert_ne!(next, base);
         let (current, manifest) = head(&folder).unwrap();
         assert_eq!(next, current);

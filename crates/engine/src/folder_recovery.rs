@@ -228,7 +228,7 @@ impl Session {
                 return Err(error("choose a destination outside the source and recovery directories"));
             }
             let bytes = c.document_at(&candidate.dir, dest).map_err(error)?;
-            filmcraft_format::atomic_write_new(dest, &bytes).map_err(error)?;
+            filmcraft_format::atomic_write_new(dest, &filmcraft_format::project_folder::standard_document(&bytes).map_err(error)?).map_err(error)?;
             candidate.retire()?;
             return Ok(json!({"path":dest,"storage":"projectFile"}));
         }

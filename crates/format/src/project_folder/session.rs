@@ -105,6 +105,13 @@ impl FolderSnapshot {
         self.claim.as_ref().map(|c| &c.scope)
     }
 
+    pub fn next_field_order(&self, observed: u64) -> io::Result<u64> {
+        if !self.writable() {
+            return Err(invalid("project folder is read-only"));
+        }
+        super::shared::field_order(&self.folder, observed)
+    }
+
     pub fn cursor(&self) -> u64 {
         self.cursor
     }
@@ -175,24 +182,25 @@ impl FolderSnapshot {
     }
 
     /// Return the raw baseline for subsequent local edits and Undo after publishing.
-    pub fn save_edit_with_origin(&mut self, origin: &EditOrigin, before: &[u8], after: &[u8]) -> io::Result<EditOrigin> {
+    pub fn save_edit_with_origin(&mut self, origin: &EditOrigin, before: &[u8], after: &[u8]) -> io::Result<(EditOrigin, Option<filmcraft_project::Project>)> {
         if !self.writable() {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, "project folder is read-only"));
         }
         let next = origin.merge(&self.folder, Some((&self.revision, &self.raw)), before, after)?;
         // Keep the new raw baseline only after the manifest has been published.
-        let (rev, origin) = if let Some(claim) = &self.claim {
+        let (rev, origin, published) = if let Some(claim) = &mut self.claim {
             // Undo keeps the local editor's view of its peers. Prepare that baseline
             // before the manifest commit so there is no fallible work afterward.
             let pinned = encode_at(&self.folder, super::shared::copy_records(&next), &self.folder.join(ROOT))?;
-            (claim.publish(&self.folder, &self.revision, &next, self.cursor)?, EditOrigin::Recovered(pinned.into()))
+            let (rev, visible) = claim.publish(&self.folder, &self.revision, &next, self.cursor)?;
+            (rev, EditOrigin::Recovered(pinned.into()), Some(visible))
         } else {
             let rev = revisions::save_locked(&self.folder, &self.revision, &next, revisions::publish)?;
-            (rev.clone(), EditOrigin::Revision(rev))
+            (rev.clone(), EditOrigin::Revision(rev), None)
         };
         self.raw = next;
         self.revision = rev;
-        Ok(origin)
+        Ok((origin, published))
     }
 
     /// Apply one locked bin to an in-memory export. Each overlay is validated against
@@ -210,7 +218,7 @@ impl FolderSnapshot {
             return Err(invalid("expected a new .fcproj destination"));
         }
         super::outside_folder(&self.folder, destination)?;
-        crate::atomic_write_new(destination, &relocate_document(bytes, &self.folder.join(ROOT), destination)?)
+        crate::atomic_write_new(destination, &super::standard_document(&relocate_document(bytes, &self.folder.join(ROOT), destination)?)?)
     }
 
     pub fn export(&self, before: &[u8], after: &[u8], destination: &Path) -> io::Result<()> {
@@ -227,6 +235,6 @@ impl FolderSnapshot {
         }
         super::outside_folder(&self.folder, destination)?;
         let data = encode_at(&self.folder, origin.merge(&self.folder, Some((&self.revision, &self.raw)), before, after)?, destination)?;
-        crate::atomic_write_new(destination, &data)
+        crate::atomic_write_new(destination, &super::standard_document(&data)?)
     }
 }

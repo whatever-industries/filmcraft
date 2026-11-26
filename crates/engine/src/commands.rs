@@ -2385,14 +2385,31 @@ fn build() -> Vec<CommandSpec> {
         }),
         cmd!("edit.duplicate", "Duplicate", ["Edit"], Some("Cmd+Shift+/"), "{}", has_project_selection, |s, _| {
             let sel = s.state.project_selection.clone();
+            #[cfg(not(target_arch = "wasm32"))]
+            let destination = s.editing_folder.as_ref().and_then(|f| f.snapshot.scope()).map(|scope| filmcraft_project::BinId(scope.bin));
+            #[cfg(target_arch = "wasm32")]
+            let destination: Option<filmcraft_project::BinId> = None;
+            if let Some(bin) = destination
+                && sel.iter().any(|id| !crate::project_panel::visible_source(&s.project, bin, *id) || s.project.item(*id).is_none_or(|i| !i.is_source_clip()))
+            {
+                return Err(bad("edit.duplicate", "select media clips in the writable bin"));
+            }
             let ids = s.edit("Duplicate", |p, st| {
                 let mut out = Vec::new();
                 for id in sel {
                     if let Some(it) = p.item(id).cloned() {
-                        let bin = p.root.parent_of(id);
-                        let nid = p.add_item(&format!("{} Copy", it.name), it.label, it.kind.clone(), bin);
+                        let bin = destination.or_else(|| p.root.parent_of(id));
+                        let mut kind = it.kind.clone();
+                        if let ItemKind::Media(media) = &mut kind {
+                            for marker in &mut media.markers {
+                                marker.id = filmcraft_project::MarkerId(p.alloc_id());
+                            }
+                        }
+                        let nid = p.add_item(&format!("{} Copy", it.name), it.label, kind, bin);
                         if let Some(copy) = p.item_mut(nid) {
                             copy.custom_label_color = it.custom_label_color;
+                            copy.metadata = it.metadata;
+                            copy.split = it.split;
                         }
                         out.push(nid);
                     }
@@ -2447,6 +2464,14 @@ fn build() -> Vec<CommandSpec> {
                 };
                 if save && custom.is_none() {
                     return Err(bad("edit.label", "saveColor requires a hex color"));
+                }
+                if s.is_modular_document()
+                    && let [item] = items.as_slice()
+                    && clips.is_empty()
+                    && !save
+                {
+                    crate::panels::metadata_set(s, &json!({"item":item.0,"field":"Label","value":text}))?;
+                    return Ok(Value::Null);
                 }
                 s.edit("Label", |pr, _| {
                     if let Some(color) = custom.filter(|_| save)
@@ -4192,6 +4217,7 @@ fn build() -> Vec<CommandSpec> {
                 for i in &gone {
                     pr.items.remove(i);
                     pr.root.remove_item(*i);
+                    pr.root.remove_extra_filings(*i);
                 }
                 let seq_ids: Vec<ItemId> = pr.sequences().map(|q| q.id).collect();
                 for sid in seq_ids {
