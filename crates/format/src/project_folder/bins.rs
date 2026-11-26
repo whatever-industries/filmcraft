@@ -51,7 +51,21 @@ fn path_to<'a>(mut id: u64, root: u64, names: &'a BTreeMap<u64, String>, parents
     None
 }
 
-pub fn list_bins(folder: &Path, revision: &str, mut out: impl Write) -> io::Result<()> {
+#[derive(serde::Serialize)]
+pub struct BinListing {
+    pub bins: Vec<BinLocation>,
+    pub errors: BTreeMap<u64, String>,
+    pub incomplete: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct BinLocation {
+    pub id: u64,
+    pub name: String,
+    pub path: Option<Vec<String>>,
+}
+
+pub fn saved_bins(folder: &Path, revision: &str) -> io::Result<BinListing> {
     let manifest = recovery::at(folder, revision)?;
     let mut budget = MAX_PROJECT_BYTES;
     let (_, root) = recovery::metadata(folder, &manifest, &mut budget)?;
@@ -81,17 +95,28 @@ pub fn list_bins(folder: &Path, revision: &str, mut out: impl Write) -> io::Resu
         }
     }
     let mut incomplete = !errors.is_empty();
-    for (&id, name) in &names {
-        let path = path_to(id, root, &names, &parents);
-        incomplete |= path.is_none();
-        serde_json::to_writer(&mut out, &json!({"id":id,"name":name,"path":path}))?;
+    let bins = names
+        .iter()
+        .map(|(&id, name)| {
+            let path = path_to(id, root, &names, &parents);
+            incomplete |= path.is_none();
+            BinLocation { id, name: name.clone(), path: path.map(|parts| parts.into_iter().map(str::to_owned).collect()) }
+        })
+        .collect();
+    Ok(BinListing { bins, errors, incomplete })
+}
+
+pub fn list_bins(folder: &Path, revision: &str, mut out: impl Write) -> io::Result<()> {
+    let listing = saved_bins(folder, revision)?;
+    for bin in listing.bins {
+        serde_json::to_writer(&mut out, &bin)?;
         writeln!(out)?;
     }
-    for (id, error) in errors {
+    for (id, error) in listing.errors {
         serde_json::to_writer(&mut out, &json!({"id":id,"error":error}))?;
         writeln!(out)?;
     }
-    if incomplete {
+    if listing.incomplete {
         return Err(invalid("incomplete bin listing; some bins or paths could not be verified"));
     }
     Ok(())

@@ -662,6 +662,8 @@ impl Job {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+mod bin_history;
+#[cfg(not(target_arch = "wasm32"))]
 mod desktop_bins;
 #[cfg(not(target_arch = "wasm32"))]
 mod folder_edit;
@@ -982,6 +984,7 @@ impl Session {
                     | "project.view.get"
                     | "project.view.set"
                     | "project.referenceClips"
+                    | "project.binHistory"
                     | "sequence.inspect"
                     | "file.open"
                     | "file.newProject"

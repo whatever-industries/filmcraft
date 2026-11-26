@@ -357,3 +357,24 @@ fn reverse_save_order(dir: &Path, head: &Path, source: ItemId, sources: BinId, c
         assert!(a.execute("project.removeFromBin", json!({"bin":cuts.0,"items":[source.0]})).is_err());
     }
 }
+
+#[test]
+fn browse_saved_bin_uses_revision_values_and_keeps_live_checkout_untouched() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = fixture(temp.path());
+    let mut s = editor(temp.path());
+    open(&mut s, &path);
+    let rev = s.execute("project.binHistory", json!({"bin":70})).unwrap()["revisions"][0][1].clone();
+    rename(&mut s, 70, "Today's cuts");
+    s.execute("file.save", json!({})).unwrap();
+    let head = fs::read(&path).unwrap();
+    let listing = s.execute("project.binHistory", json!({"revision":rev})).unwrap();
+    assert!(listing["bins"].as_array().unwrap().iter().any(|r| r["id"] == 70 && r["name"] == "A"));
+    let page = s.execute("project.binHistory", json!({"revision":rev,"bin":70})).unwrap();
+    assert_eq!(page["name"], "A");
+    let rows = page["rows"].as_array().unwrap();
+    assert!(rows.iter().any(|r| r["item"] == 21 && r["reference"] == false));
+    assert!(rows.iter().any(|r| r["item"] == 5 && r["reference"] == true));
+    assert_eq!(fs::read(path).unwrap(), head);
+    assert_eq!(name(&s, 70), "Today's cuts");
+}

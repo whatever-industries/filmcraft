@@ -96,6 +96,8 @@ pub struct ProjectPanelUi {
     /// Actual bin row clicked, since one source can be shown in several bins.
     #[serde(skip)]
     pub row_origin: Option<(ItemId, BinId)>,
+    #[serde(skip)]
+    pub history_browser: Option<super::bin_history::Browser>,
     pub rename: Option<Rename>,
     pub dialog: Option<ProjectDialog>,
     pub hover: Option<Hover>,
@@ -867,6 +869,10 @@ pub fn panel_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui) -> bool {
     let pp = app.session.prefs.project_panel.clone();
     let inst = shown_inst(app);
     let v = view_of(app, inst);
+    if app.session.is_modular_document() && super::bin_history::button(app, ui, "project.menu.projectHistory", tl!("Project History")) {
+        super::bin_history::open(app, None);
+        return true;
+    }
     let has_sel = !app.session.state.project_selection.is_empty() || app.ui.project_panel.selected_bin.is_some();
     let clear = crate::panels::project_views::clear_params(&app.session.state.project_selection, app.ui.project_panel.selected_bin);
     let has_project_path = app.session.path.is_some();

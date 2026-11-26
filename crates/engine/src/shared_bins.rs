@@ -63,6 +63,7 @@ impl Session {
             | "project.view.get"
             | "project.view.set"
             | "project.referenceClips"
+            | "project.binHistory"
             | "sequence.inspect"
             | "source.inspect"
             | "sequence.open"

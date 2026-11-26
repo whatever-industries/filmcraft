@@ -10,6 +10,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+pub mod bin_history;
 pub mod bins;
 pub mod compare;
 mod paths;

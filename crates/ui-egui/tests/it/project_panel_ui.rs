@@ -1830,3 +1830,38 @@ fn new_items_land_in_the_bin_of_the_panel_they_were_made_in() {
     let id = newest(&mut d);
     assert_eq!(parent(&mut d, id), Some(filmcraft_project::BinId(other)), "no bin: the shown one");
 }
+
+#[test]
+fn historical_bin_opens_from_project_and_live_bin_and_toggles_reference_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut demo = demo_session();
+    let cut = demo.state.active_sequence.unwrap();
+    let cuts = demo.project.root.parent_of(cut).unwrap();
+    let source = demo.execute("project.referenceClips", json!({"bin":cuts})).unwrap()["items"][0].clone();
+    let file = dir.path().join("demo.fcproj");
+    demo.execute("file.saveAs", json!({"path":file})).unwrap();
+    let folder = dir.path().join("folder");
+    filmcraft_format::project_folder::pack(&file, &folder, filmcraft_format::atomic_write_new).unwrap();
+    let mut s = Session::desktop_project_editor(filmcraft_engine::autosave::AutosaveConfig::new(dir.path().join("data"))).unwrap();
+    s.execute("file.open", json!({"path":folder.join("project.fcmod")})).unwrap();
+    let mut d = Driver::with(s);
+    d.ok("ui.panel.show", json!({"panel":"Project"}));
+    d.ok("ui.set", json!({"focused":"Project"}));
+    d.ok("ui.menu.invoke", json!({"id":"window.maximizeFrame"}));
+    d.exec("project.view.set", json!({"view":"list","showReferenceClips":false}));
+    d.frames(2);
+    d.ok("ui.click", json!({"id":format!("project.bin.{}",cuts.0),"button":"right"}));
+    d.click("project.binMenu.history");
+    d.click("binHistory.revision.0");
+    assert!(d.has(&format!("binHistory.item.{}", cut.0)));
+    let reference = format!("binHistory.item.{source}");
+    assert!(!d.has(&reference));
+    d.click("binHistory.references");
+    assert!(d.has(&reference));
+    d.click("binHistory.close");
+    d.click("panel.menu.Project");
+    d.click("project.menu.projectHistory");
+    d.click("binHistory.revision.0");
+    d.click(&format!("binHistory.bin.{}", cuts.0));
+    assert!(d.has(&format!("binHistory.item.{}", cut.0)));
+}

@@ -15,6 +15,7 @@ fn push(app: &mut FilmcraftApp, id: &str, r: &egui::Response, label: &str) {
 }
 
 pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
+    super::bin_history::show(app, ctx);
     let Some(mut d) = app.ui.project_panel.dialog.clone() else { return };
     crate::widgets::revert_drag_on_escape(ctx, egui::Id::unique("project-dialog-before-drag"), &mut d);
     let mut close = false;

@@ -442,6 +442,10 @@ fn item_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, id: ItemId, kind: &ItemK
 }
 
 fn bin_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, v: &View, bin: u64, actions: &mut Actions) {
+    if app.session.is_modular_document() && super::bin_history::button(app, ui, "project.binMenu.history", tl!("Bin History")) {
+        super::bin_history::open(app, Some(bin));
+        ui.close();
+    }
     for (label, how) in [(tl!("Open in Place"), "inPlace"), (tl!("Open in New Tab"), "newTab"), (tl!("Open in New Window"), "newWindow")] {
         let b = ui.button(label);
         app.auto.add(&format!("{}.binMenu.{how}", v.prefix), b.rect, label);
