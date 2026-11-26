@@ -97,6 +97,26 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
         #[cfg(not(target_arch = "wasm32"))]
         query("project.binHistory", "Bin History", &[], None, r#"{"revision":digest?,"bin":id?}"#, always, crate::bin_history::browse),
         #[cfg(not(target_arch = "wasm32"))]
+        query(
+            "project.previewExternalBin",
+            "Preview Saved Bin",
+            &[],
+            None,
+            r#"{"folder":str,"revision":digest,"sourceBin":id}"#,
+            always,
+            crate::bin_history::preview_external,
+        ),
+        #[cfg(not(target_arch = "wasm32"))]
+        spec(
+            "project.importExternalBin",
+            "Import Saved Bin",
+            &[],
+            None,
+            r#"{"folder":str,"revision":digest,"sourceBin":id,"head":digest,"bin":id,"epoch":int}"#,
+            always,
+            crate::bin_history::import_external,
+        ),
+        #[cfg(not(target_arch = "wasm32"))]
         spec(
             "project.pasteFromHistory",
             "Paste from Bin History",

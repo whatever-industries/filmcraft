@@ -157,13 +157,13 @@ fn attachment_name(root: &Value, items: &Value) -> io::Result<String> {
     Err(invalid("no available bin name"))
 }
 
-struct BinSubset {
+pub(super) struct BinSubset {
     root: u64,
-    records: ProjectRecords,
-    filed: BTreeSet<u64>,
+    pub(super) records: ProjectRecords,
+    pub(super) filed: BTreeSet<u64>,
 }
 
-fn read_subset(folder: &Path, manifest: &Manifest, selected: u64) -> io::Result<BinSubset> {
+pub(super) fn read_subset(folder: &Path, manifest: &Manifest, selected: u64) -> io::Result<BinSubset> {
     let mut budget = MAX_PROJECT_BYTES;
     let (envelope, root) = recovery::metadata(folder, manifest, &mut budget)?;
     let ids = record_index(&manifest.bins);
@@ -201,6 +201,7 @@ pub struct NamedRecord {
 
 #[derive(Debug, serde::Serialize)]
 pub struct BinPreview {
+    pub head: String,
     pub revision: String,
     pub selected: u64,
     pub bins: Vec<NamedRecord>,
@@ -210,7 +211,7 @@ pub struct BinPreview {
 
 /// Inventory the selected saved subtree and the additional items its contents need.
 pub fn preview_bin(folder: &Path, revision: &str, selected: u64) -> io::Result<BinPreview> {
-    let manifest = recovery::at(folder, revision)?;
+    let (head, manifest) = recovery::at_with_head(folder, revision)?;
     let BinSubset { records, filed, .. } = read_subset(folder, &manifest, selected)?;
     let bins = records.bins.values().map(NamedRecord::deserialize).collect::<Result<_, _>>()?;
     let mut filed_items = Vec::new();
@@ -219,7 +220,7 @@ pub fn preview_bin(folder: &Path, revision: &str, selected: u64) -> io::Result<B
         let group = if filed.contains(&id) { &mut filed_items } else { &mut referenced_items };
         group.push(NamedRecord::deserialize(item)?);
     }
-    Ok(BinPreview { revision: revision.to_owned(), selected, bins, filed_items, referenced_items })
+    Ok(BinPreview { head, revision: revision.to_owned(), selected, bins, filed_items, referenced_items })
 }
 
 pub fn rescue_bin(folder: &Path, revision: &str, selected: u64, output: &Path) -> io::Result<()> {

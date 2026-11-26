@@ -13,6 +13,7 @@ use std::path::Path;
 pub mod bin_history;
 pub mod bins;
 pub mod compare;
+pub mod exchange;
 mod history_luts;
 pub mod history_paste;
 mod paths;

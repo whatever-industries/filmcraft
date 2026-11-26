@@ -65,6 +65,7 @@ impl Session {
             | "project.referenceClips"
             | "project.binHistory"
             | "project.compareBinVersions"
+            | "project.previewExternalBin"
             | "project.findSavedItemUses"
             | "sequence.inspect"
             | "source.inspect"

@@ -191,73 +191,7 @@ pub fn prepare(folder: &Path, revision: &str, selected: &[u64], bin: u64, curren
     if !live.bins.contains_key(&bin) {
         return Err(invalid(format!("missing destination bin {bin}")));
     }
-    let mut copies = BTreeMap::<u64, Vec<u64>>::new();
-    for (&id, item) in &live.items {
-        let origin = &item[ORIGIN];
-        if origin["revision"] == revision
-            && let Some(old) = origin["item"].as_u64()
-        {
-            copies.entry(old).or_default().push(id);
-        }
-    }
-    let mut mapped = BTreeMap::new();
-    let mut created = BTreeSet::new();
-    for old in dependency_order(&historical, selected)? {
-        let mut raw = historical.items[&old].clone();
-        remap_links(&mut raw, &mapped)?;
-        let mut side = sidecars(&historical, old);
-        for record in [&mut raw, &mut side] {
-            super::history_luts::restore(record, &historical, &mut live, &mut next)?;
-        }
-        let signature = fingerprint(&raw, &side)?;
-        // Only media and subclips support an additional ordinary filing.
-        let share_filing = raw.pointer("/kind/Media").is_some() || raw.pointer("/kind/Subclip").is_some();
-        let force_new = selected_set.contains(&old) && !share_filing;
-        if !force_new {
-            let mut reuse = None;
-            for &id in copies.get(&old).into_iter().flatten() {
-                let candidate = &live.items[&id];
-                let origin = &candidate[ORIGIN];
-                if origin["source"] == signature && origin["copy"] == fingerprint(candidate, &sidecars(&live, id))? {
-                    reuse = Some(id);
-                    break;
-                }
-            }
-            if let Some(id) = reuse {
-                mapped.insert(old, id);
-                continue;
-            }
-            if let Some(existing) = live.items.get(&old)
-                && fingerprint(existing, &sidecars(&live, old))? == signature
-            {
-                mapped.insert(old, old);
-                continue;
-            }
-        }
-        let id = allocate(&mut next)?;
-        if live.items.contains_key(&id) {
-            return Err(invalid(format!("allocated item {id} already exists")));
-        }
-        fresh_local_ids(&mut raw, &mut next)?;
-        raw["id"] = id.into();
-        raw["created"] = id.into();
-        if let Some(obj) = raw.as_object_mut() {
-            obj.remove("field_edits");
-        }
-        let copy = fingerprint(&raw, &side)?;
-        raw[ORIGIN] = json!({"revision":revision,"item":old,"source":signature,"copy":copy});
-        for kind in recovery::SIDECARS {
-            if let Some(v) = side.get(kind) {
-                live.envelope["project"][kind][id.to_string()] = v.clone();
-            }
-        }
-        live.items.insert(id, raw);
-        created.insert(id);
-        mapped.insert(old, id);
-    }
-    let inventory: Vec<_> = live.items.keys().copied().collect();
-    live.envelope["project"]["items"] = json!(inventory);
-    live.envelope["project"]["next_id"] = next.into();
+    let CopiedItems { mapped, created } = copy_items(&historical, selected, CopyOrigin::History(revision), &mut live, &mut next)?;
     let destination = live.bins.get_mut(&bin).ok_or_else(|| invalid("destination bin disappeared"))?;
     let ids: Vec<_> = selected.iter().map(|old| mapped[old]).collect();
     for &id in &ids {
@@ -274,4 +208,98 @@ pub fn prepare(folder: &Path, revision: &str, selected: &[u64], bin: u64, curren
         }
     }
     Ok(Paste { document: encode_at(folder, live, &folder.join(ROOT))?, selected: ids, next_id: next })
+}
+
+pub(super) enum CopyOrigin<'a> {
+    History(&'a str),
+    External(&'a str),
+}
+
+pub(super) struct CopiedItems {
+    pub mapped: BTreeMap<u64, u64>,
+    pub created: BTreeSet<u64>,
+}
+
+pub(super) fn copy_items(
+    historical: &ProjectRecords,
+    selected: &[u64],
+    origin: CopyOrigin<'_>,
+    live: &mut ProjectRecords,
+    next: &mut u64,
+) -> io::Result<CopiedItems> {
+    let selected_set: BTreeSet<_> = selected.iter().copied().collect();
+    let (origin_key, origin_id) = match origin {
+        CopyOrigin::History(revision) => ("revision", revision),
+        CopyOrigin::External(folder) => ("folder", folder),
+    };
+    let foreign = matches!(origin, CopyOrigin::External(_));
+    let mut copies = BTreeMap::<u64, Vec<u64>>::new();
+    for (&id, item) in &live.items {
+        let origin = &item[ORIGIN];
+        if origin[origin_key] == origin_id
+            && let Some(old) = origin["item"].as_u64()
+        {
+            copies.entry(old).or_default().push(id);
+        }
+    }
+    let mut mapped = BTreeMap::new();
+    let mut created = BTreeSet::new();
+    for old in dependency_order(historical, selected)? {
+        let mut raw = historical.items[&old].clone();
+        remap_links(&mut raw, &mapped)?;
+        let mut side = sidecars(historical, old);
+        for record in [&mut raw, &mut side] {
+            super::history_luts::restore(record, historical, live, next)?;
+        }
+        let signature = fingerprint(&raw, &side)?;
+        // Only media and subclips support an additional ordinary filing.
+        let share_filing = raw.pointer("/kind/Media").is_some() || raw.pointer("/kind/Subclip").is_some();
+        let force_new = !share_filing && (foreign || selected_set.contains(&old));
+        if !force_new {
+            let mut reuse = None;
+            for &id in copies.get(&old).into_iter().flatten() {
+                let candidate = &live.items[&id];
+                let origin = &candidate[ORIGIN];
+                if origin["source"] == signature && origin["copy"] == fingerprint(candidate, &sidecars(live, id))? {
+                    reuse = Some(id);
+                    break;
+                }
+            }
+            if let Some(id) = reuse {
+                mapped.insert(old, id);
+                continue;
+            }
+            if !foreign
+                && let Some(existing) = live.items.get(&old)
+                && fingerprint(existing, &sidecars(live, old))? == signature
+            {
+                mapped.insert(old, old);
+                continue;
+            }
+        }
+        let id = allocate(next)?;
+        if live.items.contains_key(&id) {
+            return Err(invalid(format!("allocated item {id} already exists")));
+        }
+        fresh_local_ids(&mut raw, next)?;
+        raw["id"] = id.into();
+        raw["created"] = id.into();
+        if let Some(obj) = raw.as_object_mut() {
+            obj.remove("field_edits");
+        }
+        let copy = fingerprint(&raw, &side)?;
+        raw[ORIGIN] = json!({(origin_key):origin_id,"item":old,"source":signature,"copy":copy});
+        for kind in recovery::SIDECARS {
+            if let Some(v) = side.get(kind) {
+                live.envelope["project"][kind][id.to_string()] = v.clone();
+            }
+        }
+        live.items.insert(id, raw);
+        created.insert(id);
+        mapped.insert(old, id);
+    }
+    let inventory: Vec<_> = live.items.keys().copied().collect();
+    live.envelope["project"]["items"] = json!(inventory);
+    live.envelope["project"]["next_id"] = (*next).into();
+    Ok(CopiedItems { mapped, created })
 }

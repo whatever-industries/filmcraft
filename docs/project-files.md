@@ -409,6 +409,14 @@ to their original locations. The command reads the selected subtree and its
 required records, so a damaged sibling or parent can be bypassed using the bin
 ID. A missing required record stops the export before the destination is created.
 
+### Import a saved bin from another modular project
+
+Open the destination with the local project-folder CLI. Call `project.previewExternalBin` with the source `folder`, saved `revision` digest and `sourceBin` ID. Pass those same values to `project.importExternalBin`, together with the preview’s `head` and `epoch` and the destination parent’s `bin` ID. The result gives the new bin ID. If the source publishes another save, preview again. You can still choose the earlier revision.
+
+Import copies the hierarchy with fresh bin and sequence IDs. Off-bin dependencies remain available through Show Reference Clips. Original and proxy paths continue to resolve from the destination, including offline paths. Repeat imports from the same source folder can reuse a matching media clip or subclip. Changing its metadata in either project makes the next import keep a separate source. Moving the source folder also starts a separate identity for subsequent imports.
+
+The destination requires a whole-project writer because the edit creates a bin hierarchy. Undo and Redo cover the entire import. Explicit Save publishes the destination revision.
+
 ## Saving is atomic
 
 Every write of a project file, auto-save, recovery snapshot or preferences file goes through

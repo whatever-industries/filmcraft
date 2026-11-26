@@ -55,12 +55,51 @@ pub(super) fn browse(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 pub(super) fn paste(s: &mut Session, p: &Value) -> Result<Value> {
-    use crate::folder_edit::FolderBase;
-    use filmcraft_format::project_folder::{EditOrigin, ROOT, history_paste};
-    use std::sync::Arc;
+    use filmcraft_format::project_folder::history_paste;
     let bin = p["bin"].as_u64().ok_or_else(|| error("choose a destination bin"))?;
     let revision = p["revision"].as_str().ok_or_else(|| error("expected a saved revision"))?;
     let ids: Vec<u64> = serde::Deserialize::deserialize(&p["items"]).map_err(error)?;
+    apply_edit(s, p, bin, "Paste from Bin History", |directory, raw, next| {
+        let paste = history_paste::prepare(directory, revision, &ids, bin, raw, next)?;
+        Ok((paste.document, paste.next_id, json!({"items":paste.selected})))
+    })
+}
+
+pub(super) fn preview_external(s: &mut Session, p: &Value) -> Result<Value> {
+    s.history_folder()?;
+    let folder = p["folder"].as_str().ok_or_else(|| error("expected a source folder"))?;
+    let revision = p["revision"].as_str().ok_or_else(|| error("expected a saved revision"))?;
+    let bin = p["sourceBin"].as_u64().ok_or_else(|| error("choose a source bin"))?;
+    let mut result = serde_json::to_value(bins::preview_bin(folder.as_ref(), revision, bin).map_err(error)?).map_err(error)?;
+    result["epoch"] = s.document_epoch.into();
+    Ok(result)
+}
+
+pub(super) fn import_external(s: &mut Session, p: &Value) -> Result<Value> {
+    use filmcraft_format::project_folder::exchange::Import;
+    let request = Import {
+        folder: p["folder"].as_str().ok_or_else(|| error("expected a source folder"))?.as_ref(),
+        revision: p["revision"].as_str().ok_or_else(|| error("expected a saved revision"))?,
+        head: p["head"].as_str().ok_or_else(|| error("preview the source bin first"))?,
+        bin: p["sourceBin"].as_u64().ok_or_else(|| error("choose a source bin"))?,
+    };
+    let bin = p["bin"].as_u64().ok_or_else(|| error("choose a destination bin"))?;
+    apply_edit(s, p, bin, "Import Saved Bin", |directory, raw, next| {
+        let imported = request.prepare(directory, bin, raw, next)?;
+        Ok((imported.document, imported.next_id, json!({"bin":imported.id})))
+    })
+}
+
+fn apply_edit(
+    s: &mut Session,
+    p: &Value,
+    bin: u64,
+    label: &'static str,
+    prepare: impl FnOnce(&std::path::Path, &[u8], u64) -> std::io::Result<(Vec<u8>, u64, Value)>,
+) -> Result<Value> {
+    use crate::folder_edit::FolderBase;
+    use filmcraft_format::project_folder::{EditOrigin, ROOT};
+    use std::sync::Arc;
     if p["epoch"].as_u64() != Some(s.document_epoch) {
         return Err(error("the copied items belong to a different document session"));
     }
@@ -74,24 +113,24 @@ pub(super) fn paste(s: &mut Session, p: &Value) -> Result<Value> {
     let raw = f.baseline.origin.checkpoint(directory, &f.baseline.typed(), &current, &directory.join(ROOT)).map_err(error)?;
     let raw = s.history_document(raw, &current)?;
     let next = if f.snapshot.is_shared() { f.snapshot.cursor() } else { s.project.next_id };
-    let paste = history_paste::prepare(directory, revision, &ids, bin, &raw, next).map_err(error)?;
-    let mut project = filmcraft_format::decode(&paste.document).map_err(error)?.project;
+    let (document, cursor, result) = prepare(directory, &raw, next).map_err(error)?;
+    let mut project = filmcraft_format::decode(&document).map_err(error)?.project;
     // The stock reader advances its allocator past all visible IDs. A bin writer
     // must continue inside its own reservation even when a peer has higher IDs.
     if f.snapshot.scope().is_some() {
-        project.next_id = paste.next_id;
+        project.next_id = cursor;
     }
     if project != *s.project {
-        s.edit("Paste from Bin History", |p, _| {
+        s.edit(label, |p, _| {
             *p = project;
             Ok(())
         })?;
-        let base = FolderBase { origin: EditOrigin::Recovered(paste.document.into()), project: s.project.clone(), view };
+        let base = FolderBase { origin: EditOrigin::Recovered(document.into()), project: s.project.clone(), view };
         if let Some(folder) = &mut s.editing_folder {
             folder.baseline = Arc::new(base);
         }
     }
-    Ok(json!({"items":paste.selected}))
+    Ok(result)
 }
 
 pub(super) fn find_saved_item_uses(s: &mut Session, p: &Value) -> Result<Value> {
@@ -166,3 +205,6 @@ fn compare(folder: &std::path::Path, p: &Value) -> Result<Value> {
     result["from"] = from.into();
     Ok(result)
 }
+
+#[cfg(test)]
+mod exchange_tests;

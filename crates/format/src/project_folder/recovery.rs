@@ -47,15 +47,21 @@ pub fn history(folder: &Path, mut visit: impl FnMut(u64, &str) -> io::Result<()>
 }
 
 pub(super) fn at(folder: &Path, requested: &str) -> io::Result<Manifest> {
+    Ok(at_with_head(folder, requested)?.1)
+}
+
+pub(super) fn at_with_head(folder: &Path, requested: &str) -> io::Result<(String, Manifest)> {
     check_hash(requested)?;
+    let mut head = None;
     let mut found = None;
     walk(folder, |hash, manifest| {
+        head.get_or_insert_with(|| hash.to_owned());
         if requested == hash {
             found = Some(manifest);
         }
         Ok(found.is_some())
     })?;
-    found.ok_or_else(|| invalid("selected revision is outside the current project history"))
+    head.zip(found).ok_or_else(|| invalid("selected revision is outside the current project history"))
 }
 
 pub(super) fn references(item: &ProjectItem, pending: &mut Vec<u64>) {
