@@ -187,9 +187,21 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
         }
         egui::ScrollArea::both().max_height(360.0).show(ui, |ui| {
             if let Some(revs) = b.page["revisions"].as_array() {
+                if let Some(error) = b.page["milestoneError"].as_str() {
+                    let message = format!("{} · {error}", tl!("Milestone labels unavailable"));
+                    let response = ui.label(&message);
+                    if ui.ctx().has_accesskit_node(response.id) {
+                        ui.ctx().accesskit_node_builder(response.id, |node| node.set_live(egui::accesskit::Live::Polite));
+                    }
+                    app.auto.add("binHistory.milestoneError", response.rect, &message);
+                }
                 for rev in revs {
                     ui.horizontal(|ui| {
-                        let label = format!("{} {}", tl!("Revision"), rev[0]);
+                        let mut label = format!("{} {}", tl!("Revision"), rev[0]);
+                        if let Some(milestone) = rev[1].as_str().and_then(|hash| b.page["milestoneLabels"][hash].as_str()) {
+                            label.push_str(" · ");
+                            label.push_str(milestone);
+                        }
                         if button(app, ui, &format!("binHistory.revision.{}", rev[0]), &label) {
                             let mut p = json!({"revision":rev[1]});
                             if let Some(id) = b.initial_bin {

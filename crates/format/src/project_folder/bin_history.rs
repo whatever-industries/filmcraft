@@ -1,10 +1,10 @@
 //! Read one historical bin at a time without opening it for editing.
 use super::{
     bins::{self, Entry},
-    invalid, record_index, recovery,
+    invalid, pins, record_index, recovery,
 };
 use filmcraft_project::{Bin, BinEntry, BinId, ItemId, Project};
-use std::{io, path::Path};
+use std::{collections::BTreeMap, io, path::Path};
 
 pub fn revisions(folder: &Path, bin: Option<u64>) -> io::Result<Vec<(u64, String)>> {
     let mut entries = Vec::new();
@@ -15,6 +15,21 @@ pub fn revisions(folder: &Path, bin: Option<u64>) -> io::Result<Vec<(u64, String
         Ok(false)
     })?;
     Ok(entries)
+}
+
+/// Match optional display labels to an already verified revision list without walking history again.
+pub fn milestone_labels(folder: &Path, revisions: &[(u64, String)]) -> io::Result<BTreeMap<String, String>> {
+    let mut labels: BTreeMap<_, _> = pins::read(folder)?.into_iter().map(|pin| (pin.revision, pin.label)).collect();
+    let mut visible = BTreeMap::new();
+    for (_, hash) in revisions {
+        if labels.is_empty() {
+            break;
+        }
+        if let Some((hash, label)) = labels.remove_entry(hash) {
+            visible.insert(hash, label);
+        }
+    }
+    Ok(visible)
 }
 
 /// A shallow bin plus only the items needed to render its rows and reference clips.

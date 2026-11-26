@@ -11,7 +11,14 @@ pub(super) fn browse(s: &mut Session, p: &Value) -> Result<Value> {
     let folder = s.editing_folder.as_ref().ok_or_else(|| error("open a modular project first"))?.snapshot.directory();
     let bin = p.get("bin").map(|v| v.as_u64().ok_or_else(|| error("expected a bin ID"))).transpose()?;
     let Some(revision) = p.get("revision") else {
-        return Ok(json!({"epoch":s.document_epoch,"revisions":bin_history::revisions(folder,bin).map_err(error)?}));
+        let revisions = bin_history::revisions(folder, bin).map_err(error)?;
+        let labels = bin_history::milestone_labels(folder, &revisions);
+        let mut page = json!({"epoch":s.document_epoch,"revisions":revisions});
+        match labels {
+            Ok(labels) => page["milestoneLabels"] = json!(labels),
+            Err(e) => page["milestoneError"] = e.to_string().into(),
+        }
+        return Ok(page);
     };
     let revision = revision.as_str().ok_or_else(|| error("expected revision digest"))?;
     let Some(bin) = bin else {
