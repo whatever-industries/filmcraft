@@ -2,7 +2,7 @@
 use filmcraft_format::project_folder as converter;
 
 use converter::{
-    bins::{list_bins, rescue_bin},
+    bins::{list_bins, preview_bin, rescue_bin},
     compare::{Selection, compare},
     pack,
     recovery::{history, rescue, restore_copy},
@@ -49,6 +49,16 @@ fn run() -> io::Result<()> {
         return list_bins(Path::new(folder), revision, io::stdout().lock());
     }
     if let [command, folder, revision, id] = args.as_slice()
+        && command == "preview-bin"
+        && let (Some(revision), Some(bin)) = (revision.to_str(), id.to_str().and_then(|s| s.parse().ok()))
+    {
+        use std::io::Write;
+        let preview = preview_bin(Path::new(folder), revision, bin)?;
+        let mut out = io::stdout().lock();
+        serde_json::to_writer(&mut out, &preview)?;
+        return writeln!(out);
+    }
+    if let [command, folder, revision, id] = args.as_slice()
         && command == "find-uses"
         && let (Some(revision), Some(item)) = (revision.to_str(), id.to_str().and_then(|s| s.parse().ok()))
     {
@@ -85,7 +95,7 @@ fn run() -> io::Result<()> {
     }
     Err(io::Error::new(
         io::ErrorKind::InvalidInput,
-        "usage: project_folder pack SOURCE.fcproj NEW_FOLDER | unpack FOLDER NEW_FILE.fcproj | checkout FOLDER NEW_FILE.fcproj | save FOLDER BASE_REVISION EDITED.fcproj | history FOLDER | compare-bin FOLDER FROM TO BIN_ID | compare-sequence FOLDER FROM TO SEQUENCE_ID | restore-copy FOLDER BASE_REVISION HISTORICAL_REVISION SEQUENCE_ID | rescue FOLDER REVISION SEQUENCE_ID NEW_FILE.fcproj | list-bins FOLDER REVISION | find-uses FOLDER REVISION ITEM_ID | rescue-bin FOLDER REVISION BIN_ID NEW.fcproj",
+        "usage: project_folder pack SOURCE.fcproj NEW_FOLDER | unpack FOLDER NEW_FILE.fcproj | checkout FOLDER NEW_FILE.fcproj | save FOLDER BASE_REVISION EDITED.fcproj | history FOLDER | compare-bin FOLDER FROM TO BIN_ID | compare-sequence FOLDER FROM TO SEQUENCE_ID | restore-copy FOLDER BASE_REVISION HISTORICAL_REVISION SEQUENCE_ID | rescue FOLDER REVISION SEQUENCE_ID NEW_FILE.fcproj | list-bins FOLDER REVISION | find-uses FOLDER REVISION ITEM_ID | preview-bin FOLDER REVISION BIN_ID | rescue-bin FOLDER REVISION BIN_ID NEW.fcproj",
     ))
 }
 

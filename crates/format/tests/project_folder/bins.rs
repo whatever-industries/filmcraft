@@ -1,4 +1,4 @@
-use super::converter::bins::{list_bins, rescue_bin};
+use super::converter::bins::{list_bins, preview_bin, rescue_bin};
 use super::{ROOT, checkout, current, pack, save, write_doc};
 use filmcraft_format::atomic_write_new;
 use serde_json::{Value, json};
@@ -96,6 +96,41 @@ fn choose_a_saved_bin_after_rename_or_deletion_even_with_an_unreadable_ancestor(
 }
 
 #[test]
+fn preview_uses_the_chosen_revision_and_distinguishes_filings_from_shared_dependencies() {
+    let tmp = tempdir().unwrap();
+    let mut doc = sample();
+    let (folder, old) = start(tmp.path(), &doc);
+    // The two cuts already use item 5. Filing it here changes how it travels with this bin.
+    doc["project"]["root"]["children"][0]["Bin"]["filed_sources"] = json!([5]);
+    doc["project"]["items"]["5"]["name"] = json!("Renamed interview");
+    write_doc(&tmp.path().join("edited"), &doc);
+    let new = save(&folder, &old, &tmp.path().join("edited")).unwrap();
+    let before = snapshot(&folder);
+    for (rev, filed_here) in [(&old, false), (&new, true)] {
+        let preview = preview_bin(&folder, rev, 1).unwrap();
+        assert_eq!(&preview.revision, rev);
+        assert_eq!(preview.selected, 1);
+        assert_eq!(preview.bins.iter().map(|row| (row.id, row.name.as_str())).collect::<Vec<_>>(), [(1, "Referenced Items"), (2, "Dailies")]);
+        let export = tmp.path().join(format!("{rev}.fcproj"));
+        rescue_bin(&folder, rev, 1, &export).unwrap();
+        let project = filmcraft_format::decode(&fs::read(export).unwrap()).unwrap().project;
+        let items: BTreeMap<_, _> = preview.filed_items.iter().chain(&preview.referenced_items).map(|row| (row.id, row.name.as_str())).collect();
+        assert_eq!(items, project.items.values().map(|item| (item.id.0, item.name.as_str())).collect());
+        let ids = |rows: &[super::converter::bins::NamedRecord]| rows.iter().map(|row| row.id).collect::<Vec<_>>();
+        if filed_here {
+            assert_eq!(ids(&preview.filed_items), [5, 21, 73]);
+            assert!(preview.referenced_items.is_empty());
+            assert_eq!(items[&5], "Renamed interview");
+        } else {
+            assert_eq!(ids(&preview.filed_items), [21, 73]);
+            assert_eq!(ids(&preview.referenced_items), [5]);
+            assert_eq!(items[&5], sample()["project"]["items"]["5"]["name"].as_str().unwrap());
+        }
+    }
+    assert_eq!(snapshot(&folder), before);
+}
+
+#[test]
 fn bin_export_preserves_order_shared_sources_offline_paths_and_the_source_folder() {
     let tmp = tempdir().unwrap();
     let doc = sample();
@@ -110,6 +145,7 @@ fn bin_export_preserves_order_shared_sources_offline_paths_and_the_source_folder
     let mut m = manifest(&folder);
     fs::remove_file(folder.join(payload(&mut m, "bins", 3).as_str().unwrap())).unwrap();
     let before = snapshot(&folder);
+    assert_eq!(preview_bin(&folder, &base, 1).unwrap().referenced_items[0].id, 5);
     rescue_bin(&folder, &base, 1, &export).unwrap();
     let bytes = fs::read(&export).unwrap();
     let result: Value = serde_json::from_slice(&bytes).unwrap();
@@ -154,6 +190,7 @@ fn required_damage_or_a_bin_cycle_refuses_publication() {
     let src = folder.join(payload(&mut m, "items", 5).as_str().unwrap());
     fs::remove_file(src).unwrap();
     let before = snapshot(&folder);
+    assert!(preview_bin(&folder, &base, 1).unwrap_err().to_string().contains("item 5"));
     assert!(rescue_bin(&folder, &base, 1, &out).unwrap_err().to_string().contains("item 5"));
     assert!(!out.exists());
     assert_eq!(snapshot(&folder), before);

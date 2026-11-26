@@ -1,6 +1,6 @@
 //! Read a single revision's bin hierarchy. Rescue walks outward from the requested
 //! bin, so an unreadable sibling (or parent) cannot prevent an independent export.
-use super::{RECORD_LIMIT, RecordIndex, checked_bytes, document_at, invalid, load_payload, record_index, recovery};
+use super::{Manifest, ProjectRecords, RECORD_LIMIT, RecordIndex, checked_bytes, document_at, invalid, load_payload, record_index, recovery};
 use crate::{MAX_PROJECT_BYTES, atomic_write_new};
 use filmcraft_project::Project;
 use serde::Deserialize;
@@ -157,11 +157,15 @@ fn attachment_name(root: &Value, items: &Value) -> io::Result<String> {
     Err(invalid("no available bin name"))
 }
 
-pub fn rescue_bin(folder: &Path, revision: &str, selected: u64, output: &Path) -> io::Result<()> {
-    super::outside_folder(folder, output)?;
-    let manifest = recovery::at(folder, revision)?;
+struct BinSubset {
+    root: u64,
+    records: ProjectRecords,
+    filed: BTreeSet<u64>,
+}
+
+fn read_subset(folder: &Path, manifest: &Manifest, selected: u64) -> io::Result<BinSubset> {
     let mut budget = MAX_PROJECT_BYTES;
-    let (envelope, root) = recovery::metadata(folder, &manifest, &mut budget)?;
+    let (envelope, root) = recovery::metadata(folder, manifest, &mut budget)?;
     let ids = record_index(&manifest.bins);
     let mut bins = BTreeMap::new();
     let mut members = BTreeSet::new();
@@ -184,16 +188,52 @@ pub fn rescue_bin(folder: &Path, revision: &str, selected: u64, output: &Path) -
         }
         bins.insert(id, value);
     }
-    if selected != root {
-        let name = envelope.pointer("/project/name").and_then(Value::as_str).ok_or_else(|| invalid("missing project name"))?;
-        bins.insert(root, json!({"id":root,"name":name,"children":[{"Bin":selected}]}));
+    let mut records = recovery::extract_items(folder, manifest, envelope, &mut budget, members.iter().copied().collect())?;
+    records.bins = bins;
+    Ok(BinSubset { root, records, filed: members })
+}
+
+#[derive(Debug, Deserialize, serde::Serialize)]
+pub struct NamedRecord {
+    pub id: u64,
+    pub name: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct BinPreview {
+    pub revision: String,
+    pub selected: u64,
+    pub bins: Vec<NamedRecord>,
+    pub filed_items: Vec<NamedRecord>,
+    pub referenced_items: Vec<NamedRecord>,
+}
+
+/// Inventory the selected saved subtree and the additional items its contents need.
+pub fn preview_bin(folder: &Path, revision: &str, selected: u64) -> io::Result<BinPreview> {
+    let manifest = recovery::at(folder, revision)?;
+    let BinSubset { records, filed, .. } = read_subset(folder, &manifest, selected)?;
+    let bins = records.bins.values().map(NamedRecord::deserialize).collect::<Result<_, _>>()?;
+    let mut filed_items = Vec::new();
+    let mut referenced_items = Vec::new();
+    for (id, item) in records.items {
+        let group = if filed.contains(&id) { &mut filed_items } else { &mut referenced_items };
+        group.push(NamedRecord::deserialize(item)?);
     }
-    let mut records = recovery::extract_items(folder, &manifest, envelope, &mut budget, members.iter().copied().collect())?;
-    let external: Vec<_> = records.items.keys().filter(|id| !members.contains(id)).map(|id| json!({"Item":id})).collect();
-    if bins.len() + records.items.len() + usize::from(!external.is_empty()) > RECORD_LIMIT {
+    Ok(BinPreview { revision: revision.to_owned(), selected, bins, filed_items, referenced_items })
+}
+
+pub fn rescue_bin(folder: &Path, revision: &str, selected: u64, output: &Path) -> io::Result<()> {
+    super::outside_folder(folder, output)?;
+    let manifest = recovery::at(folder, revision)?;
+    let BinSubset { root, mut records, filed } = read_subset(folder, &manifest, selected)?;
+    if selected != root {
+        let name = records.envelope.pointer("/project/name").and_then(Value::as_str).ok_or_else(|| invalid("missing project name"))?;
+        records.bins.insert(root, json!({"id":root,"name":name,"children":[{"Bin":selected}]}));
+    }
+    let external: Vec<_> = records.items.keys().filter(|id| !filed.contains(id)).map(|id| json!({"Item":id})).collect();
+    if records.bins.len() + records.items.len() + usize::from(!external.is_empty()) > RECORD_LIMIT {
         return Err(invalid("recovered project exceeds the record limit"));
     }
-    records.bins = bins;
     let mut doc = document_at(folder, records, output)?;
     if !external.is_empty() {
         // The stock reader normalizes stale next_id using every retained track,

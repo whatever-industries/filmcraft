@@ -383,6 +383,7 @@ been renamed or deleted, choose a revision from before the change.
 
 ```sh
 project_folder list-bins FOLDER REVISION
+project_folder preview-bin FOLDER REVISION BIN_ID
 project_folder rescue-bin FOLDER REVISION BIN_ID NEW.fcproj
 ```
 
@@ -391,6 +392,13 @@ a `name`, and a `path` array from the root through that bin. Use the ID when
 names repeat. An unreadable bin has an ID and an error. A readable bin can
 have a null path if its ancestry cannot be verified. An incomplete listing
 exits unsuccessfully and still prints the entries it could read.
+
+Preview prints one JSON inventory for that save. `bins` lists the selected bin and
+its descendants, including empty bins. `filed_items` lists items explicitly filed
+anywhere in that subtree, including secondary filings. `referenced_items` lists
+additional items needed by those contents. Each list includes saved names and
+IDs in ID order. Two cuts using the same external source bring it along once.
+Preview reads project records, works with offline media, and needs no destination.
 
 Rescue writes a new standard project outside the source folder. The selected
 bin appears at the top level with its original child order, empty sub-bins,
