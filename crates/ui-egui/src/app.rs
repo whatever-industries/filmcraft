@@ -47,6 +47,8 @@ impl FilmcraftApp {
             hooks: HostHooks::default(),
             // Unsaved changes left by a session that died are offered first thing.
             dialog: recovery.then_some(Dialog::Recovery),
+            #[cfg(not(target_arch = "wasm32"))]
+            comparison_worker: Default::default(),
             updates_rt: Default::default(),
             file_dialogs,
             native_dialog: None,

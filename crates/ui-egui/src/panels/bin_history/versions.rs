@@ -1,6 +1,8 @@
 //! Compare pinned saves and copy through the ordinary Bin History clipboard.
 use super::{FilmcraftApp, button};
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(not(target_arch = "wasm32"))]
+use serde_json::json;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Comparison {
@@ -10,6 +12,7 @@ pub(super) struct Comparison {
     to: String,
     sequence: Option<u64>,
     bin_names: [String; 2],
+    pending: Option<super::worker::Pending>,
     report: Value,
     error: Option<String>,
 }
@@ -77,57 +80,87 @@ impl Comparison {
         None
     }
 
-    pub fn open(app: &mut FilmcraftApp, bin: u64, to: &str) -> Option<Self> {
-        let data = match app.session.execute("project.compareBinVersions", json!({"bin":bin,"to":to})) {
-            Ok(data) => data,
-            Err(e) => {
-                app.ui.status = e.to_string();
-                return None;
-            }
-        };
-        Some(Self {
+    pub fn open(app: &mut FilmcraftApp, ctx: &egui::Context, bin: u64, to: &str) -> Self {
+        let mut view = Self {
             bin,
-            revisions: serde_json::from_value(data["revisions"].clone()).ok()?,
-            from: data["from"].as_str().map(str::to_owned),
+            revisions: Vec::new(),
+            from: None,
             to: to.into(),
             sequence: None,
-            bin_names: Self::names(&data["report"]),
-            report: data["report"].clone(),
-            error: data["lookupError"].as_str().map(str::to_owned),
-        })
+            bin_names: Default::default(),
+            pending: None,
+            report: Value::Null,
+            error: None,
+        };
+        view.load(app, ctx);
+        view
     }
 
     fn names(report: &Value) -> [String; 2] {
         ["before_name", "after_name"].map(|key| report[key].as_str().unwrap_or_default().to_owned())
     }
 
-    fn load(&mut self, app: &mut FilmcraftApp) {
-        let Some(from) = &self.from else { return };
-        let mut params = json!({"bin":self.bin,"from":from,"to":self.to});
-        if let Some(seq) = self.sequence {
-            params["sequence"] = seq.into();
+    fn load(&mut self, app: &mut FilmcraftApp, ctx: &egui::Context) {
+        self.report = Value::Null;
+        self.pending = None;
+        self.error = None;
+        if self.sequence.is_none() {
+            self.bin_names = Default::default();
         }
-        match app.session.execute("project.compareBinVersions", params) {
-            Ok(data) => {
-                self.report = data["report"].clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut params = json!({"bin":self.bin,"to":self.to});
+            if let Some(from) = &self.from {
+                params["from"] = from.clone().into();
+            }
+            if let Some(seq) = self.sequence {
+                params["sequence"] = seq.into();
+            }
+            let work = app.session.prepare_bin_comparison(params).map_err(|e| e.to_string());
+            match work.and_then(|read| app.comparison_worker.submit(ctx, move || read().map_err(|e| e.to_string()))) {
+                Ok(pending) => self.pending = Some(pending),
+                Err(e) => self.error = Some(e),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (app, ctx);
+            self.error = Some(tl!("Bin comparison requires a local project folder").to_owned());
+        }
+    }
+
+    fn poll(&mut self) {
+        let Some(reply) = self.pending.as_ref().and_then(|p| p.poll()) else { return };
+        self.pending = None;
+        match reply {
+            Ok(mut data) => {
+                if let Some(list) = data.get_mut("revisions") {
+                    match serde_json::from_value(list.take()) {
+                        Ok(revisions) => self.revisions = revisions,
+                        Err(e) => {
+                            self.error = Some(e.to_string());
+                            return;
+                        }
+                    }
+                    self.from = data["from"].as_str().map(str::to_owned);
+                }
+                self.error = data["lookupError"].as_str().map(str::to_owned);
+                self.report = data["report"].take();
                 if self.sequence.is_none() {
                     self.bin_names = Self::names(&self.report);
                 }
-                self.error = None;
             }
-            Err(e) => {
-                self.report = Value::Null;
-                if self.sequence.is_none() {
-                    self.bin_names = Default::default();
-                }
-                self.error = Some(e.to_string());
-            }
+            Err(e) => self.error = Some(e),
         }
     }
 
     pub fn show(&mut self, app: &mut FilmcraftApp, ui: &mut egui::Ui) -> Option<(String, u64)> {
+        self.poll();
         let mut reload = false;
         ui.horizontal(|ui| {
+            if self.revisions.is_empty() {
+                return;
+            }
             for before in [true, false] {
                 let selected = if before { self.from.as_deref() } else { Some(self.to.as_str()) };
                 let title = if before { tl!("From") } else { tl!("To") };
@@ -162,7 +195,18 @@ impl Comparison {
             reload = true;
         }
         if reload {
-            self.load(app);
+            self.load(app, ui.ctx());
+        }
+        if self.pending.is_some() {
+            let label = tl!("Comparing saved versions…");
+            let response = ui.label(label);
+            if ui.ctx().has_accesskit_node(response.id) {
+                ui.ctx().accesskit_node_builder(response.id, |node| node.set_live(egui::accesskit::Live::Polite));
+            }
+            app.auto.add("binHistory.comparing", response.rect, label);
+            // A disconnected worker also needs a frame to surface its error.
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+            return None;
         }
         if let Some(msg) = &self.error {
             ui.label(msg);
@@ -253,7 +297,7 @@ impl Comparison {
         });
         if drill.is_some() {
             self.sequence = drill;
-            self.load(app);
+            self.load(app, ui.ctx());
         }
         copy
     }

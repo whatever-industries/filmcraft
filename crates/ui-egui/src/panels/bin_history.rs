@@ -1,8 +1,11 @@
 //! A pinned historical view, separate from the live bin selection and checkout.
 mod versions;
+mod worker;
 use crate::FilmcraftApp;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use worker::Worker;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Clipboard {
@@ -123,7 +126,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                 if let Some(bin) = b.page["bin"].as_u64()
                     && button(app, ui, "binHistory.compare", tl!("Compare Versions"))
                 {
-                    b.comparison = versions::Comparison::open(app, bin, revision);
+                    b.comparison = Some(versions::Comparison::open(app, ctx, bin, revision));
                 }
                 ui.label(&revision[..8]);
             });
@@ -148,7 +151,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                         if let (Some(bin), Some(hash)) = (b.initial_bin, rev[1].as_str())
                             && button(app, ui, &format!("binHistory.compareRevision.{}", rev[0]), tl!("Compare Versions"))
                         {
-                            b.comparison = versions::Comparison::open(app, bin, hash);
+                            b.comparison = Some(versions::Comparison::open(app, ctx, bin, hash));
                         }
                     });
                 }
@@ -165,7 +168,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                         if let (Some(bin), Some(hash)) = (row["id"].as_u64(), &b.revision)
                             && button(app, ui, &format!("binHistory.compareBin.{bin}"), tl!("Compare Versions"))
                         {
-                            b.comparison = versions::Comparison::open(app, bin, hash);
+                            b.comparison = Some(versions::Comparison::open(app, ctx, bin, hash));
                         }
                     });
                 }
@@ -244,3 +247,6 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
         app.ui.project_panel.history_browser = Some(b);
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests;

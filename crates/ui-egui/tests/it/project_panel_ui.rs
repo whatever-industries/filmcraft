@@ -1943,6 +1943,7 @@ fn compare_versions_browses_live_fields_and_pastes_pinned_source() {
     d.ok("ui.click", json!({"id":format!("project.bin.{}",reel.0),"button":"right"}));
     d.click("project.binMenu.history");
     d.click("binHistory.compareRevision.1");
+    d.wait_for("binHistory.fields.0");
     assert!(d.has(&format!("binHistory.copy.before.{}", deleted.0)));
     assert!(!d.has(&format!("binHistory.copy.after.{}", deleted.0)));
     d.click("binHistory.fields.0");

@@ -1,0 +1,73 @@
+use super::*;
+use egui_kittest::{Harness, kittest::Queryable};
+use filmcraft_engine::{Session, autosave::AutosaveConfig};
+use filmcraft_format::project_folder::{FolderSnapshot, pack};
+use std::{sync::mpsc, time::Duration};
+
+#[test]
+fn pending_comparison_allows_back_close_and_switching_bins() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut project = filmcraft_format::decode(include_bytes!("../../../../format/tests/fixtures/v1-edit.fcproj")).unwrap().project;
+    let first = project.add_bin("First bin", None);
+    let second = project.add_bin("Second bin", None);
+    let stock = temp.path().join("source.fcproj");
+    let folder = temp.path().join("folder");
+    std::fs::write(&stock, filmcraft_format::encode(&project, false)).unwrap();
+    pack(&stock, &folder, filmcraft_format::atomic_write_new).unwrap();
+    let path = folder.join("project.fcmod");
+    let (mut snapshot, before) = FolderSnapshot::open(&path).unwrap();
+    project.root.find_bin_mut(first).unwrap().name = "New first".into();
+    project.root.find_bin_mut(second).unwrap().name = "New second".into();
+    snapshot.save(&before, &filmcraft_format::encode(&project, false)).unwrap();
+    drop(snapshot);
+    let mut session = Session::desktop_project_editor(AutosaveConfig::new(temp.path().join("profile"))).unwrap();
+    session.execute("file.open", json!({"path":path})).unwrap();
+    let mut app = FilmcraftApp::new(session);
+    open(&mut app, Some(first.0));
+    let mut h = Harness::builder().with_size(egui::vec2(1000.0, 700.0)).build_ui_state(|ui, app| show(app, ui.ctx()), app);
+    // Occupy the worker until we have exercised the real navigation controls.
+    let (release, gate) = mpsc::channel();
+    let ctx = h.ctx.clone();
+    let _blocker = h
+        .state_mut()
+        .comparison_worker
+        .submit(&ctx, move || {
+            gate.recv_timeout(Duration::from_secs(60)).map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        })
+        .unwrap();
+
+    for exit in ["Back to Bin History", "Close"] {
+        h.run_steps(3);
+        h.get_by_label("Revision 1").click();
+        h.run_steps(3);
+        h.get_by_label("Compare Versions").click();
+        h.run_steps(3);
+        assert!(h.query_by_label("Comparing saved versions…").is_some());
+        assert!(h.query_by_label("Copy from first save").is_none());
+        h.get_by_label(exit).click();
+        h.run_steps(3);
+        assert!(h.query_by_label("Comparing saved versions…").is_none());
+        if exit == "Back to Bin History" {
+            h.get_by_label("Revisions").click();
+        }
+    }
+    assert!(h.state().ui.project_panel.history_browser.is_none());
+    open(h.state_mut(), Some(second.0));
+    h.run_steps(3);
+    h.get_by_label("Revision 1").click();
+    h.run_steps(3);
+    h.get_by_label("Compare Versions").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Comparing saved versions…").is_some());
+    release.send(()).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while h.query_by_label("Comparing saved versions…").is_some() {
+        assert!(std::time::Instant::now() < deadline);
+        h.run_steps(1);
+        std::thread::yield_now();
+    }
+    assert!(h.query_by_label("To · 1 New second").is_some());
+    assert!(h.query_by_label("To · 1 New first").is_none());
+    assert!(h.state().ui.project_panel.history_clipboard.is_none());
+}
