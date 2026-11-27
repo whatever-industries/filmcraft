@@ -287,4 +287,35 @@ Project-wide Find can select a missing media item for Link Media. Search for the
 
 The regression fixture imports a generated still, places it in a sequence used by a master, and moves its folder. The UI test starts from project-wide search, opens the owning bin once, applies by keyboard, and compares rendered frames after Undo, Redo, bin close and reopen. Other cases cover unrelated edits, global settings, a replaced candidate, changed ownership, missing fingerprints, a dependent sequence anchor, and two stale-save windows. [Verified relink tests](../crates/ui-egui/tests/it/modular_bin_ui/verified_relink.rs)
 
-**Next stage.** Before allowing a partially loaded editor to apply a relink, prove it can identify every affected sequence and Script record across unloaded bins, then reproduce the full editor’s bin decisions and playback on the same saved revision.
+### Predicting the impact of a verified relink
+
+The developer harness accepts `relink-impact project.fcmod REVIEW_JSON` with the verified candidate returned by `relink-discovery`. Its report identifies the saved revision, source, changed item IDs, and every bin that owns each changed item. The `unfiled` list identifies changed records outside the bin tree. A `script-review` result identifies the blocking Scripts and reports zero changed records, matching the full editor’s refusal.
+
+The private index tracks subclip parents, Script take sources, and sequences with unresolved picture properties. A relink can fill in a frame-relative picture position even on an unrelated shot. The check loads those sequences, applies the editor’s record-update logic to an isolated model, and compares the records. A newer publication, a changed candidate or an unreadable required payload invalidates the result. The ordinary editor continues to handle Apply.
+
+On disposable copies of each saved revision, `verify-relink-impact` reopens the full modular editor, performs the verified relink, and compares every changed record, bin membership, dirty bin, and unfiled change against the prediction. Regression cases cover nested cuts, chained subclips, Scripts with and without marks, an unrelated automatic position, and a sequence shared by two bins. The read-only check also preserves the open editor’s playback, Undo availability, missing-media list, saved view, and clean state. [Impact regression tests](../crates/ui-egui/examples/bench_bin_open/impact_tests.rs)
+
+#### Feature-scale measurements
+
+Both feature fixtures used the same generated still for the verified candidate. The source-only fixture retained its saved picture properties. The dependent fixture left one axis of the first placement’s source anchor automatic. The full modular editor changed just the source in the first case and both the source and its sequence in the second. The full-editor baseline below reopens the paired standard `.fcproj` and computes the equivalent impact.
+
+For reproduction, pass the same discovery review to `relink-impact-baseline` on the paired standard fixture and to `relink-impact` on its modular manifest. Point `FILMCRAFT_DATA_DIR` at a fresh external directory for each cold trial and reuse that directory for the warm trial. Run `verify-relink-impact` on a disposable copy for the actual full-editor comparison.
+
+Times are medians of five fresh-process trials after one warm-up on local APFS. Cold and warm refer to the private index. The OS file cache stayed enabled. Project bytes count logical reads including manifest rechecks. The decode count includes the cold index build. Peak RSS is the highest process peak of the five trials. The OS denied writes under the project directories for every measured run. Inventories, sizes, modification times, and SHA-256 digests matched before and after. **All measured checks wrote zero project bytes.**
+
+| Placements | Change | Route | Median ms | Project MB read | Item decodes | Peak RSS MiB | Cache bytes written |
+|---:|---|---|---:|---:|---:|---:|---:|
+| 24,000 | Source only | Full .fcproj | 103.5 | 18.13 | 1,212 | 130.2 | 0 |
+| 24,000 | Source only | Cold index | 257.8 | 18.58 | 1,213 | 27.1 | 183,523 |
+| 24,000 | Source only | Warm index | 7.7 | 0.39 | 1 | 18.3 | 0 |
+| 24,000 | Source + sequence | Full .fcproj | 101.8 | 18.13 | 1,212 | 135.5 | 0 |
+| 24,000 | Source + sequence | Cold index | 168.5 | 20.00 | 1,214 | 34.2 | 183,537 |
+| 24,000 | Source + sequence | Warm index | 16.1 | 1.80 | 2 | 33.9 | 0 |
+| 48,000 | Source only | Full .fcproj | 200.3 | 36.28 | 2,412 | 240.4 | 0 |
+| 48,000 | Source only | Cold index | 299.3 | 37.18 | 2,413 | 40.1 | 367,125 |
+| 48,000 | Source only | Warm index | 9.3 | 0.76 | 1 | 20.2 | 0 |
+| 48,000 | Source + sequence | Full .fcproj | 201.9 | 36.28 | 2,412 | 255.1 | 0 |
+| 48,000 | Source + sequence | Cold index | 315.6 | 40.01 | 2,414 | 52.7 | 367,139 |
+| 48,000 | Source + sequence | Warm index | 29.4 | 3.60 | 2 | 52.7 | 0 |
+
+**Rollout decision.** The warm index passed the accuracy and speed gates at both sizes for both operations. A warm, verified source-only change qualifies for planning partial Apply. A warm dependent result can direct the user to full-editor review. Cold index creation took longer than the full reopen in all four comparisons, so cold checks stay on the full-editor route. The next milestone is to validate one source-only edit through Apply, Undo, bin Save or Discard, and reopen, including a newer publication between prediction and Apply.

@@ -144,6 +144,9 @@ fn verify(full: &Path, bin: BinId) -> Result<serde_json::Value> {
 pub(super) fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     match args.as_slice() {
+        [mode, path, review] if mode == "verify-relink-impact" => preview::impact::verify(Path::new(path), review),
+        [mode, path, review] if mode == "relink-impact-baseline" => preview::impact::baseline(Path::new(path), review),
+        [mode, path, review] if mode == "relink-impact" => preview::impact::run(Path::new(path), review),
         [mode, path, params] if mode == "search" || mode == "relink-discovery" => preview::discovery::run(mode, Path::new(path), params),
         [mode, path, old, out] if mode == "refresh" => preview::refresh(Path::new(path), Some(Path::new(old)), Path::new(out)),
         [mode, path, out] if mode == "index" => preview::index(Path::new(path), Path::new(out)),
@@ -161,7 +164,8 @@ pub(super) fn run() -> Result<()> {
         _ => Err(concat!(
             "expected prepare SOURCE.fcproj NEW_DIRECTORY, measure PROJECT BIN_ID, ",
             "active|all-tabs|verify FOLDER_MANIFEST BIN_ID, index FOLDER_MANIFEST INDEX, preview FOLDER_MANIFEST [INDEX], ",
-            "refresh FOLDER_MANIFEST PRIOR_INDEX NEW_INDEX, frames PROJECT BIN_ID [INDEX], search PROJECT QUERY_JSON, or relink-discovery PROJECT MEDIA_SEARCH_JSON"
+            "refresh FOLDER_MANIFEST PRIOR_INDEX NEW_INDEX, frames PROJECT BIN_ID [INDEX], search PROJECT QUERY_JSON, relink-discovery PROJECT MEDIA_SEARCH_JSON, relink-impact FOLDER_MANIFEST REVIEW_JSON, ",
+            "relink-impact-baseline STANDARD_FIXTURE REVIEW_JSON, or verify-relink-impact DISPOSABLE_MANIFEST REVIEW_JSON"
         )
         .into()),
     }

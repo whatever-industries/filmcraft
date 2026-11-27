@@ -5,15 +5,15 @@ use filmcraft_project::{Bin, BinEntry, BinId, FindQuery, ItemId, Project};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, fs, path::Path, sync::Arc, time::Instant};
 
-struct Discovery {
-    session: Session,
-    reader: Reader,
-    index: Index,
-    remaining: u64,
+pub(super) struct Discovery {
+    pub(super) session: Session,
+    pub(super) reader: Reader,
+    pub(super) index: Index,
+    pub(super) remaining: u64,
 }
 
 impl Discovery {
-    fn new(path: &Path, mut reader: Reader, index: Index) -> Result<Self> {
+    pub(super) fn new(path: &Path, mut reader: Reader, index: Index) -> Result<Self> {
         let mut session = Session::default();
         session.project = Arc::new(reader.take_project()?);
         session.path = Some(path.to_str().ok_or("invalid project path")?.to_owned());
@@ -22,11 +22,19 @@ impl Discovery {
     }
 
     fn load(&mut self, include: impl Fn(RecordClass) -> bool) -> Result<()> {
-        let items = &mut Arc::make_mut(&mut self.session.project).items;
+        let mut ids = Vec::new();
         for (&id, label) in &self.index.labels {
-            if include(label.class.ok_or("incomplete discovery index")?)
-                && let std::collections::btree_map::Entry::Vacant(entry) = items.entry(id)
-            {
+            if include(label.class.ok_or("incomplete discovery index")?) {
+                ids.push(id);
+            }
+        }
+        self.load_ids(ids)
+    }
+
+    pub(super) fn load_ids(&mut self, ids: impl IntoIterator<Item = ItemId>) -> Result<()> {
+        let items = &mut Arc::make_mut(&mut self.session.project).items;
+        for id in ids {
+            if let std::collections::btree_map::Entry::Vacant(entry) = items.entry(id) {
                 let item = self
                     .reader
                     .directory

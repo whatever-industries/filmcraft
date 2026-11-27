@@ -17,25 +17,29 @@ pub struct Review {
     pub source_path: String,
 }
 
-fn owners(root: &Bin) -> BTreeMap<ItemId, Option<BinId>> {
-    let mut out = BTreeMap::new();
+fn visit_owners(root: &Bin, mut visit: impl FnMut(ItemId, BinId)) {
     let mut todo = vec![root];
     while let Some(bin) = todo.pop() {
         for entry in &bin.children {
             match entry {
                 BinEntry::Bin(child) => todo.push(child),
-                BinEntry::Item(item) => {
-                    out.entry(*item)
-                        .and_modify(|owner| {
-                            if *owner != Some(bin.id) {
-                                *owner = None;
-                            }
-                        })
-                        .or_insert(Some(bin.id));
-                }
+                BinEntry::Item(item) => visit(*item, bin.id),
             }
         }
     }
+}
+
+fn owners(root: &Bin) -> BTreeMap<ItemId, Option<BinId>> {
+    let mut out = BTreeMap::new();
+    visit_owners(root, |item, bin| {
+        out.entry(item)
+            .and_modify(|owner| {
+                if *owner != Some(bin) {
+                    *owner = None;
+                }
+            })
+            .or_insert(Some(bin));
+    });
     out
 }
 
@@ -92,10 +96,7 @@ pub(super) fn verified(s: &mut Session, p: &Value, item: ItemId, path: &str) -> 
             return Err(fail("select the source in its owning bin"));
         }
     }
-    let cand = check_candidate(s, item, path, &MatchOptions::default())?;
-    if !cand.ok || cand.identity_match != Some(true) || cand.identity != Some(current.identity) {
-        return Err(fail("candidate no longer passes the media and fingerprint checks; review again"));
-    }
+    let cand = verified_candidate(s, &current)?;
     if p["reviewOnly"] == true {
         let manifest = folder.snapshot.directory().map_err(|e| fail(&e.to_string()))?.join(filmcraft_format::project_folder::ROOT);
         if filmcraft_format::project_folder::FolderDirectory::published_revision(&manifest).map_err(|e| fail(&e.to_string()))? != rev {
@@ -108,4 +109,52 @@ pub(super) fn verified(s: &mut Session, p: &Value, item: ItemId, path: &str) -> 
     let only_source = p.get("review").map(|_| item);
     let rows = apply(s, vec![Plan { item, cand }], false, None, only_source, "Link Media")?;
     Ok(json!({"relinked": rows,"bin":owner}))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn verified_candidate(s: &Session, current: &Review) -> Result<super::Candidate> {
+    let cand = check_candidate(s, current.item, &current.path, &MatchOptions::default())?;
+    if !cand.ok || cand.identity_match != Some(true) || cand.identity != Some(current.identity) {
+        return Err(bad("media.relink", "candidate no longer passes the media and fingerprint checks; review again"));
+    }
+    Ok(cand)
+}
+
+/// Predict one identity-verified relink on an isolated model. The caller must supply the
+/// complete affected record set and recheck the published revision before using the result.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn impact(s: &Session, revision: &str, review: &Review) -> Result<Value> {
+    let item = review.item;
+    let owner = owners(&s.project.root).get(&item).copied().flatten();
+    if owner != Some(review.bin) || review_for(&s.project, revision, review.bin, item, &review.path).as_ref() != Some(review) {
+        return Err(bad("relink-impact", "source or saved revision changed; refresh discovery"));
+    }
+    let cand = verified_candidate(s, review)?;
+    let users = super::script_users(s, item);
+    let scripts: Vec<_> = super::scripts_needing_review(&s.project, &users, cand.identity).collect();
+    let mut changed = Vec::new();
+    let status = if scripts.is_empty() {
+        let mut model = (*s.project).clone();
+        super::update_records(&mut model, &Plan { item, cand }, &users, false);
+        changed.extend(model.items.iter().filter(|(id, value)| s.project.item(**id) != Some(*value)).map(|(id, _)| *id));
+        if changed.is_empty() {
+            "unchanged"
+        } else if changed == [item] {
+            "source-only"
+        } else {
+            "full-editor"
+        }
+    } else {
+        "script-review"
+    };
+    // Include every owning bin, with an empty array denoting an unfiled record.
+    let wanted = changed.iter().chain(&scripts);
+    let mut bins: BTreeMap<_, std::collections::BTreeSet<BinId>> = wanted.map(|id| (*id, Default::default())).collect();
+    visit_owners(&s.project.root, |id, bin| {
+        if let Some(owners) = bins.get_mut(&id) {
+            owners.insert(bin);
+        }
+    });
+    let unfiled: Vec<_> = changed.iter().filter(|id| bins.get(id).is_some_and(|bins| bins.is_empty())).collect();
+    Ok(json!({"revision":revision, "source":item, "status":status, "changed":changed,"scriptReview":scripts,"owners":bins,"unfiled":unfiled}))
 }

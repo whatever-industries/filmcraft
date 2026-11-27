@@ -4,6 +4,8 @@
 mod cache;
 #[path = "discovery.rs"]
 pub(super) mod discovery;
+#[path = "impact.rs"]
+pub(super) mod impact;
 use super::{Result, reader::Reader};
 use egui_kittest::{Harness, kittest::Queryable};
 use filmcraft_engine::Session;
@@ -23,6 +25,15 @@ struct Label {
     // Older checksummed indexes are still readable. Refresh them once to classify every record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     class: Option<RecordClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    impact: Option<ImpactRecord>,
+}
+#[derive(Serialize, Deserialize)]
+enum ImpactRecord {
+    Other,
+    Subclip(ItemId),
+    Script(std::collections::BTreeSet<ItemId>),
+    AutoSequence(std::collections::BTreeSet<ItemId>),
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum RecordClass {
@@ -38,7 +49,16 @@ impl From<&ProjectItem> for Label {
             ItemKind::Media(_) => RecordClass::Media,
             _ => RecordClass::NonMedia,
         };
-        Self { name: item.name.clone(), sequence: item.as_sequence().is_some(), class: Some(class) }
+        let impact = match &item.kind {
+            ItemKind::Subclip { parent, .. } => ImpactRecord::Subclip(*parent),
+            ItemKind::Script(doc) => ImpactRecord::Script(doc.slates.iter().flat_map(|s| &s.takes).filter_map(|take| take.source).collect()),
+            ItemKind::Sequence(seq) => {
+                let sources: std::collections::BTreeSet<_> = seq.clips_with_auto_points().map(|clip| clip.item).collect();
+                if sources.is_empty() { ImpactRecord::Other } else { ImpactRecord::AutoSequence(sources) }
+            }
+            _ => ImpactRecord::Other,
+        };
+        Self { impact: Some(impact), name: item.name.clone(), sequence: item.as_sequence().is_some(), class: Some(class) }
     }
 }
 
@@ -82,7 +102,7 @@ impl Index {
                 .as_mut()
                 .filter(|index| index.keys.get(&id).is_some_and(|k| k == key))
                 .and_then(|index| index.labels.remove(&id))
-                .filter(|label| label.class.is_some());
+                .filter(|label| label.class.is_some() && label.impact.is_some());
             let label = match reused {
                 Some(label) => label,
                 None => {

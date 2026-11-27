@@ -150,12 +150,8 @@ impl Project {
         for seq_id in seq_ids {
             let Some(seq) = self.sequence(seq_id) else { continue };
             // the source size of each clip that has an unresolved point, looked up before the edit
-            let sources: BTreeMap<ClipId, Option<(u32, u32)>> = seq
-                .all_tracks()
-                .flat_map(|t| t.items.iter())
-                .filter(|c| c.effects.iter().any(has_auto_point))
-                .map(|c| (c.id, self.final_source_size(c.item, &size_is_final)))
-                .collect();
+            let sources: BTreeMap<ClipId, Option<(u32, u32)>> =
+                seq.clips_with_auto_points().map(|c| (c.id, self.final_source_size(c.item, &size_is_final))).collect();
             if sources.is_empty() {
                 continue;
             }
@@ -182,6 +178,13 @@ impl Project {
             }
         }
         None
+    }
+}
+
+impl super::Sequence {
+    /// Placements whose picture properties still contain an automatic point.
+    pub fn clips_with_auto_points(&self) -> impl Iterator<Item = &super::TrackItem> {
+        self.all_tracks().flat_map(|track| &track.items).filter(|clip| clip.effects.iter().any(has_auto_point))
     }
 }
 

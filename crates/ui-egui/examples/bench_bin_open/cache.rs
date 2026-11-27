@@ -97,7 +97,7 @@ pub(super) fn open_with<T>(
             let (index, stage) = match old {
                 Some(index)
                     if index.manifest == revision
-                        && index.labels.values().all(|l| l.class.is_some())
+                        && index.labels.values().all(|l| l.class.is_some() && l.impact.is_some())
                         && reader.inventory().eq(index.labels.keys().copied()) =>
                 {
                     (index, None)

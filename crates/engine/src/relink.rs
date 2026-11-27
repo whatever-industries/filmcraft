@@ -330,9 +330,49 @@ fn script_users(s: &Session, media: ItemId) -> Vec<ItemId> {
     s.project.items.keys().copied().filter(|source| s.project.resolve_media(*source).is_some_and(|(root, _, _)| root == media)).collect()
 }
 
+fn scripts_needing_review<'a>(project: &'a Project, sources: &'a [ItemId], identity: Option<MediaIdentity>) -> impl Iterator<Item = ItemId> + 'a {
+    project.items.values().filter(move |item| item.as_script().is_some_and(|doc| doc.unverified_marked_takes(sources, identity) > 0)).map(|item| item.id)
+}
+
 fn needs_script_review(s: &Session, media: ItemId, identity: Option<MediaIdentity>) -> bool {
     let users = script_users(s, media);
-    s.project.items.values().filter_map(|item| item.as_script()).any(|doc| doc.unverified_marked_takes(&users, identity) > 0)
+    scripts_needing_review(&s.project, &users, identity).next().is_some()
+}
+
+// Shared with the read-only impact check. All decoder and editor state changes stay in apply.
+fn update_records(proj: &mut Project, p: &Plan, users: &[ItemId], align_timecode: bool) {
+    let Some(m) = proj.item_mut(p.item).and_then(|i| i.as_media_mut()) else { return };
+    let old_tc = m.info.start_timecode;
+    let rate = m.info.frame_rate();
+    m.media = MediaRef::File { path: p.cand.path.clone() };
+    m.offline = false;
+    if p.cand.identity.is_some() {
+        m.identity = p.cand.identity;
+    }
+    let mut shift = Tick::ZERO;
+    if let Some(info) = &p.cand.info {
+        let new_tc = info.start_timecode;
+        if align_timecode && let (Some(a), Some(b)) = (old_tc, new_tc) {
+            // what was at old timecode a + t sits at new media time t + (a - b), each
+            // timecode in its own file's frames (an EDL item's are at the list's rate)
+            shift = info.frame_rate().tick_of(b) - rate.tick_of(a);
+        }
+        m.info = info.clone();
+    }
+    proj.shift_media_time(p.item, shift);
+    for item in proj.items.values_mut() {
+        if let ItemKind::Script(doc) = &mut item.kind
+            && doc.slates.iter().flat_map(|slate| &slate.takes).any(|take| take.source.is_some_and(|source| users.contains(&source)))
+        {
+            std::sync::Arc::make_mut(doc).relink_sources(users, p.cand.identity);
+        }
+    }
+    if p.cand.info.is_some() {
+        // The item's size is now the file's own. Clips that came from an interchange import
+        // while the file was missing still have an "auto" (NaN) anchor waiting for it:
+        // centre it in the real picture. Points that are numbers are not touched.
+        proj.resolve_placed_auto_points(|_| true, |source| source.id == p.item);
+    }
 }
 
 /// Apply planned relinks as one undo step.
@@ -346,17 +386,12 @@ fn apply(
 ) -> Result<Vec<Value>> {
     // A Script take, like a sequence clip, refers to a Project item. Resolve all subclips
     // before changing any media so both direct and nested references are checked together.
-    let script_sources: Vec<_> = plans
+    let script_sources: Vec<_> = plans.iter().map(|plan| script_users(s, plan.item)).collect();
+    if plans
         .iter()
-        .map(|plan| {
-            let sources = script_users(s, plan.item);
-            (sources, plan.cand.identity)
-        })
-        .collect();
-    if plans.iter().zip(&script_sources).any(|(plan, (sources, identity))| {
-        Some(plan.item) != confirmed_item
-            && s.project.items.values().filter_map(|item| item.as_script()).any(|doc| doc.unverified_marked_takes(sources, *identity) > 0)
-    }) {
+        .zip(&script_sources)
+        .any(|(plan, sources)| Some(plan.item) != confirmed_item && scripts_needing_review(&s.project, sources, plan.cand.identity).next().is_some())
+    {
         return Err(bad(
             "media.relink",
             format!(
@@ -369,39 +404,8 @@ fn apply(
         plans.iter().filter_map(|p| p.cand.source.clone().map(|src| (p.item, p.cand.path.clone(), src))).collect();
     let before = s.project.clone();
     s.edit(label, |proj, _| {
-        for (p, (users, identity)) in plans.iter().zip(&script_sources) {
-            let Some(m) = proj.item_mut(p.item).and_then(|i| i.as_media_mut()) else { continue };
-            let old_tc = m.info.start_timecode;
-            let rate = m.info.frame_rate();
-            m.media = MediaRef::File { path: p.cand.path.clone() };
-            m.offline = false;
-            if p.cand.identity.is_some() {
-                m.identity = p.cand.identity;
-            }
-            let mut shift = Tick::ZERO;
-            if let Some(info) = &p.cand.info {
-                let new_tc = info.start_timecode;
-                if align_timecode && let (Some(a), Some(b)) = (old_tc, new_tc) {
-                    // what was at old timecode a + t sits at new media time t + (a - b), each
-                    // timecode in its own file's frames (an EDL item's are at the list's rate)
-                    shift = info.frame_rate().tick_of(b) - rate.tick_of(a);
-                }
-                m.info = info.clone();
-            }
-            proj.shift_media_time(p.item, shift);
-            for item in proj.items.values_mut() {
-                if let ItemKind::Script(doc) = &mut item.kind
-                    && doc.slates.iter().flat_map(|slate| &slate.takes).any(|take| take.source.is_some_and(|source| users.contains(&source)))
-                {
-                    std::sync::Arc::make_mut(doc).relink_sources(users, *identity);
-                }
-            }
-            if p.cand.info.is_some() {
-                // The item's size is now the file's own. Clips that came from an interchange import
-                // while the file was missing still have an "auto" (NaN) anchor waiting for it:
-                // centre it in the real picture. Points that are numbers are not touched.
-                proj.resolve_placed_auto_points(|_| true, |source| source.id == p.item);
-            }
+        for (p, users) in plans.iter().zip(&script_sources) {
+            update_records(proj, p, users, align_timecode);
         }
         if let Some(source) = only_source {
             let changed: Vec<_> = proj
