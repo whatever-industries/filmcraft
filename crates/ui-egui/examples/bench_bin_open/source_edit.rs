@@ -2,6 +2,7 @@
 use super::{Reader, Result, cache, discovery::Discovery};
 use filmcraft_engine::{
     Session,
+    autosave::{AutoSavePrefs, AutosaveConfig, Persistence, RelinkDraft},
     relink::{
         self,
         review::{self, Review},
@@ -18,6 +19,8 @@ use std::{
 
 pub(super) struct SourceEdit {
     path: PathBuf,
+    data: PathBuf,
+    journal: Option<Persistence>,
     revision: String,
     candidate: Review,
     view: Discovery,
@@ -38,7 +41,19 @@ impl SourceEdit {
         let index = cache::warm_index(&path, data, &reader)?;
         let bytes_read = reader.bytes;
         let view = Discovery::new(&path, reader, index)?;
-        Ok(Self { path, revision, candidate, view, saved: None, bytes_read, bytes_written: 0, decoded: 0, maintenance_warning: None })
+        Ok(Self {
+            path,
+            data: data.to_owned(),
+            journal: None,
+            revision,
+            candidate,
+            view,
+            saved: None,
+            bytes_read,
+            bytes_written: 0,
+            decoded: 0,
+            maintenance_warning: None,
+        })
     }
 
     fn source(&self) -> Result<&ProjectItem> {
@@ -79,13 +94,39 @@ impl SourceEdit {
         }
     }
 
+    fn checkpoint(&mut self) -> Result<()> {
+        if !self.dirty() {
+            return self.clear_checkpoint();
+        }
+        let draft = RelinkDraft {
+            manifest: self.path.clone(),
+            base_revision: self.revision.clone(),
+            saved: self.saved.clone().ok_or("missing source before-image")?,
+            working: self.source()?.clone(),
+            revision: self.view.session.revision,
+        };
+        if self.journal.is_none() {
+            let prefs = AutoSavePrefs { enabled: false, ..Default::default() };
+            self.journal = Some(Persistence::start(&AutosaveConfig::new(&self.data), prefs)?);
+        }
+        self.journal.as_ref().ok_or("no recovery worker")?.checkpoint_relink(draft)?;
+        Ok(())
+    }
+
+    fn clear_checkpoint(&self) -> Result<()> {
+        if let Some(worker) = &self.journal {
+            worker.clear_relink_checkpoint()?;
+        }
+        Ok(())
+    }
+
     fn save(&mut self) -> Result<()> {
         let before = self.saved.as_ref().ok_or("apply a reviewed edit first")?;
         let after = self.source()?.clone();
         if before == &after {
             let (_guard, bytes) = lock_source_revision(&self.path, &self.revision)?;
             self.bytes_read += bytes;
-            return Ok(());
+            return self.clear_checkpoint();
         }
         let result = save_relinked_source(&self.path, &self.revision, self.candidate.bin, before, &after)?;
         self.decoded += 1;
@@ -95,12 +136,13 @@ impl SourceEdit {
         self.maintenance_warning = result.maintenance_warning;
         self.saved = Some(after);
         self.view.session.saved_revision = self.view.session.revision;
-        Ok(())
+        self.clear_checkpoint()
     }
 
     fn discard(&mut self) -> Result<()> {
         let (_guard, bytes) = lock_source_revision(&self.path, &self.revision)?;
         self.bytes_read += bytes;
+        self.clear_checkpoint()?;
         if self.dirty() {
             let saved = self.saved.as_ref().ok_or("missing saved source")?;
             Arc::make_mut(&mut self.view.session.project).items.insert(saved.id, saved.clone());
@@ -119,6 +161,7 @@ impl SourceEdit {
     fn action(&mut self, action: &str) -> Result<()> {
         match action {
             "apply" => self.apply(),
+            "checkpoint" => self.checkpoint(),
             "save" => self.save(),
             "discard" => self.discard(),
             "undo" | "redo" => {
@@ -126,9 +169,12 @@ impl SourceEdit {
                 let label = if action == "undo" { s.undo() } else { s.redo() };
                 label.ok_or("no relink history step")?;
                 self.restored();
+                if self.journal.is_some() {
+                    self.checkpoint()?;
+                }
                 Ok(())
             }
-            _ => Err("expected apply, undo, redo, discard or save".into()),
+            _ => Err("expected apply, checkpoint, undo, redo, discard or save".into()),
         }
     }
 }

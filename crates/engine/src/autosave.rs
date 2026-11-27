@@ -27,7 +27,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use filmcraft_format::autosave as names;
-use filmcraft_project::Project;
+use filmcraft_project::{ItemId, Project};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use web_time::{Instant, SystemTime, UNIX_EPOCH};
@@ -579,6 +579,9 @@ pub struct JournalMeta {
     /// Digest of the immutable record manifest for a modular recovery draft.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<String>,
+    /// Source whose reviewed relink must be fingerprint-checked before recovery can use it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewed_source: Option<ItemId>,
     /// True when the app was closed normally while changes were unsaved (no crash).
     pub clean_exit: bool,
 }
@@ -703,10 +706,44 @@ pub(crate) struct Sent {
 }
 
 struct Snapshot {
+    reviewed_source: Option<ItemId>,
     modular: bool,
     project: Arc<Project>,
     revision: u64,
     path: Option<String>,
+}
+
+/// A single working source from the opt-in partial editor. The worker reads the rest
+/// of the project from the verified base before acknowledging its recovery copy.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct RelinkDraft {
+    pub manifest: PathBuf,
+    pub base_revision: String,
+    pub saved: filmcraft_project::ProjectItem,
+    pub working: filmcraft_project::ProjectItem,
+    pub revision: u64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl RelinkDraft {
+    fn snapshot(self) -> io::Result<Snapshot> {
+        use filmcraft_format::project_folder::{FolderSnapshot, lock_source_revision};
+        use filmcraft_project::MediaRef;
+        let Self { manifest, base_revision, saved, working, revision } = self;
+        let _lock = lock_source_revision(&manifest, &base_revision)?;
+        let (_, mut loaded) = FolderSnapshot::open(&manifest)?;
+        let id = saved.id;
+        let item = loaded.project.item_mut(id).ok_or_else(|| io::Error::other("missing reviewed source"))?;
+        let source_identity =
+            |item: &filmcraft_project::ProjectItem| item.as_media().filter(|m| matches!(m.media, MediaRef::File { .. })).and_then(|m| m.identity);
+        let identity = source_identity(&saved);
+        if item != &saved || working.id != id || identity.is_none() || source_identity(&working) != identity {
+            return Err(io::Error::other("source differs from reviewed relink"));
+        }
+        *item = working;
+        let path = manifest.to_str().ok_or_else(|| io::Error::other("non-UTF-8 recovery origin"))?.to_owned();
+        Ok(Snapshot { project: Arc::new(loaded.project), path: Some(path), revision, modular: true, reviewed_source: Some(id) })
+    }
 }
 
 enum Msg {
@@ -714,6 +751,8 @@ enum Msg {
     Dirty(Snapshot),
     #[cfg(not(target_arch = "wasm32"))]
     ReplaceJournal(Option<Snapshot>, Sender<Result<(), String>>),
+    #[cfg(not(target_arch = "wasm32"))]
+    CheckpointRelink(Box<RelinkDraft>, Sender<Result<(), String>>),
     /// Nothing unsaved (just saved / opened): drop the journal.
     Clean,
     Prefs(AutoSavePrefs),
@@ -792,6 +831,7 @@ pub struct Persistence {
     pub candidates: Vec<RecoveryCandidate>,
     pub status: Status,
     pub(crate) last_sent: Option<Sent>,
+    pub(crate) reviewed_source: Option<(u64, ItemId)>,
     lock: Option<File>,
     tx: Sender<Msg>,
     events: Receiver<WorkerEvent>,
@@ -850,6 +890,7 @@ impl Persistence {
             candidates,
             status: Status::default(),
             last_sent: None,
+            reviewed_source: None,
             lock: Some(lock),
             tx,
             events,
@@ -859,7 +900,7 @@ impl Persistence {
     }
 
     pub(crate) fn send_dirty(&self, project: Arc<Project>, revision: u64, path: Option<String>, modular: bool) {
-        self.send(Msg::Dirty(Snapshot { project, revision, path, modular }));
+        self.send(Msg::Dirty(Snapshot { project, revision, path, modular, reviewed_source: self.reviewed_source.map(|(_, id)| id) }));
     }
 
     /// FIFO barrier for an explicit bin decision. Once queued, wait for its actual
@@ -867,9 +908,23 @@ impl Persistence {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn replace_bin_journal(&self, project: Option<Arc<Project>>, revision: u64, path: Option<String>) -> Result<(), String> {
         let (reply, result) = channel();
-        let snapshot = project.map(|project| Snapshot { project, revision, path, modular: true });
+        let snapshot = project.map(|project| Snapshot { project, revision, path, modular: true, reviewed_source: None });
         self.tx.send(Msg::ReplaceJournal(snapshot, reply)).map_err(|_| self.stopped_error())?;
         result.recv().map_err(|_| self.stopped_error())?
+    }
+
+    /// Acknowledge only after the worker has published a self-contained recovery candidate.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn checkpoint_relink(&self, draft: RelinkDraft) -> Result<(), String> {
+        let (reply, result) = channel();
+        self.tx.send(Msg::CheckpointRelink(Box::new(draft), reply)).map_err(|_| self.stopped_error())?;
+        result.recv().map_err(|_| self.stopped_error())?
+    }
+
+    /// Commit the clean recovery state before acknowledging Save or Discard in the partial editor.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn clear_relink_checkpoint(&self) -> Result<(), String> {
+        self.replace_bin_journal(None, 0, None)
     }
 
     pub(crate) fn send_clean(&self) {
@@ -1071,6 +1126,15 @@ impl Worker {
                     let result = self.replace_bin_journal(snapshot);
                     let _ = reply.send(result);
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                Some(Msg::CheckpointRelink(draft, reply)) => {
+                    let result = if self.prefs.recovery_journal {
+                        draft.snapshot().map_err(|e| e.to_string()).and_then(|snapshot| self.replace_bin_journal(Some(snapshot)))
+                    } else {
+                        Err("recovery journal is disabled".into())
+                    };
+                    let _ = reply.send(result);
+                }
                 Some(Msg::Clean) => {
                     self.latest = None;
                     self.first_pending = None;
@@ -1128,6 +1192,7 @@ impl Worker {
         let mut meta = self.meta.clone();
         meta.saved_unix = unix;
         meta.revision = s.revision;
+        meta.reviewed_source = s.reviewed_source;
         meta.project_name = s.project.name.clone();
         meta.project_path = s.path.clone();
         let result = (|| -> io::Result<(usize, f64, f64)> {

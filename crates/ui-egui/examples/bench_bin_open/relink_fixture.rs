@@ -37,6 +37,7 @@ pub(super) fn cut(dir: &Path, case: Case) -> Result<Cut> {
     let imported = s.execute("file.import", json!({"paths":[png],"bin":f.cameras}))?;
     let source: ItemId = serde_json::from_value(imported["items"][0].clone())?;
     let p = Arc::make_mut(&mut s.project);
+    p.settings.title_safe = (13.0, 17.0);
     let range = TimeRange::new(Tick::ZERO, Tick(1000));
     let inner = p.add_item("Subclip", Label::Iris, ItemKind::Subclip { parent: source, range, restrict_trims: false }, Some(f.cameras));
     let outer = p.add_item("Select", Label::Iris, ItemKind::Subclip { parent: inner, range, restrict_trims: false }, Some(f.other));

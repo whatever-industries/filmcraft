@@ -43,6 +43,27 @@ fn owners(root: &Bin) -> BTreeMap<ItemId, Option<BinId>> {
     out
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn owning_bin(project: &Project, item: ItemId) -> Option<BinId> {
+    owners(&project.root).get(&item).copied().flatten()
+}
+
+/// Enforce the stored-path policy and the source's reviewed fingerprint before
+/// installing a recovered project, while playback and still probing cannot see it.
+pub(crate) fn check_recovered_source(project: &mut Project, id: ItemId, document: Option<&str>, services: &dyn crate::Services) -> bool {
+    let Some(media) = project.item_mut(id).and_then(|item| item.as_media_mut()) else { return false };
+    let MediaRef::File { path } = &media.media else { return false };
+    if media.offline {
+        return true;
+    }
+    let actual = crate::doc_path::resolve(path, document.map(std::path::Path::new)).ok().and_then(|file| super::identity_of(services, &file).ok());
+    if actual.is_some() && actual == media.identity {
+        return false;
+    }
+    media.offline = true;
+    true
+}
+
 fn review_for(project: &Project, revision: &str, bin: BinId, item: ItemId, path: &str) -> Option<Review> {
     let media = project.item(item)?.as_media()?;
     let MediaRef::File { path: original } = &media.media else { return None };
@@ -74,8 +95,8 @@ pub(super) fn verified(s: &mut Session, p: &Value, item: ItemId, path: &str) -> 
     let fail = |msg: &str| bad("media.relink", msg);
     let folder = s.editing_folder.as_ref().ok_or_else(|| fail("open the local project folder first"))?;
     let rev = folder.snapshot.revision();
-    let owner = owners(&s.project.root).get(&item).copied().flatten().ok_or_else(|| fail("source needs one owning bin"))?;
-    if owners(&folder.project.root).get(&item) != Some(&Some(owner)) {
+    let owner = owning_bin(&s.project, item).ok_or_else(|| fail("source needs one owning bin"))?;
+    if owning_bin(&folder.project, item) != Some(owner) {
         return Err(fail("source moved since discovery; save and review again"));
     }
     let current = review_for(&s.project, rev, owner, item, path).ok_or_else(|| fail("source has no saved file fingerprint"))?;
@@ -145,7 +166,7 @@ pub fn apply_source_only(s: &mut Session, revision: &str, review: &Review) -> Re
 #[cfg(not(target_arch = "wasm32"))]
 fn predict(s: &Session, revision: &str, review: &Review) -> Result<(Value, Plan)> {
     let item = review.item;
-    let owner = owners(&s.project.root).get(&item).copied().flatten();
+    let owner = owning_bin(&s.project, item);
     if owner != Some(review.bin) || review_for(&s.project, revision, review.bin, item, &review.path).as_ref() != Some(review) {
         return Err(bad("relink-impact", "source or saved revision changed; refresh discovery"));
     }

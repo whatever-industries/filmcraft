@@ -778,6 +778,11 @@ impl Session {
         let dirty = self.is_dirty();
         let modular = self.folder_revision().is_some();
         let Some(p) = self.persistence.as_mut() else { return };
+        // A later project can reuse the same item ID. The recovery check belongs
+        // only to this unsaved document until its first explicit save.
+        if !dirty || p.reviewed_source.is_some_and(|(epoch, _)| epoch != self.document_epoch) {
+            p.reviewed_source = None;
+        }
         let cur = autosave::Sent { revision: self.revision, saved_revision: self.saved_revision, path: self.path.clone() };
         if p.last_sent.as_ref() == Some(&cur) {
             return;

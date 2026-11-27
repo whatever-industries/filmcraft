@@ -138,6 +138,9 @@ fn stale_edits_refuse_publication_and_failed_save_can_retry() -> Result<()> {
     partial.apply()?;
     let mut pending = SourceEdit::open(&f.manifest, &cache, f.review.clone())?;
     pending.apply()?;
+    pending.checkpoint()?;
+    let marker = pending.journal.as_ref().unwrap().session_dir.join("session.json");
+    let acknowledged = fs::read(&marker)?;
     // A failed archive write occurs after staging the new immutable source, before replacing the head.
     let archive = f.manifest.with_file_name(&f.review.revision);
     fs::create_dir(&archive)?;
@@ -148,12 +151,20 @@ fn stale_edits_refuse_publication_and_failed_save_can_retry() -> Result<()> {
     fs::remove_dir(archive)?;
     partial.save()?;
     assert_ne!(partial.revision, f.review.revision);
+    assert!(pending.checkpoint().unwrap_err().to_string().contains("stale"));
+    assert_eq!(fs::read(&marker)?, acknowledged);
     assert!(stale.apply().unwrap_err().to_string().contains("stale"));
     assert!(!stale.dirty());
     for action in ["save", "discard"] {
         assert!(pending.action(action).unwrap_err().to_string().contains("stale"));
         assert!(pending.dirty());
     }
+    partial.action("undo")?;
+    partial.checkpoint()?;
+    assert!(partial.dirty());
+    partial.action("redo")?;
+    assert!(!partial.dirty());
+    assert!(!partial.journal.as_ref().unwrap().session_dir.join("session.json").exists());
     partial.action("undo")?;
     let working = partial.source()?.clone();
     let mut other = open(&f.manifest)?;
@@ -203,3 +214,6 @@ fn dependent_marked_replaced_or_unreadable_source_never_applies() -> Result<()> 
     }
     Ok(())
 }
+
+#[path = "source_recovery_tests.rs"]
+mod crash;

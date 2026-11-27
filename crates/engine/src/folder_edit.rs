@@ -165,7 +165,17 @@ impl Session {
     }
 
     pub fn dirty_folder_bins(&self) -> std::collections::BTreeSet<BinId> {
-        self.editing_folder.as_ref().map(|f| scope::status(&f.project, &self.project).bins).unwrap_or_default()
+        if let Some(folder) = &self.editing_folder {
+            return scope::status(&folder.project, &self.project).bins;
+        }
+        // A detached relink draft retains a dirty owner until explicitly saved.
+        self.persistence
+            .as_ref()
+            .and_then(|p| p.reviewed_source)
+            .filter(|(epoch, _)| *epoch == self.document_epoch && self.is_dirty())
+            .and_then(|(_, item)| crate::relink::review::owning_bin(&self.project, item))
+            .into_iter()
+            .collect()
     }
 
     fn report_retention_warning(&mut self, warning: Option<&str>) {
