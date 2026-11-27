@@ -579,6 +579,7 @@ fn retention_counts_published_bins_across_reopens() {
     trim(&mut reopened, f.select, 45);
     let result = reopened.execute("file.save", json!({})).unwrap();
     assert!(result["retentionWarning"].is_null(), "{result}");
+    reopened.execute("project.waitForRecoveryPrune", json!({})).unwrap();
     assert_eq!(preview(&mut reopened)["due"], false);
     let mut versions = Vec::new();
     filmcraft_format::project_folder::history(f.manifest.parent().unwrap(), |_, hash| {
@@ -609,6 +610,7 @@ fn unrelated_bin_cleanup_keeps_the_source_of_an_unpublished_move() {
     }
     let saved = s.execute("project.saveBin", json!({"bin":f.cuts})).unwrap();
     assert!(saved["retentionWarning"].is_null(), "{saved}");
+    s.execute("project.waitForRecoveryPrune", json!({})).unwrap();
     let folder = f.manifest.parent().unwrap();
     let mut backups = Vec::new();
     filmcraft_format::project_folder::move_backups(folder, |_, b| {
@@ -621,4 +623,45 @@ fn unrelated_bin_cleanup_keeps_the_source_of_an_unpublished_move() {
     filmcraft_format::project_folder::rescue(folder, &backups[0].snapshot, f.cut.0, &rescued).unwrap();
     let cut = filmcraft_format::decode(&fs::read(rescued).unwrap()).unwrap();
     assert_eq!(frame(&cut.project, f.cut), 2);
+}
+
+#[test]
+fn an_editor_can_save_and_pin_while_pruning_waits_and_reopen_finishes_the_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = Fixture::new(dir.path());
+    let folder = f.manifest.parent().unwrap();
+    // Pause the planner, without holding the project writer.
+    let planner = fs::File::create(folder.join(".retention-worker.lock")).unwrap();
+    planner.lock().unwrap();
+    let mut s = f.open();
+    let base = s.folder_revision().unwrap().to_owned();
+    let mut policy = json!({"enabled":true,"maxBinBackups":1,"versionsPerBin":1});
+    s.execute("project.setRecoveryRetention", policy.clone()).unwrap();
+    for n in 1..=3 {
+        trim(&mut s, f.cut, n);
+        s.execute("project.saveBin", json!({"bin":f.cuts})).unwrap();
+    }
+    s.execute("project.keepRecoveryVersion", json!({"revision":base,"keep":true})).unwrap();
+    policy["enabled"] = json!(false);
+    s.execute("project.setRecoveryRetention", policy.clone()).unwrap();
+    drop(planner);
+    s.execute("project.waitForRecoveryPrune", json!({})).unwrap();
+    assert_eq!(s.execute("project.previewRecoveryPrune", json!({})).unwrap()["binBackups"], 3);
+    policy["enabled"] = json!(true);
+    s.execute("project.setRecoveryRetention", policy).unwrap();
+    drop(s);
+    let mut reopened = f.open();
+    reopened.execute("project.waitForRecoveryPrune", json!({})).unwrap();
+    assert_eq!(reopened.execute("project.previewRecoveryPrune", json!({})).unwrap()["binBackups"], 1);
+    let mut retained = Vec::new();
+    filmcraft_format::project_folder::history(folder, |_, hash| {
+        retained.push(hash.to_owned());
+        Ok(())
+    })
+    .unwrap();
+    assert!(retained.contains(&base));
+    let (copy, _) = filmcraft_format::project_folder::restore_copy(folder, reopened.folder_revision().unwrap(), &base, f.cut.0).unwrap();
+    let restored = f.open();
+    assert_eq!(frame(&restored.project, f.cut), 3);
+    assert_eq!(frame(&restored.project, ItemId(copy)), 0);
 }

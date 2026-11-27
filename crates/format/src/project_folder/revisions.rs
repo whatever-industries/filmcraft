@@ -69,13 +69,51 @@ fn edits(old: &[(u64, String)], new: &[(u64, String)], previous: Option<&BTreeMa
 }
 
 pub(super) fn writer(folder: &Path) -> io::Result<File> {
-    let path = folder.join(".writer.lock");
+    let file = lock_file(&folder.join(".writer.lock"), true)?;
+    match try_writer(file) {
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+            // A foreground writer may wait for the maintenance commit window.
+            // Two ordinary editors retain the existing optimistic-lock behaviour.
+            let gate = match lock_file(&folder.join(MAINTENANCE_GATE), false) {
+                Ok(gate) => gate,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => return Err(e),
+                Err(err) => return Err(err),
+            };
+            gate.lock_shared()?;
+            try_writer(lock_file(&folder.join(".writer.lock"), true)?)
+        }
+        other => other,
+    }
+}
+
+const MAINTENANCE_GATE: &str = ".retention-commit.lock";
+
+/// Hold the admission gate until the short catalog or unlink transaction ends.
+/// File verification and history traversal must happen outside these locks.
+pub(super) fn maintenance_writer(folder: &Path) -> io::Result<(File, File)> {
+    let gate = try_writer(lock_file(&folder.join(MAINTENANCE_GATE), true)?)?;
+    let writer = try_writer(lock_file(&folder.join(".writer.lock"), true)?)?;
+    // Drop the writer lock before reopening the foreground admission gate.
+    Ok((writer, gate))
+}
+
+/// Elect one planner across editor sessions without occupying the project writer.
+pub(super) fn retention_worker(folder: &Path) -> io::Result<File> {
+    let lock = lock_file(&folder.join(".retention-worker.lock"), true)?;
+    lock.lock()?;
+    Ok(lock)
+}
+
+fn lock_file(path: &Path, create: bool) -> io::Result<File> {
     match path.symlink_metadata() {
         Ok(meta) if !meta.is_file() => return Err(invalid("project lock must be a regular file")),
         Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
         _ => {}
     }
-    let file = OpenOptions::new().create(true).truncate(false).read(true).write(true).open(path)?;
+    OpenOptions::new().create(create).truncate(false).read(true).write(true).open(path)
+}
+
+fn try_writer(file: File) -> io::Result<File> {
     match file.try_lock() {
         Ok(()) => {}
         Err(TryLockError::WouldBlock) => return Err(io::Error::new(io::ErrorKind::WouldBlock, "another writer holds the project lock")),

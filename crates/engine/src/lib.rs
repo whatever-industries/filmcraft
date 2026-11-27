@@ -791,6 +791,10 @@ impl Session {
     /// Apply worker notifications (call regularly, e.g. once per UI frame). Also applies the
     /// results of finished proxy / ingest jobs.
     pub fn poll_persistence(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(warning) = self.editing_folder.as_ref().and_then(|f| f.snapshot.retention_warning()) {
+            self.error_toast("project.recoveryRetention", format!("Bin backup cleanup needs attention. {warning}"));
+        }
         proxies::poll(self);
         masks::poll(self);
         scene_detect::poll(self);

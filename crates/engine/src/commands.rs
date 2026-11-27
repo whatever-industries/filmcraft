@@ -4263,6 +4263,10 @@ fn build() -> Vec<CommandSpec> {
             enabled: crate::folder_edit::available,
             ..query!("project.previewRecoveryPrune", "Preview Bin Backup Cleanup", r#"{"policy":object?}"#, Session::preview_recovery_prune)
         },
+        CommandSpec {
+            enabled: crate::folder_edit::available,
+            ..query!("project.waitForRecoveryPrune", "Wait for Bin Backup Cleanup", "{}", Session::wait_for_recovery_prune)
+        },
         cmd!(
             "project.setRecoveryRetention",
             "Set Bin Backup Limits",
@@ -5537,10 +5541,14 @@ fn open_project(s: &mut Session, path: &str) -> Result<Value> {
         if !s.allow_project_folders {
             return Err(EngineError::Other("project folders require a local desktop editor".into()));
         }
-        let (snapshot, loaded) =
+        let (mut snapshot, loaded) =
             filmcraft_format::project_folder::FolderSnapshot::open(std::path::Path::new(path)).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
         let mut result = install_loaded_project(s, path, loaded);
         result["folderRevision"] = json!(snapshot.revision());
+        if let Err(e) = snapshot.schedule_retention() {
+            s.error_toast("project.recoveryRetention", format!("Bin backup cleanup needs attention. {e}"));
+            result["retentionWarning"] = json!(e.to_string());
+        }
         s.editing_folder = Some(crate::folder_edit::EditingFolder {
             snapshot,
             departures: Default::default(),

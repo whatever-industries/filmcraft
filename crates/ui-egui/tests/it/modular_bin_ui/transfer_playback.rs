@@ -214,6 +214,7 @@ fn master_recalls_last_saved_source_after_source_save_and_destination_discard() 
         assert!(saved["retentionWarning"].is_null(), "{saved}");
         first.get_or_insert_with(|| disk.folder_revision().unwrap().to_owned());
     }
+    disk.execute("project.waitForRecoveryPrune", json!({})).unwrap();
     filmcraft_format::project_folder::history(f.path.parent().unwrap(), |_, hash| {
         assert_ne!(Some(hash), first.as_deref());
         Ok(())
@@ -292,6 +293,7 @@ fn kill_after_each_arrival_or_final_discard_observes_the_published_cut() {
             assert!(result["retentionWarning"].is_null(), "{result}");
             old.get_or_insert_with(|| session.folder_revision().unwrap().to_owned());
         }
+        session.execute("project.waitForRecoveryPrune", json!({})).unwrap();
         filmcraft_format::project_folder::history(f.path.parent().unwrap(), |_, hash| {
             assert_ne!(Some(hash), old.as_deref());
             Ok(())

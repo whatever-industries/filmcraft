@@ -18,13 +18,15 @@ use std::{
 
 /// The saved revision and verified record files for a locally opened project.
 pub struct FolderSnapshot {
+    retention: super::retention::background::Maintenance,
+    total_bin_backups: u64,
     manifest: PathBuf,
     revision: String,
     files: BTreeMap<String, FileStamp>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct FileStamp {
+pub(super) struct FileStamp {
     len: u64,
     modified: SystemTime,
     #[cfg(unix)]
@@ -32,7 +34,7 @@ struct FileStamp {
 }
 
 impl FileStamp {
-    fn read(path: &Path) -> io::Result<Self> {
+    pub(super) fn read(path: &Path) -> io::Result<Self> {
         let metadata = fs::symlink_metadata(path)?;
         if !metadata.is_file() {
             return Err(invalid(format!("expected a regular file at {}", path.display())));
@@ -115,7 +117,23 @@ impl FolderSnapshot {
         if hashes(&manifest).any(|hash| FileStamp::read(&folder.join(hash)).ok() != files.get(hash).copied()) {
             return Err(invalid("project records changed during open"));
         }
-        Ok((Self { manifest: absolute, revision: digest(&bytes), files }, loaded))
+        let total_bin_backups = manifest.revision.as_ref().map_or(0, |r| r.total_bin_backups);
+        Ok((Self { manifest: absolute, revision: digest(&bytes), files, retention: Default::default(), total_bin_backups }, loaded))
+    }
+
+    /// Resume due or interrupted automatic cleanup after an editor open.
+    pub fn schedule_retention(&mut self) -> io::Result<()> {
+        let folder = self.manifest.parent().ok_or_else(|| invalid("missing project folder"))?;
+        self.retention.schedule(folder, self.total_bin_backups)
+    }
+
+    pub fn retention_warning(&self) -> Option<String> {
+        self.retention.warning()
+    }
+
+    /// Wait for previously scheduled cleanup (batch clients and validation).
+    pub fn wait_for_retention(&self) -> io::Result<()> {
+        self.retention.wait()
     }
 
     pub fn directory(&self) -> io::Result<&Path> {
@@ -292,8 +310,9 @@ impl FolderSnapshot {
         )?;
         let files = hashes(&next).filter_map(|hash| delta.files.get_key_value(hash).map(|(k, v)| (k.clone(), *v))).collect();
         let bytes = delta.bytes;
-        let maintenance_warning =
-            if revision != self.revision { super::retention::after_publication(folder, &revision, &next).err().map(|e| e.to_string()) } else { None };
+        let changed = revision != self.revision;
+        self.total_bin_backups = next.revision.as_ref().map_or(0, |r| r.total_bin_backups);
+        let maintenance_warning = if changed { self.schedule_retention().err().map(|e| e.to_string()) } else { None };
         if let Some(message) = &maintenance_warning {
             log::warn!("project saved; recovery maintenance: {message}");
         }

@@ -178,6 +178,11 @@ impl Session {
         Ok((snapshot.directory().map_err(|e| EngineError::Other(e.to_string()))?, snapshot.revision()))
     }
 
+    pub(crate) fn wait_for_recovery_prune(&mut self, _: &Value) -> Result<Value> {
+        self.folder()?.snapshot.wait_for_retention().map_err(|e| EngineError::Other(e.to_string()))?;
+        Ok(json!({"complete":true}))
+    }
+
     pub(crate) fn recovery_retention(&mut self, _: &Value) -> Result<Value> {
         let (dir, _) = self.recovery_folder()?;
         Ok(json!(filmcraft_format::project_folder::retention_policy(dir).map_err(|e| EngineError::Other(e.to_string()))?))

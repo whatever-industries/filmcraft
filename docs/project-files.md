@@ -181,13 +181,16 @@ In a local modular project, open **Project Settings → Recovery** to set **Bin 
 
 When a bin save takes the project above its limit, cleanup keeps the newest eligible versions up to 90% of the project limit, rounded up, and applies the per-bin limit. A version saved across several bins stays together. Its newest backup can exceed the project count on its own. Older folder revisions created before the editor recorded bin counts share a separate history allowance with settings-only versions. New saves start the counter for those folders.
 
-The live project, explicitly kept versions, the last saved source of a moved sequence, and its departure cut remain recoverable. The project also retains the manifest chain and records shared with any surviving version. The cleanup catalog is part of the project folder. Interrupted cleanup resumes on a later save with automatic pruning enabled. Crash-recovery drafts and dated auto-saves have their own storage.
+The live project, explicitly kept versions, the last saved source of a moved sequence, and its departure cut remain recoverable. The project also retains the manifest chain and records shared with any surviving version. The cleanup catalog is part of the project folder. With automatic pruning enabled, the desktop resumes outstanding cleanup on the next editor open or changed save. Crash-recovery drafts and dated auto-saves have their own storage.
+
+The editor returns from Save after publishing the edits. A background worker verifies the project history and retired records. Before publishing the cleanup catalog or deleting a batch of records, it checks that the saved revision, pins and policy still match. A newer save or changed policy causes the worker to reconsider the remaining work. Cleanup errors are reported separately from the saved edit. The one-shot project-folder save utility completes its cleanup before exiting.
 
 | Local editor command | Action |
 | --- | --- |
 | `project.recoveryRetention {}` | Read the current policy. |
-| `project.setRecoveryRetention {"enabled":true,"maxBinBackups":2000,"versionsPerBin":2000}` | Set this folder’s policy. A change takes effect on a subsequent bin save. |
+| `project.setRecoveryRetention {"enabled":true,"maxBinBackups":2000,"versionsPerBin":2000}` | Set this folder’s policy. In-flight cleanup checks changes before its next commit. Opening the folder or publishing an edit schedules any cleanup due. |
 | `project.previewRecoveryPrune {}` | List the revisions a cleanup would retire or keep and the candidate record count. |
+| `project.waitForRecoveryPrune {}` | Wait for cleanup already scheduled by this editor and report its result. |
 | `project.keepRecoveryVersion {"revision":"…","keep":true}` | Protect a saved version. Set `keep` to false to return it to normal rotation. |
 
 ### Recover a sequence

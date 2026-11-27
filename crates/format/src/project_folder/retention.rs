@@ -10,6 +10,8 @@ use std::{
     path::Path,
 };
 
+pub(super) mod background;
+
 const INDEX: &str = "recovery-retention.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,7 +37,7 @@ impl RetentionPolicy {
     }
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct Catalog {
     through: u64,
@@ -58,6 +60,9 @@ impl Catalog {
     }
     fn outstanding(&self, total: u64) -> u64 {
         self.ordinary_backups.saturating_add(total.saturating_sub(self.processed_backups))
+    }
+    fn due(&self, total: u64) -> bool {
+        self.policy.enabled && (!self.pending.is_empty() || self.outstanding(total) > u64::from(self.policy.max_bin_backups))
     }
     fn write(&self, folder: &Path) -> io::Result<()> {
         let bytes = serde_json::to_vec(self)?;
@@ -107,7 +112,14 @@ struct Plan {
     total: u64,
 }
 
-fn plan(folder: &Path, state: &Catalog, policy: RetentionPolicy, expected: &str, verified_head: Option<&Manifest>) -> io::Result<Plan> {
+fn plan(
+    folder: &Path,
+    state: &Catalog,
+    policy: RetentionPolicy,
+    expected: &str,
+    verified_head: Option<&Manifest>,
+    mut check_progress: impl FnMut() -> io::Result<()>,
+) -> io::Result<Plan> {
     policy.validate()?;
     let from_disk;
     let head = if let Some(head) = verified_head {
@@ -133,7 +145,8 @@ fn plan(folder: &Path, state: &Catalog, policy: RetentionPolicy, expected: &str,
     let mut anchor_found = state.anchor.is_none();
     // Discover the complete set of protected move roots before inspecting any
     // retired payload. Standalone departure snapshots are outside the parent chain.
-    recovery::walk(folder, |hash, m| {
+    recovery::walk_from(folder, expected.to_owned(), head.clone(), |hash, m| {
+        check_progress()?;
         known.insert(hash.to_owned());
         let n = m.revision.as_ref().map_or(0, |r| r.number);
         anchor_found |= state.anchor.as_deref() == Some(hash) && n == state.through;
@@ -149,6 +162,7 @@ fn plan(folder: &Path, state: &Catalog, policy: RetentionPolicy, expected: &str,
         return Err(invalid("retention catalog does not match project history"));
     }
     for hash in move_points {
+        check_progress()?;
         if known.contains(&hash) {
             keep.insert(hash);
         } else {
@@ -161,7 +175,8 @@ fn plan(folder: &Path, state: &Catalog, policy: RetentionPolicy, expected: &str,
     // A save backs up the *previous* state of the bins it changed. The
     // child names those bins even if a bin was removed by that save.
     let mut backed_up = BTreeSet::new();
-    recovery::walk(folder, |hash, m| {
+    recovery::walk_from(folder, expected.to_owned(), head.clone(), |hash, m| {
+        check_progress()?;
         let n = m.revision.as_ref().map_or(0, |r| r.number);
         let available = state.available(n, hash);
         if available && !keep.contains(hash) {
@@ -206,6 +221,7 @@ fn plan(folder: &Path, state: &Catalog, policy: RetentionPolicy, expected: &str,
         }
     }
     for hash in protected {
+        check_progress()?;
         check_hash(&hash)?;
         let data = read_member(&folder.join(&hash), MAX_PROJECT_BYTES)?;
         if digest(&data) != hash {
@@ -230,11 +246,10 @@ fn plan(folder: &Path, state: &Catalog, policy: RetentionPolicy, expected: &str,
 
 pub fn preview_retention(folder: &Path, expected: &str, policy: RetentionPolicy) -> io::Result<RetentionPreview> {
     let _guard = revisions::writer(folder)?;
-    Ok(plan(folder, &Catalog::read(folder)?, policy, expected, None)?.preview)
+    Ok(plan(folder, &Catalog::read(folder)?, policy, expected, None, || Ok(()))?.preview)
 }
 
-fn apply_locked(folder: &Path, expected: &str, policy: RetentionPolicy, mut state: Catalog, verified_head: Option<&Manifest>) -> io::Result<RetentionPreview> {
-    let plan = plan(folder, &state, policy, expected, verified_head)?;
+fn publish_visibility(folder: &Path, expected: &str, state: &mut Catalog, plan: &Plan) -> io::Result<()> {
     state.processed_backups = plan.total;
     state.ordinary_backups = plan.preview.retained_bin_backups;
     state.anchor = Some(expected.to_owned());
@@ -246,6 +261,12 @@ fn apply_locked(folder: &Path, expected: &str, policy: RetentionPolicy, mut stat
     state.write(folder)?;
     #[cfg(unix)]
     fs::File::open(folder)?.sync_all()?;
+    Ok(())
+}
+
+fn apply_locked(folder: &Path, expected: &str, policy: RetentionPolicy, mut state: Catalog, verified_head: Option<&Manifest>) -> io::Result<RetentionPreview> {
+    let plan = plan(folder, &state, policy, expected, verified_head, || Ok(()))?;
+    publish_visibility(folder, expected, &mut state, &plan)?;
     if !plan.garbage.is_empty() {
         for hash in plan.garbage {
             let path = folder.join(&hash);

@@ -10,12 +10,19 @@ use std::{io, path::Path};
 
 pub(super) const SIDECARS: [&str; 3] = ["transcripts", "source_graphics", "narrations"];
 
-pub(super) fn walk(folder: &Path, mut visit: impl FnMut(&str, &Manifest) -> io::Result<bool>) -> io::Result<Option<Manifest>> {
-    let mut bytes = read_member(&folder.join(ROOT), MANIFEST_LIMIT)?;
-    let mut hash = digest(&bytes);
+pub(super) fn walk(folder: &Path, visit: impl FnMut(&str, &Manifest) -> io::Result<bool>) -> io::Result<Option<Manifest>> {
+    let bytes = read_member(&folder.join(ROOT), MANIFEST_LIMIT)?;
+    walk_from(folder, digest(&bytes), serde_json::from_slice(&bytes)?, visit)
+}
+
+pub(super) fn walk_from(
+    folder: &Path,
+    mut hash: String,
+    mut manifest: Manifest,
+    mut visit: impl FnMut(&str, &Manifest) -> io::Result<bool>,
+) -> io::Result<Option<Manifest>> {
     let mut expected_number = None;
     loop {
-        let manifest: Manifest = serde_json::from_slice(&bytes)?;
         check_manifest(&manifest)?;
         let number = manifest.revision.as_ref().map_or(0, |r| r.number);
         if expected_number.is_some_and(|n| number != n) {
@@ -26,10 +33,11 @@ pub(super) fn walk(folder: &Path, mut visit: impl FnMut(&str, &Manifest) -> io::
         }
         let Some(revision) = manifest.revision else { return Ok(None) };
         // check_manifest validated the parent digest and nonzero revision number.
-        bytes = read_member(&folder.join(&revision.parent), MANIFEST_LIMIT)?;
+        let bytes = read_member(&folder.join(&revision.parent), MANIFEST_LIMIT)?;
         if digest(&bytes) != revision.parent {
             return Err(invalid(format!("damaged archived manifest {}", revision.parent)));
         }
+        manifest = serde_json::from_slice(&bytes)?;
         hash = revision.parent;
         expected_number = Some(number - 1);
     }
