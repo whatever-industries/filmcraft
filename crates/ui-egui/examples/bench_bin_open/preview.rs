@@ -1,9 +1,11 @@
 //! A read-only window for prepared fixtures. The partial session is private to this
 //! viewer. Its only interactions are bin navigation and rendering a selected timeline.
+#[path = "cache.rs"]
+mod cache;
 use super::{Result, reader::Reader};
 use egui_kittest::{Harness, kittest::Queryable};
 use filmcraft_engine::Session;
-use filmcraft_format::{MAX_PROJECT_BYTES, atomic_write_new};
+use filmcraft_format::{MAX_PROJECT_BYTES, atomic_write_new, project_folder::FolderDirectory};
 use filmcraft_media::reader::read_regular_file_bounded;
 use filmcraft_project::{BinEntry, BinId, ItemId, ProjectItem, ProjectView};
 use filmcraft_ui_egui::i18n::t;
@@ -38,6 +40,7 @@ impl Index {
     fn digest(&self) -> Result<String> {
         Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(&(&self.manifest, &self.keys, &self.labels))?)))
     }
+
     fn read(path: &Path) -> Result<Self> {
         let index: Self = serde_json::from_slice(&read_regular_file_bounded(path, MAX_PROJECT_BYTES)?)?;
         if let Some(checksum) = &index.checksum {
@@ -49,6 +52,38 @@ impl Index {
         }
         Ok(index)
     }
+
+    fn build(directory: &FolderDirectory, old: Option<Self>) -> Result<(Self, usize, u64)> {
+        let mut old = old.filter(|index| index.checksum.is_some());
+        let mut remaining = directory.remaining_item_bytes;
+        let before = remaining;
+        let mut labels = BTreeMap::new();
+        let mut keys = BTreeMap::new();
+        let mut decoded = 0;
+        for (id, key) in directory.item_keys() {
+            let reused = old.as_mut().filter(|index| index.keys.get(&id).is_some_and(|k| k == key)).and_then(|index| index.labels.remove(&id));
+            let label = match reused {
+                Some(label) => label,
+                None => {
+                    decoded += 1;
+                    Label::from(&directory.read_item(id, &mut remaining)?)
+                }
+            };
+            labels.insert(id, label);
+            keys.insert(id, key.to_owned());
+        }
+        let mut next = Index { manifest: directory.revision.clone(), labels, keys, checksum: None };
+        next.checksum = Some(next.digest()?);
+        Ok((next, decoded, before - remaining))
+    }
+
+    fn bytes(&self) -> Result<Vec<u8>> {
+        let data = serde_json::to_vec(self)?;
+        if data.len() as u64 > MAX_PROJECT_BYTES {
+            return Err("name index exceeds the size limit".into());
+        }
+        Ok(data)
+    }
 }
 
 pub(super) fn index(path: &Path, out: &Path) -> Result<()> {
@@ -57,35 +92,14 @@ pub(super) fn index(path: &Path, out: &Path) -> Result<()> {
 
 pub(super) fn refresh(path: &Path, prior: Option<&Path>, out: &Path) -> Result<()> {
     let start = Instant::now();
-    let mut old = prior.map(Index::read).transpose()?.filter(|index| index.checksum.is_some());
+    let old = prior.map(Index::read).transpose()?;
     let directory = Reader::open(path)?.directory;
-    let mut remaining = directory.remaining_item_bytes;
-    let before = remaining;
-    let mut labels = BTreeMap::new();
-    let mut keys = BTreeMap::new();
-    let mut decoded = 0;
-    for (id, key) in directory.item_keys() {
-        let reused = old.as_mut().filter(|index| index.keys.get(&id).is_some_and(|k| k == key)).and_then(|index| index.labels.remove(&id));
-        let label = match reused {
-            Some(label) => label,
-            None => {
-                decoded += 1;
-                Label::from(&directory.read_item(id, &mut remaining)?)
-            }
-        };
-        labels.insert(id, label);
-        keys.insert(id, key.to_owned());
-    }
-    let mut next = Index { manifest: directory.revision, labels, keys, checksum: None };
-    next.checksum = Some(next.digest()?);
-    let data = serde_json::to_vec(&next)?;
-    if data.len() as u64 > MAX_PROJECT_BYTES {
-        return Err("name index exceeds the size limit".into());
-    }
+    let (next, decoded, item_bytes) = Index::build(&directory, old)?;
+    let data = next.bytes()?;
     atomic_write_new(out, &data)?;
     println!(
         "{}",
-        json!({"items":next.labels.len(),"decoded":decoded,"itemBytes":before-remaining,"directoryBytes":directory.bytes_read,"indexBytes":data.len(),"ms":start.elapsed().as_secs_f64()*1000.0})
+        json!({"items":next.labels.len(),"decoded":decoded,"itemBytes":item_bytes,"directoryBytes":directory.bytes_read,"indexBytes":data.len(),"ms":start.elapsed().as_secs_f64()*1000.0})
     );
     Ok(())
 }
@@ -103,24 +117,28 @@ struct Preview {
 
 impl Preview {
     fn open(path: &Path, index: Option<&Path>) -> Result<Self> {
+        if let Some(index) = index {
+            return Self::from_index(path, Reader::open(path)?, Index::read(index)?);
+        }
+        let mut session = Session::local_folder_editor();
+        session.execute("file.open", json!({"path":path}))?;
+        let labels = session.project.items.iter().map(|(&id, item)| (id, Label::from(item))).collect();
+        let view = session.project_view();
+        Self::from_session(session, None, labels, view)
+    }
+
+    fn from_index(path: &Path, mut reader: Reader, catalog: Index) -> Result<Self> {
+        if reader.directory.revision != catalog.manifest || !reader.inventory().eq(catalog.labels.keys().copied()) {
+            return Err("name index does not match this project manifest".into());
+        }
         let mut session = Session::default();
-        let (reader, labels, view) = if let Some(index) = index {
-            let mut reader = Reader::open(path)?;
-            let catalog = Index::read(index)?;
-            if reader.directory.revision != catalog.manifest || !reader.inventory().eq(catalog.labels.keys().copied()) {
-                return Err("name index does not match this project manifest".into());
-            }
-            session.project = Arc::new(reader.take_project()?);
-            session.path = Some(path.to_str().ok_or("invalid project path")?.to_owned());
-            let view = reader.view.clone();
-            (Some(reader), catalog.labels, view)
-        } else {
-            session = Session::local_folder_editor();
-            session.execute("file.open", json!({"path":path}))?;
-            let labels = session.project.items.iter().map(|(&id, item)| (id, Label::from(item))).collect();
-            let view = session.project_view();
-            (None, labels, view)
-        };
+        session.project = Arc::new(reader.take_project()?);
+        session.path = Some(path.to_str().ok_or("invalid project path")?.to_owned());
+        let view = reader.view.clone();
+        Self::from_session(session, Some(reader), catalog.labels, view)
+    }
+
+    fn from_session(session: Session, reader: Option<Reader>, labels: BTreeMap<ItemId, Label>, view: ProjectView) -> Result<Self> {
         let bin = session.project.root.id;
         let active = view.active_sequence.ok_or("preview requires a saved active timeline")?;
         if !view.open_sequences.contains(&active) || view.open_sequences.iter().any(|id| !labels.get(id).is_some_and(|l| l.sequence)) {
@@ -236,9 +254,19 @@ impl eframe::App for Preview {
     }
 }
 
-pub(super) fn window(path: &Path, index: &Path) -> Result<()> {
-    let preview = Preview::open(path, Some(index))?;
-    eframe::run_native(t("FilmCraft · Read-only preview"), eframe::NativeOptions::default(), Box::new(move |_| Ok(Box::new(preview))))?;
+pub(super) fn window(path: &Path, index: Option<&Path>) -> Result<()> {
+    eframe::run_native(
+        t("FilmCraft · Read-only preview"),
+        eframe::NativeOptions::default(),
+        Box::new(move |_| {
+            let preview = match index {
+                Some(index) => Preview::open(path, Some(index)),
+                None => cache::open(path),
+            }
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+            Ok(Box::new(preview))
+        }),
+    )?;
     Ok(())
 }
 

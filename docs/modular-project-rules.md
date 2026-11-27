@@ -216,4 +216,14 @@ To refresh, supply the previous index and a new destination file outside the pro
 "$bench" preview "$manifest" "$new_index"
 ```
 
-**Next stage.** Have the read-only preview locate and refresh its own local index. Test a save that publishes another revision during a refresh, a missing cache, and cleanup of abandoned staging files after an interrupted refresh. Keep cache maintenance off the editor Save path. Once the preview reliably selects the current revision, qualify project-wide search and relink across unloaded bins before allowing writes from a partially loaded project. [History tests](../crates/ui-egui/examples/bench_bin_open/history_tests.rs)
+### Automatic index refresh in the developer preview
+
+Open a modular project with `"$bench" preview "$manifest"`. The preview locates a private cache by the project folder’s canonical path under FilmCraft’s per-user data directory. On open it reuses a current index, refreshes changed entries from a valid older index, or rebuilds a missing or damaged index. The explicit index commands above remain available for comparisons.
+
+The preview builds the bin listing and renders the first frame from the same captured manifest. It checks the published manifest again before handing the view to the window. If a newer save arrived, it retries with that revision, up to twice. Continued changes produce a reopen message. After opening, the preview stays on the displayed save until reopened.
+
+A cache-only lock protects staging, publication, and cleanup. A second preview that encounters the lock reports that the cache is busy. Editor Save takes no cache lock. A completed index replaces the previous file atomically. On the next open, the lock holder removes abandoned staging files in that project's cache.
+
+The regression tests paused a refresh after staging, renamed the master and switched its camera through an ordinary editor Save, and compared the first frame, listing, and index against a full reopen and rebuild. A second test killed a process holding the cache lock after staging. Another preview had respected its live staging file. Reopening preserved the project and previous publication through the interruption, removed the abandoned file, and rebuilt the exact index for the saved cut. Warm reuse, incremental refresh with an unavailable deferred cut, damaged-cache rebuild, and the retry limit are also covered. [Automatic refresh tests](../crates/ui-egui/examples/bench_bin_open/cache_tests.rs)
+
+**Next stage.** Qualify project-wide search and relink across unloaded bins before allowing writes from a partially loaded project.

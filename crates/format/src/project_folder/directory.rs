@@ -33,6 +33,11 @@ struct Record {
 }
 
 impl FolderDirectory {
+    /// Read only the current manifest to check whether a captured directory is still current.
+    pub fn published_revision(path: &Path) -> io::Result<String> {
+        Ok(digest(&read_member(path, MANIFEST_LIMIT)?))
+    }
+
     pub fn open(path: &Path) -> io::Result<Self> {
         if path.file_name().is_none_or(|name| name != ROOT) {
             return Err(invalid("expected project.fcmod"));

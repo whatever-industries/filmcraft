@@ -146,7 +146,8 @@ pub(super) fn run() -> Result<()> {
     match args.as_slice() {
         [mode, path, old, out] if mode == "refresh" => preview::refresh(Path::new(path), Some(Path::new(old)), Path::new(out)),
         [mode, path, out] if mode == "index" => preview::index(Path::new(path), Path::new(out)),
-        [mode, path, index] if mode == "preview" => preview::window(Path::new(path), Path::new(index)),
+        [mode, path] if mode == "preview" => preview::window(Path::new(path), None),
+        [mode, path, index] if mode == "preview" => preview::window(Path::new(path), Some(Path::new(index))),
         [mode, path, bin] if mode == "frames" => preview::measure_frames(Path::new(path), None, BinId(bin.parse()?)),
         [mode, path, bin, index] if mode == "frames" => preview::measure_frames(Path::new(path), Some(Path::new(index)), BinId(bin.parse()?)),
         [mode, source, destination] if mode == "prepare" => prepare(Path::new(source), Path::new(destination)),
@@ -158,7 +159,7 @@ pub(super) fn run() -> Result<()> {
         [mode, path, bin] if mode == "active" || mode == "all-tabs" => selective(Path::new(path), BinId(bin.parse()?), mode == "all-tabs"),
         _ => Err(concat!(
             "expected prepare SOURCE.fcproj NEW_DIRECTORY, measure PROJECT BIN_ID, ",
-            "active|all-tabs|verify FOLDER_MANIFEST BIN_ID, index|preview FOLDER_MANIFEST INDEX, ",
+            "active|all-tabs|verify FOLDER_MANIFEST BIN_ID, index FOLDER_MANIFEST INDEX, preview FOLDER_MANIFEST [INDEX], ",
             "refresh FOLDER_MANIFEST PRIOR_INDEX NEW_INDEX, or frames PROJECT BIN_ID [INDEX]"
         )
         .into()),
