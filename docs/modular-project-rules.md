@@ -419,4 +419,4 @@ The extra RSS is the largest simultaneous writer-minus-pending difference observ
 | 48,000 | Writer | 66.3 MiB | 66.3 MiB | 66.4 MiB |
 | 48,000 | Pending | 45.5 MiB | 45.5 MiB | 45.6 MiB |
 
-The desktop relink remains opt-in. These local timing measurements are available for choosing a limit.
+The desktop relink remains opt-in. Checkpoint duration is recorded for comparison. Acceptance requires the bin to stay Unsaved, the last confirmed draft to survive an interrupted replacement, and the first checkpoint to stay within 64 MiB of extra memory on each benchmark project.
