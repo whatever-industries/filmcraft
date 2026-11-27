@@ -449,6 +449,8 @@ pub struct UiState {
     pub marker_properties: Option<crate::panels::marker_properties::Draft>,
     #[serde(skip)]
     pub custom_label_color: Option<crate::panels::custom_colors::Draft>,
+    #[serde(skip)]
+    pub sequence_recovery: Option<crate::panels::sequence_recovery::Draft>,
     #[serde(default)]
     pub language: crate::i18n::Language,
     pub tool: Tool,
@@ -1017,6 +1019,7 @@ impl Default for UiState {
             markers_panel: Default::default(),
             palette_manager: None,
             custom_label_color: None,
+            sequence_recovery: None,
             language: crate::i18n::Language::default(),
             tool: Tool::Selection,
             mode: Mode::Edit,

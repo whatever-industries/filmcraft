@@ -40,6 +40,14 @@ pub(super) struct Transfers {
 }
 
 impl Revision {
+    pub(super) fn saved_at(&self) -> Option<String> {
+        self.bin_edits
+            .values()
+            .chain(self.item_edits.values())
+            .find(|e| e.revision == self.number)
+            .and_then(|e| chrono::DateTime::from_timestamp_millis(e.utc_ms))
+            .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
+    }
     pub(super) fn validate(&self) -> io::Result<()> {
         if self.number == 0
             || !is_digest(&self.parent)

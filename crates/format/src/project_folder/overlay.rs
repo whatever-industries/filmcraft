@@ -47,7 +47,7 @@ fn by_id<'a>(array: &'a [Value], key: &str, path: &str) -> io::Result<BTreeMap<u
 
 // Missing serialized defaults are common. Only data present in the original and
 // absent from the typed snapshot needs an owner when an unkeyed collection changes.
-fn extra(raw: &Value, typed: &Value) -> bool {
+pub(super) fn extra(raw: &Value, typed: &Value) -> bool {
     match (raw, typed) {
         (Value::Object(a), Value::Object(b)) => a.iter().any(|(k, v)| b.get(k).is_none_or(|known| extra(v, known))),
         (Value::Array(a), Value::Array(b)) => a.len() != b.len() || a.iter().zip(b).any(|(r, t)| extra(r, t)),

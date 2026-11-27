@@ -110,6 +110,7 @@ impl Session {
     }
 }
 
+mod recovery;
 mod scope;
 
 pub(crate) fn available(s: &Session) -> std::result::Result<(), String> {

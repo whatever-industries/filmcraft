@@ -379,3 +379,74 @@ fn modular_recovery_limits_can_be_disabled_in_project_settings() {
     d.click("projectSettings.ok");
     assert_eq!(open(&f.path).execute("project.recoveryRetention", json!({})).unwrap()["enabled"], false);
 }
+
+#[test]
+fn restoring_a_saved_sequence_is_undoable_and_export_preserves_a_changed_nested_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = Folder::create(dir.path());
+    let mut d = f.driver();
+    let initial = d.app().session.folder_revision().unwrap().to_owned();
+    let sequence = f.sequence;
+    let change = |d: &mut Driver, n| {
+        d.app()
+            .session
+            .edit("Change cut", |p, _| {
+                p.sequence_mut(sequence).unwrap().start_timecode = n;
+                Ok(())
+            })
+            .unwrap();
+    };
+    change(&mut d, 11);
+    d.exec("file.save", json!({}));
+    change(&mut d, 23);
+    d.exec("file.projectSettings.general", json!({"titleSafe":[12,14]}));
+    let today = d.app().session.project.clone();
+    let browse = |d: &mut Driver| {
+        d.ok("ui.menu.invoke", json!({"id":"project.restoreSequenceCopy"}));
+        d.frames(3);
+        let _ = d.harness.get_by_role_and_label(egui::accesskit::Role::Dialog, "Restore Sequence from Backup");
+        assert!(d.harness.get_by_label_contains("Save 1").is_focused());
+        d.click("sequenceRecovery.version.0.save");
+    };
+    browse(&mut d);
+    d.click(&format!("sequenceRecovery.sequence.{}", sequence.0));
+    let _ = d.harness.get_by_role_and_label(egui::accesskit::Role::Button, "Restore as Copy");
+    support::save_shot(&mut d, 0, "restore-sequence-backup.png");
+    d.harness.get_by_role_and_label(egui::accesskit::Role::Button, "Restore as Copy").focus();
+    d.frames(2);
+    d.ok("ui.key", json!({"key":"Enter"}));
+    d.frames(3);
+    let copy = d.app().session.project.sequences().find(|it| it.name == "Interview (Recovered)").unwrap().id;
+    assert_eq!(d.app().session.project.sequence(copy).unwrap().start_timecode, 0);
+    assert_eq!(d.app().session.project.sequence(sequence).unwrap().start_timecode, 23);
+    assert_eq!(d.app().session.project.root.parent_of(copy), Some(f.selects));
+    assert!(open(&f.path).project.item(copy).is_none());
+    d.exec("edit.undo", json!({}));
+    assert_eq!(d.app().session.project, today);
+    d.exec("edit.redo", json!({}));
+    browse(&mut d);
+    d.click("sequenceRecovery.version.1.save");
+    d.click(&format!("sequenceRecovery.sequence.{}", f.master.0));
+    d.click("sequenceRecovery.restore");
+    let _ = d.harness.get_by_label_contains("Use Export Separate Project");
+    assert!(d.app().session.project.sequences().all(|it| it.name != "Master (Recovered)"));
+    let path = dir.path().join("rescue.fcproj");
+    let out = path.display().to_string();
+    d.app().hooks.pick_save_as = Some(Box::new(move |_, _, _| Some(out.clone())));
+    d.click("sequenceRecovery.export");
+    d.frames(4);
+    let bytes = fs::read(&path).unwrap();
+    let exported = filmcraft_format::decode(&bytes).unwrap().project;
+    assert_eq!(exported.sequence(sequence).unwrap().start_timecode, 11);
+    assert_eq!(exported.sequence(f.master).unwrap().video_tracks[0].items[0].item, sequence);
+    assert!(d.app().session.execute("project.exportRecoverySequence", json!({"revision":initial,"sequence":f.master,"path":path})).is_err());
+    assert_eq!(fs::read(path).unwrap(), bytes);
+    d.ok("ui.key", json!({"key":"Escape"}));
+    d.frames(3);
+    assert!(d.harness.query_by_label("Restore as Copy").is_none());
+    d.exec("file.save", json!({}));
+    let reopened = open(&f.path);
+    assert_eq!(reopened.project.sequence(copy).unwrap().start_timecode, 0);
+    assert_eq!(reopened.project.sequence(sequence).unwrap().start_timecode, 23);
+    assert_eq!(reopened.project.settings.title_safe, (12.0, 14.0));
+}

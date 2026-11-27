@@ -179,6 +179,9 @@ pub fn route(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: &Val
     // New Item sends the bin it was clicked in (null = root); the Color Matte dialog takes it
     let carried = if id == "file.newColorMatte" { crate::panels::project::bin_only(params) } else { None };
     let empty = params.as_object().is_none_or(|m| m.is_empty()) || carried.is_some();
+    if id == "project.restoreSequenceCopy" && empty && dialogs {
+        return Some(super::sequence_recovery::open(app, ctx));
+    }
     // UI commands
     match id {
         "view.dynamicAudioWaveforms" => {

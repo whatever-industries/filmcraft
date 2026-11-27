@@ -20,7 +20,7 @@ pub use retention::{RetentionPolicy, RetentionPreview, configure_retention, keep
 
 pub use editor::checkpoint::{CheckpointStore, CheckpointWrite, load_checkpoint, remove_checkpoint_records};
 pub use editor::{Departure, DepartureCut, FolderSnapshot, SaveResult, TransferSave, detached_project};
-pub use recovery::{history, move_backups, rescue, restore_copy};
+pub use recovery::{EditorRestore, editor_restore, historical_sequences, history, move_backups, recovery_versions, rescue, rescue_bytes, restore_copy};
 pub use revisions::{checkout, save, save_with};
 
 pub const ROOT: &str = "project.fcmod";

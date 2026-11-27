@@ -384,7 +384,7 @@ fn damaged_record_blocks_bin_decisions_and_standard_projects_disable_them() {
         assert_eq!(manifest(&f), published);
     }
     s.execute("file.open", json!({"path":dir.path().join("Feature.fcproj")})).unwrap();
-    for cmd in ["project.binStatus", "project.saveBin", "project.discardBin"] {
+    for cmd in ["project.binStatus", "project.saveBin", "project.discardBin", "project.restoreSequenceCopy", "project.exportRecoverySequence"] {
         assert!(!s.is_enabled(cmd));
     }
 }
@@ -424,6 +424,19 @@ fn save_removal_protects_departure_version_and_discard_preserves_the_saved_cut()
         })
         .unwrap();
         let backup = backup.unwrap();
+        let versions = s.execute("project.recoveryVersions", json!({})).unwrap();
+        assert!(
+            versions["versions"].as_array().unwrap().iter().any(|v| v["moves"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["snapshot"] == backup && m["sequence"] == f.cut.0))
+        );
+        let restored = s.execute("project.restoreSequenceCopy", json!({"revision":backup,"sequence":f.cut})).unwrap();
+        let recovered = ItemId(restored["item"].as_u64().unwrap());
+        assert_eq!(frame(&s.project, recovered), 2);
+        assert_eq!(s.project.root.parent_of(recovered), Some(s.project.root.id));
+        s.execute("edit.undo", json!({})).unwrap();
         let version1 = dir.path().join("original.fcproj");
         filmcraft_format::project_folder::rescue(folder, &original, f.cut.0, &version1).unwrap();
         assert_eq!(frame(&filmcraft_format::decode(&fs::read(version1).unwrap()).unwrap().project, f.cut), 0);
@@ -664,4 +677,28 @@ fn an_editor_can_save_and_pin_while_pruning_waits_and_reopen_finishes_the_work()
     let restored = f.open();
     assert_eq!(frame(&restored.project, f.cut), 3);
     assert_eq!(frame(&restored.project, ItemId(copy)), 0);
+}
+
+#[test]
+fn browsing_older_pages_and_a_retired_selection_preserve_the_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = Fixture::new(dir.path());
+    let mut s = f.open();
+    let original = s.folder_revision().unwrap().to_owned();
+    for n in 1..=15 {
+        trim(&mut s, f.cut, n);
+        s.execute("file.save", json!({})).unwrap();
+    }
+    let page = s.execute("project.recoveryVersions", json!({})).unwrap();
+    let older = s.execute("project.recoveryVersions", json!({"before":page["before"]})).unwrap();
+    let numbers: Vec<_> = [page, older].iter().flat_map(|p| p["versions"].as_array().unwrap()).map(|v| v["number"].as_u64().unwrap()).collect();
+    assert_eq!(numbers, (0..=15).rev().collect::<Vec<_>>());
+    s.execute("project.setRecoveryRetention", json!({"enabled":true,"maxBinBackups":1,"versionsPerBin":1})).unwrap();
+    trim(&mut s, f.cut, 16);
+    s.execute("file.save", json!({})).unwrap();
+    s.execute("project.waitForRecoveryPrune", json!({})).unwrap();
+    trim(&mut s, f.cut, 21);
+    let before = s.project.clone();
+    assert!(s.execute("project.restoreSequenceCopy", json!({"revision":original,"sequence":f.cut})).is_err());
+    assert_eq!(s.project, before);
 }

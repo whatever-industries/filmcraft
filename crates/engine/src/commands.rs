@@ -2027,6 +2027,16 @@ fn build() -> Vec<CommandSpec> {
             let path = str_p(p, "path").ok_or_else(|| bad("file.open", "need `path`"))?.to_string();
             open_project(s, &path)
         }),
+        #[cfg(not(target_arch = "wasm32"))]
+        cmd!(
+            "project.restoreSequenceCopy",
+            "Restore Sequence from Backup…",
+            ["File"],
+            None,
+            r#"{"revision":str,"sequence":id}"#,
+            crate::folder_edit::available,
+            Session::restore_sequence_copy
+        ),
         cmd!("file.recover", "Recover Unsaved Changes…", ["File"], None, r#"{"id":str?}"#, has_recovery, |s, p| recover(s, str_p(p, "id"))),
         cmd!("file.discardRecovery", "Discard Unsaved Changes", [], None, r#"{"id":str?,"all":bool?}"#, has_recovery, |s, p| {
             let all = bool_p(p, "all").unwrap_or(false);
@@ -4257,6 +4267,23 @@ fn build() -> Vec<CommandSpec> {
     ];
     #[cfg(not(target_arch = "wasm32"))]
     v.extend([
+        CommandSpec {
+            enabled: crate::folder_edit::available,
+            ..query!("project.recoveryVersions", "List Sequence Backups", r#"{"before":int?}"#, Session::recovery_versions)
+        },
+        CommandSpec {
+            enabled: crate::folder_edit::available,
+            ..query!("project.recoverySequences", "List Sequences in Backup", r#"{"revision":str,"sequence":id?}"#, Session::recovery_sequences)
+        },
+        cmd!(
+            "project.exportRecoverySequence",
+            "Export Historical Sequence",
+            [],
+            None,
+            r#"{"revision":str,"sequence":id,"path":str}"#,
+            crate::folder_edit::available,
+            Session::export_recovery_sequence
+        ),
         CommandSpec { enabled: crate::folder_edit::available, ..query!("project.binStatus", "Bin Save Status", "{}", Session::bin_status) },
         CommandSpec { enabled: crate::folder_edit::available, ..query!("project.recoveryRetention", "Bin Backup Limits", "{}", Session::recovery_retention) },
         CommandSpec {

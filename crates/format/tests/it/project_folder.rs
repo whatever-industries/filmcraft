@@ -758,3 +758,22 @@ fn a_trim_replaces_only_its_item_and_manifest_and_storage_full_can_retry() {
     let new = fs::read_to_string(&marker).unwrap();
     assert_eq!(load_checkpoint(dir.path(), &new).unwrap().project, *project);
 }
+
+#[test]
+fn editor_restore_offers_lossless_export_for_unknown_cut_fields() {
+    use filmcraft_format::project_folder::{EditorRestore, FolderSnapshot, editor_restore};
+    let dir = tempdir().unwrap();
+    let folder = dir.path().join("project");
+    let source = dir.path().join("original.fcproj");
+    let mut doc = current();
+    doc["project"]["items"]["73"]["kind"]["Sequence"]["extension_example"] = json!({"take":2});
+    write_doc(&source, &doc);
+    pack(&source, &folder, atomic_write_new).unwrap();
+    let (snapshot, live) = FolderSnapshot::open(&folder.join(ROOT)).unwrap();
+    let revision = snapshot.revision();
+    assert!(matches!(editor_restore(&folder, revision, revision, 73, &live.project).unwrap(), EditorRestore::ExportRequired(_)));
+    let output = dir.path().join("historical.fcproj");
+    rescue(&folder, revision, 73, &output).unwrap();
+    let recovered: Value = serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
+    assert_eq!(recovered["project"]["items"]["73"], doc["project"]["items"]["73"]);
+}

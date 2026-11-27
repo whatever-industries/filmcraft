@@ -488,6 +488,7 @@ pub(crate) mod transcript_cache;
 
 pub mod custom_colors;
 pub mod marker_properties;
+pub mod sequence_recovery;
 
 pub mod markers_panel;
 pub mod palette_manager;

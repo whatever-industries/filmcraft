@@ -195,6 +195,12 @@ The editor returns from Save after publishing the edits. A background worker ver
 
 ### Recover a sequence
 
+In a local modular project, choose **File → Restore Sequence from Backup…**. Select a saved version or a move backup, then select a sequence. **Restore as Copy** adds the historical cut to the working project with a fresh ID. It goes in the current sequence’s bin, or the project root if the sequence has no bin. The copy is Unsaved and undoable. Use Save to publish outstanding edits, or save its bin through the bin’s close prompt.
+
+If a required source changed in the saved project or in your current edit, choose **Export Separate Project…** and give it a new `.fcproj` filename. The export carries the historical cut and the source records it needs. Media files stay at their referenced locations. A historical cut carrying extension data the editor cannot preserve can also be exported this way.
+
+The local editor exposes the same actions to automation. `project.recoveryVersions` returns a page of saves with move snapshots and a `before` cursor for the next page. `project.recoverySequences` takes a revision digest and lists sequence IDs and names. Pass the digest and sequence ID to `project.restoreSequenceCopy`. Its result contains either the new item ID or `exportRequired` and a reason. `project.exportRecoverySequence` takes the same selection and a new file path.
+
 Run `project_folder history FOLDER` to list revision numbers and digests, newest first.
 Run `project_folder move-backups FOLDER` to list each recorded publication with its revision number, source bin ID, destination bin ID, sequence ID, last saved source digest, and departure snapshot digest. Use the last digest to recover the exact cut as it left the source bin.
 

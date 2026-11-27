@@ -144,9 +144,13 @@ pub(super) fn verify_cut(folder: &Path, hash: &str, sequence: u64) -> io::Result
     encode_at(folder, cut, &folder.join(ROOT)).map(|_| ())
 }
 
-pub fn rescue(folder: &Path, revision: &str, sequence: u64, output: &Path) -> io::Result<()> {
+pub fn rescue_bytes(folder: &Path, revision: &str, sequence: u64, output: &Path) -> io::Result<Vec<u8>> {
     let records = extract(folder, &at(folder, revision)?, sequence)?;
-    atomic_write_new(output, &encode_at(folder, records, output)?)
+    encode_at(folder, records, output)
+}
+
+pub fn rescue(folder: &Path, revision: &str, sequence: u64, output: &Path) -> io::Result<()> {
+    atomic_write_new(output, &rescue_bytes(folder, revision, sequence, output)?)
 }
 
 pub fn restore_copy(folder: &Path, expected: &str, historical: &str, sequence: u64) -> io::Result<(u64, String)> {
@@ -158,20 +162,11 @@ pub fn restore_copy(folder: &Path, expected: &str, historical: &str, sequence: u
     let manifest = serde_json::from_slice(&current)?;
     let mut live = read_records(folder, &manifest)?;
     let mut recovered = extract(folder, &at(folder, historical)?, sequence)?;
+    if let Some(reason) = dependency_conflict(&recovered, sequence, &live.envelope, &live.items) {
+        return Err(invalid(format!("{reason}; use rescue to export the historical sequence")));
+    }
     let past = &recovered.envelope["project"];
     let present = live.envelope.get_mut("project").filter(|value| value.is_object()).ok_or_else(|| invalid("missing current project metadata"))?;
-    if past.get("luts") != present.get("luts") {
-        return Err(invalid("project LUT library changed; use rescue to export the historical sequence"));
-    }
-    for (&id, value) in &recovered.items {
-        if id == sequence {
-            continue;
-        }
-        let key = id.to_string();
-        if live.items.get(&id) != Some(value) || SIDECARS.iter().any(|field| past[field].get(&key) != present[field].get(&key)) {
-            return Err(invalid(format!("dependency item {id} changed or is missing; use rescue to export the historical sequence")));
-        }
-    }
     let project = crate::decode(&super::assemble(folder, &manifest, &root)?).map_err(invalid)?.project;
     // The standard reader repairs low next_id values. Include this historical cut's
     // internal IDs too, even if they were deleted from the live project.
@@ -198,4 +193,111 @@ pub fn restore_copy(folder: &Path, expected: &str, historical: &str, sequence: u
     let bin = live.bins.get_mut(&bin_id.0).ok_or_else(|| invalid("missing destination bin"))?;
     bin["children"].as_array_mut().ok_or_else(|| invalid("missing bin children"))?.push(json!({"Item":id}));
     Ok((id, revisions::save_with(folder, expected, live, revisions::publish)?))
+}
+
+fn dependency_conflict(recovered: &ProjectRecords, sequence: u64, live_envelope: &Value, live_items: &BTreeMap<u64, Value>) -> Option<String> {
+    let past = &recovered.envelope["project"];
+    let present = &live_envelope["project"];
+    if past.get("luts") != present.get("luts") {
+        return Some("project LUT library changed".into());
+    }
+    recovered.items.iter().find_map(|(&id, value)| {
+        let key = id.to_string();
+        (id != sequence && (live_items.get(&id) != Some(value) || SIDECARS.iter().any(|field| past[field].get(&key) != present[field].get(&key))))
+            .then(|| format!("dependency item {id} changed or is missing"))
+    })
+}
+
+/// A page is bounded by save numbers so a move backup stays with its save.
+pub fn recovery_versions(folder: &Path, before: Option<u64>) -> io::Result<Value> {
+    let catalog = super::retention::Catalog::read(folder)?;
+    let mut versions = Vec::new();
+    let mut next = None;
+    walk(folder, |hash, m| {
+        let number = m.revision.as_ref().map_or(0, |r| r.number);
+        let moves = m.revision.as_ref().map_or(&[][..], |r| r.moves.as_slice());
+        let available = catalog.available(number, hash);
+        if before.is_none_or(|n| number < n) && (available || !moves.is_empty()) {
+            if versions.len() == 12 {
+                next = Some(number + 1);
+                return Ok(true);
+            }
+            versions
+                .push(json!({"number":number, "savedAt":m.revision.as_ref().and_then(|r| r.saved_at()), "revision":available.then_some(hash), "moves":moves}));
+        }
+        Ok(false)
+    })?;
+    Ok(json!({"versions":versions,"before":next}))
+}
+
+pub fn historical_sequences(folder: &Path, revision: &str, sequence: Option<u64>) -> io::Result<Vec<(u64, String)>> {
+    let m = at(folder, revision)?;
+    let mut budget = MAX_PROJECT_BYTES;
+    let mut sequences = Vec::new();
+    for (id, hash) in m.items.iter().filter(|(id, _)| sequence.is_none_or(|seq| seq == *id)) {
+        let mut value = load_payload(folder, hash, &mut budget)?;
+        if let Some(identity) = m.identities.get(id) {
+            identity.apply(*id, &mut value)?;
+        }
+        if value["id"].as_u64() != Some(*id) {
+            return Err(invalid("mismatched historical item"));
+        }
+        if value["kind"].get("Sequence").is_some() {
+            sequences.push((*id, value["name"].as_str().ok_or_else(|| invalid("missing sequence name"))?.to_owned()));
+        }
+    }
+    Ok(sequences)
+}
+
+/// Prepare only the historical cut and its dependencies for an ordinary undoable editor edit.
+pub enum EditorRestore {
+    Copy(Box<Project>),
+    ExportRequired(String),
+}
+
+pub fn editor_restore(folder: &Path, expected: &str, revision: &str, sequence: u64, working: &Project) -> io::Result<EditorRestore> {
+    let (_, head) = revisions::read_base(folder, expected)?;
+    let records = extract(folder, &at(folder, revision)?, sequence)?;
+    check_manifest(&head)?;
+    let mut budget = MAX_PROJECT_BYTES;
+    let envelope = load_payload(folder, &head.envelope, &mut budget)?;
+    let required: Vec<_> = head.items.into_iter().filter(|(id, _)| *id != sequence && records.items.contains_key(id)).collect();
+    let items = super::load_group(&mut |hash, budget| load_payload(folder, hash, budget), "item", &required, Some(&head.identities), &mut budget)?;
+    if let Some(reason) = dependency_conflict(&records, sequence, &envelope, &items) {
+        return Ok(EditorRestore::ExportRequired(reason));
+    }
+    let raw = records.items.get(&sequence).ok_or_else(|| invalid("missing selected sequence"))?;
+    let typed: ProjectItem = serde_json::from_value(raw.clone())?;
+    // Old writers may have retained extension data the typed editor cannot
+    // represent. The separate export keeps the original records intact.
+    let typed = serde_json::to_value(&typed)?;
+    if super::overlay::extra(raw, &typed) {
+        return Ok(EditorRestore::ExportRequired("the saved cut contains additional project data".into()));
+    }
+    let key = sequence.to_string();
+    let raw_sidecars = SIDECARS.map(|field| (field, records.envelope["project"][field].get(&key).cloned()));
+    let cut = crate::decode(&serde_json::to_vec(&super::join(records)?)?).map_err(invalid)?.project;
+    let typed = serde_json::json!({"transcripts":cut.transcripts,"narrations":cut.narrations,"source_graphics":cut.source_graphics});
+    for (field, raw) in raw_sidecars {
+        if let Some(raw) = raw
+            && super::overlay::extra(&raw, &typed[field][&key])
+        {
+            return Ok(EditorRestore::ExportRequired("the saved cut contains additional project data".into()));
+        }
+    }
+    if cut.luts != working.luts {
+        return Ok(EditorRestore::ExportRequired("project LUT library changed".into()));
+    }
+    for (id, item) in &cut.items {
+        if id.0 != sequence
+            && (working.item(*id) != Some(item)
+                || working.transcripts.get(id) != cut.transcripts.get(id)
+                || working.narrations.get(id) != cut.narrations.get(id)
+                || working.source_graphics.get(id) != cut.source_graphics.get(id))
+        {
+            return Ok(EditorRestore::ExportRequired(format!("required source {} changed or is missing", item.name)));
+        }
+    }
+    revisions::read_base(folder, expected)?;
+    Ok(EditorRestore::Copy(Box::new(cut)))
 }
