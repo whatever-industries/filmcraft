@@ -144,6 +144,7 @@ fn verify(full: &Path, bin: BinId) -> Result<serde_json::Value> {
 pub(super) fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     match args.as_slice() {
+        [mode, path, old, out] if mode == "refresh" => preview::refresh(Path::new(path), Some(Path::new(old)), Path::new(out)),
         [mode, path, out] if mode == "index" => preview::index(Path::new(path), Path::new(out)),
         [mode, path, index] if mode == "preview" => preview::window(Path::new(path), Path::new(index)),
         [mode, path, bin] if mode == "frames" => preview::measure_frames(Path::new(path), None, BinId(bin.parse()?)),
@@ -158,7 +159,7 @@ pub(super) fn run() -> Result<()> {
         _ => Err(concat!(
             "expected prepare SOURCE.fcproj NEW_DIRECTORY, measure PROJECT BIN_ID, ",
             "active|all-tabs|verify FOLDER_MANIFEST BIN_ID, index|preview FOLDER_MANIFEST INDEX, ",
-            "or frames PROJECT BIN_ID [INDEX]"
+            "refresh FOLDER_MANIFEST PRIOR_INDEX NEW_INDEX, or frames PROJECT BIN_ID [INDEX]"
         )
         .into()),
     }

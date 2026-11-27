@@ -9,6 +9,7 @@ use filmcraft_project::{BinEntry, BinId, ItemId, ProjectItem, ProjectView};
 use filmcraft_ui_egui::i18n::t;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::Path, sync::Arc, time::Instant};
 
 #[derive(Serialize, Deserialize)]
@@ -26,14 +27,66 @@ impl From<&ProjectItem> for Label {
 struct Index {
     manifest: String,
     labels: BTreeMap<ItemId, Label>,
+    // The original preview index contained only the manifest and labels.
+    #[serde(default)]
+    keys: BTreeMap<ItemId, String>,
+    #[serde(default)]
+    checksum: Option<String>,
+}
+
+impl Index {
+    fn digest(&self) -> Result<String> {
+        Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(&(&self.manifest, &self.keys, &self.labels))?)))
+    }
+    fn read(path: &Path) -> Result<Self> {
+        let index: Self = serde_json::from_slice(&read_regular_file_bounded(path, MAX_PROJECT_BYTES)?)?;
+        if let Some(checksum) = &index.checksum {
+            if *checksum != index.digest()? || !index.keys.keys().eq(index.labels.keys()) {
+                return Err("damaged name index; rebuild from the published project".into());
+            }
+        } else if !index.keys.is_empty() {
+            return Err("incomplete name index".into());
+        }
+        Ok(index)
+    }
 }
 
 pub(super) fn index(path: &Path, out: &Path) -> Result<()> {
-    let mut reader = Reader::open(path)?;
-    let ids = reader.inventory().collect();
-    reader.load(ids)?;
-    let labels = reader.items.iter().map(|(&id, item)| (id, Label::from(item))).collect();
-    atomic_write_new(out, &serde_json::to_vec(&Index { manifest: reader.manifest_digest, labels })?)?;
+    refresh(path, None, out)
+}
+
+pub(super) fn refresh(path: &Path, prior: Option<&Path>, out: &Path) -> Result<()> {
+    let start = Instant::now();
+    let mut old = prior.map(Index::read).transpose()?.filter(|index| index.checksum.is_some());
+    let directory = Reader::open(path)?.directory;
+    let mut remaining = directory.remaining_item_bytes;
+    let before = remaining;
+    let mut labels = BTreeMap::new();
+    let mut keys = BTreeMap::new();
+    let mut decoded = 0;
+    for (id, key) in directory.item_keys() {
+        let reused = old.as_mut().filter(|index| index.keys.get(&id).is_some_and(|k| k == key)).and_then(|index| index.labels.remove(&id));
+        let label = match reused {
+            Some(label) => label,
+            None => {
+                decoded += 1;
+                Label::from(&directory.read_item(id, &mut remaining)?)
+            }
+        };
+        labels.insert(id, label);
+        keys.insert(id, key.to_owned());
+    }
+    let mut next = Index { manifest: directory.revision, labels, keys, checksum: None };
+    next.checksum = Some(next.digest()?);
+    let data = serde_json::to_vec(&next)?;
+    if data.len() as u64 > MAX_PROJECT_BYTES {
+        return Err("name index exceeds the size limit".into());
+    }
+    atomic_write_new(out, &data)?;
+    println!(
+        "{}",
+        json!({"items":next.labels.len(),"decoded":decoded,"itemBytes":before-remaining,"directoryBytes":directory.bytes_read,"indexBytes":data.len(),"ms":start.elapsed().as_secs_f64()*1000.0})
+    );
     Ok(())
 }
 
@@ -53,8 +106,8 @@ impl Preview {
         let mut session = Session::default();
         let (reader, labels, view) = if let Some(index) = index {
             let mut reader = Reader::open(path)?;
-            let catalog: Index = serde_json::from_slice(&read_regular_file_bounded(index, MAX_PROJECT_BYTES)?)?;
-            if reader.manifest_digest != catalog.manifest || !reader.inventory().eq(catalog.labels.keys().copied()) {
+            let catalog = Index::read(index)?;
+            if reader.directory.revision != catalog.manifest || !reader.inventory().eq(catalog.labels.keys().copied()) {
                 return Err("name index does not match this project manifest".into());
             }
             session.project = Arc::new(reader.take_project()?);
@@ -243,3 +296,7 @@ pub(super) fn measure_frames(path: &Path, index: Option<&Path>, bin: BinId) -> R
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "history_tests.rs"]
+mod history_tests;

@@ -7,18 +7,18 @@ use filmcraft_project::{MediaRef, Project, ProjectView, SequenceSettings, TrackK
 use filmcraft_time::{Tick, TimeRange};
 use std::{collections::BTreeSet, fs, path::PathBuf};
 
-struct Fixture {
-    path: PathBuf,
-    master: ItemId,
-    nested: ItemId,
-    camera: ItemId,
-    deferred: ItemId,
-    other_camera: ItemId,
-    other: BinId,
-    cameras: BinId,
+pub(super) struct Fixture {
+    pub(super) path: PathBuf,
+    pub(super) master: ItemId,
+    pub(super) nested: ItemId,
+    pub(super) camera: ItemId,
+    pub(super) deferred: ItemId,
+    pub(super) other_camera: ItemId,
+    pub(super) other: BinId,
+    pub(super) cameras: BinId,
 }
 
-fn fixture(temp: &Path) -> Result<Fixture> {
+pub(super) fn fixture(temp: &Path) -> Result<Fixture> {
     let seed = decode(include_bytes!("../../../format/tests/fixtures/v1-edit.fcproj"))?.project;
     let mut p = Project::new("Nested cut");
     let [masters, cuts, cameras, other] = ["Masters", "Cuts", "Cameras", "Other"].map(|name| p.add_bin(name, None));

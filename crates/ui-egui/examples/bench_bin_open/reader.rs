@@ -1,31 +1,14 @@
-//! Read-only experiment for the benchmark's freshly packed, current-schema fixtures.
+//! Read-only experiment for the benchmark's current-schema fixtures.
 //! The normal editor never receives this partial inventory.
 use super::Result;
-use filmcraft_format::{MAX_PROJECT_BYTES, SCHEMA_VERSION, project_folder::ROOT};
-use filmcraft_media::reader::read_regular_file_bounded;
+use filmcraft_format::{SCHEMA_VERSION, project_folder::FolderDirectory};
 use filmcraft_project::{Bin, BinEntry, BinId, ItemId, Project, ProjectItem, ProjectView};
 use serde::Deserialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
-    path::{Path, PathBuf},
+    path::Path,
 };
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Manifest {
-    format: String,
-    layout: u32,
-    envelope: String,
-    bins: Vec<(BinId, String)>,
-    items: Vec<(ItemId, String)>,
-    #[serde(default)]
-    copies: Vec<Value>,
-    #[serde(default)]
-    identities: BTreeMap<u64, Value>,
-}
 
 #[derive(Deserialize)]
 enum Child {
@@ -34,69 +17,38 @@ enum Child {
 }
 #[derive(Deserialize)]
 struct Directory {
-    id: BinId,
     name: String,
     children: Vec<Child>,
 }
 
 pub(super) struct Reader {
-    dir: PathBuf,
+    pub(super) directory: FolderDirectory,
     root: BinId,
     pub(super) view: ProjectView,
     // Retain all global settings, LUTs, and attached metadata for the RSS measurement.
     envelope: Value,
-    pub(super) manifest_digest: String,
     bins: BTreeMap<BinId, Directory>,
-    hashes: BTreeMap<ItemId, String>,
     pub(super) items: BTreeMap<ItemId, ProjectItem>,
     pub(super) bytes: u64,
-}
-
-fn payload(dir: &Path, hash: &str, bytes: &mut u64) -> Result<Vec<u8>> {
-    if hash.len() != 64 || !hash.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)) {
-        return Err("invalid record digest".into());
-    }
-    let path = dir.join(hash);
-    if !fs::symlink_metadata(&path)?.is_file() {
-        return Err("expected a regular record".into());
-    }
-    let data = read_regular_file_bounded(&path, MAX_PROJECT_BYTES.saturating_sub(*bytes))?;
-    if format!("{:x}", Sha256::digest(&data)) != hash {
-        return Err("record digest mismatch".into());
-    }
-    *bytes += data.len() as u64;
-    Ok(data)
+    remaining: u64,
 }
 
 impl Reader {
     pub(super) fn open(path: &Path) -> Result<Self> {
-        if path.file_name().is_none_or(|s| s != ROOT) {
-            return Err("expected project.fcmod".into());
-        }
-        let dir = path.parent().ok_or("missing folder")?.to_owned();
-        let data = read_regular_file_bounded(path, 16 << 20)?;
-        let m: Manifest = serde_json::from_slice(&data)?;
-        if m.format != "filmcraft.project-folder" || m.layout != 1 || !m.copies.is_empty() || !m.identities.is_empty() {
-            return Err("benchmark requires a freshly packed fixture".into());
-        }
-        let mut bytes = data.len() as u64;
-        let env: Value = serde_json::from_slice(&payload(&dir, &m.envelope, &mut bytes)?)?;
+        let mut directory = FolderDirectory::open(path)?;
+        let env = directory.envelope.take();
         if env["schema_version"] != SCHEMA_VERSION || env["format"] != "filmcraft.project" {
             return Err("unsupported benchmark envelope".into());
         }
         let view = serde_json::from_value(env["view"].clone())?;
         let root = serde_json::from_value(env["project"]["root"].clone())?;
         let mut bins = BTreeMap::new();
-        for (id, hash) in m.bins {
-            let b: Directory = serde_json::from_slice(&payload(&dir, &hash, &mut bytes)?)?;
-            if b.id != id || bins.insert(id, b).is_some() {
-                return Err("invalid bin directory".into());
-            }
+        for (id, raw) in std::mem::take(&mut directory.bins) {
+            bins.insert(BinId(id), serde_json::from_value::<Directory>(raw)?);
         }
-        let count = m.items.len();
-        let hashes: BTreeMap<_, _> = m.items.into_iter().collect();
+        let ids: BTreeSet<_> = directory.item_keys().map(|(id, _)| id).collect();
         let inventory: Vec<ItemId> = serde_json::from_value(env["project"]["items"].clone())?;
-        if count != hashes.len() || inventory.len() != count || inventory.into_iter().collect::<BTreeSet<_>>() != hashes.keys().copied().collect() {
+        if inventory.len() != ids.len() || inventory.into_iter().collect::<BTreeSet<_>>() != ids {
             return Err("invalid item inventory".into());
         }
         let mut pending = vec![root];
@@ -108,7 +60,7 @@ impl Reader {
             for entry in &bins.get(&id).ok_or("unknown bin")?.children {
                 match entry {
                     Child::Bin(child) => pending.push(*child),
-                    Child::Item(item) if !hashes.contains_key(item) => return Err("unknown bin item".into()),
+                    Child::Item(item) if !ids.contains(item) => return Err("unknown bin item".into()),
                     _ => {}
                 }
             }
@@ -116,11 +68,11 @@ impl Reader {
         if seen.len() != bins.len() {
             return Err("unreachable bin".into());
         }
-        Ok(Self { dir, root, view, envelope: env, manifest_digest: format!("{:x}", Sha256::digest(&data)), bins, hashes, items: BTreeMap::new(), bytes })
+        Ok(Self { remaining: directory.remaining_item_bytes, bytes: directory.bytes_read, directory, root, view, envelope: env, bins, items: BTreeMap::new() })
     }
 
     pub(super) fn inventory(&self) -> impl Iterator<Item = ItemId> + '_ {
-        self.hashes.keys().copied()
+        self.directory.item_keys().map(|(id, _)| id)
     }
 
     pub(super) fn take_project(&mut self) -> Result<Project> {
@@ -151,23 +103,17 @@ impl Reader {
     // A damaged deferred timeline can then be retried without trusting an incomplete cut.
     pub(super) fn missing(&mut self, mut pending: Vec<ItemId>, resident: &BTreeMap<ItemId, ProjectItem>) -> Result<BTreeMap<ItemId, ProjectItem>> {
         let mut added = BTreeMap::new();
-        let mut bytes = self.bytes;
+        let mut remaining = self.remaining;
         while let Some(id) = pending.pop() {
             if self.items.contains_key(&id) || resident.contains_key(&id) || added.contains_key(&id) {
                 continue;
             }
-            let hash = self.hashes.get(&id).ok_or("missing source in benchmark fixture")?;
-            let item: ProjectItem = serde_json::from_slice(&payload(&self.dir, hash, &mut bytes)?)?;
-            if item.id != id {
-                return Err("mismatched item identity".into());
-            }
-            if let Some(cut) = item.as_sequence() {
-                cut.check_bounds()?;
-            }
+            let item = self.directory.read_item(id, &mut remaining)?;
             item.visit_source_items(|source| pending.push(source));
             added.insert(id, item);
         }
-        self.bytes = bytes;
+        self.bytes += self.remaining - remaining;
+        self.remaining = remaining;
         Ok(added)
     }
 

@@ -10,6 +10,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+mod directory;
 mod editor;
 mod overlay;
 mod paths;
@@ -18,6 +19,7 @@ mod retention;
 mod revisions;
 pub use retention::{RetentionPolicy, RetentionPreview, configure_retention, keep_version, preview_retention, prune_history, retention_policy};
 
+pub use directory::FolderDirectory;
 pub use editor::checkpoint::{CheckpointStore, CheckpointWrite, load_checkpoint, remove_checkpoint_records};
 pub use editor::{Departure, DepartureCut, FolderSnapshot, SaveResult, TransferSave, detached_project};
 pub use recovery::{EditorRestore, editor_restore, historical_sequences, history, move_backups, recovery_versions, rescue, rescue_bytes, restore_copy};
@@ -123,17 +125,27 @@ fn check_hash(hash: &str) -> io::Result<()> {
 }
 
 fn load_payload(folder: &Path, hash: &str, remaining: &mut u64) -> io::Result<Value> {
+    Ok(serde_json::from_slice(&verified_bytes(folder, hash, remaining)?)?)
+}
+
+fn verified_bytes(folder: &Path, hash: &str, remaining: &mut u64) -> io::Result<Vec<u8>> {
     check_hash(hash)?;
-    let bytes = read_member(&folder.join(hash), *remaining)?;
-    decode_payload(hash, bytes, remaining)
+    let bytes = read_member(&folder.join(hash), (*remaining).min(MAX_PROJECT_BYTES))?;
+    verify_digest(hash, &bytes, remaining)?;
+    Ok(bytes)
 }
 
 fn decode_payload(hash: &str, bytes: Vec<u8>, remaining: &mut u64) -> io::Result<Value> {
-    if digest(&bytes) != hash {
+    verify_digest(hash, &bytes, remaining)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn verify_digest(hash: &str, bytes: &[u8], remaining: &mut u64) -> io::Result<()> {
+    if digest(bytes) != hash {
         return Err(invalid("SHA-256 mismatch"));
     }
     *remaining -= bytes.len() as u64;
-    Ok(serde_json::from_slice(&bytes)?)
+    Ok(())
 }
 
 fn load_group(
@@ -179,13 +191,18 @@ fn read_records_with(manifest: &Manifest, mut load: impl FnMut(&str, &mut u64) -
     let envelope = load(&manifest.envelope, &mut budget).map_err(|e| invalid(format!("project metadata: {e}")))?;
     let mut bins = load_group(&mut load, "bin", &manifest.bins, None, &mut budget)?;
     let items = load_group(&mut load, "item", &manifest.items, Some(&manifest.identities), &mut budget)?;
-    for alias in &manifest.copies {
-        if !items.contains_key(&alias.copy) {
+    resolve_bin_copies(&manifest.copies, &mut bins, |id| items.contains_key(&id))?;
+    Ok(ProjectRecords { envelope, bins, items })
+}
+
+fn resolve_bin_copies(copies: &[BinCopy], bins: &mut BTreeMap<u64, Value>, has_item: impl Fn(u64) -> bool) -> io::Result<()> {
+    for alias in copies {
+        if !has_item(alias.copy) {
             return Err(invalid("missing independent sequence copy"));
         }
         alias.replace(bins.get_mut(&alias.bin).ok_or_else(|| invalid("missing saved source bin"))?, false)?;
     }
-    Ok(ProjectRecords { envelope, bins, items })
+    Ok(())
 }
 
 fn assemble(folder: &Path, manifest: &Manifest, destination: &Path) -> io::Result<Vec<u8>> {

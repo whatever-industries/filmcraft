@@ -156,11 +156,11 @@ bench="${CARGO_TARGET_DIR:-target}/debug/examples/bench_bin_open"
 cargo test -p filmcraft-ui-egui --example bench_bin_open
 ```
 
-The experiment supports fresh current-schema packs. Existing histories, reconciled move copies and project migrations are exercised through the production reader. [Benchmark and playback comparison](../crates/ui-egui/examples/bench_bin_open/native.rs) · [Generated-media regression](../crates/ui-egui/examples/bench_bin_open/tests.rs)
+The initial experiment covered fresh current-schema packs. The published-history checks below extend coverage to reconciled move copies. Project migrations still use the full reader. [Benchmark and playback comparison](../crates/ui-egui/examples/bench_bin_open/native.rs) · [Generated-media regression](../crates/ui-egui/examples/bench_bin_open/tests.rs)
 
 ### Read-only preview and deferred timeline tabs
 
-The local preview restores the saved tabs in order and renders the active cut at its saved playhead. Browsing a bin uses its directory and a name index. Selecting a timeline reads that cut and its missing sources, including sources in closed bins. The index is a separate file prepared from a fresh pack and bound to the manifest’s SHA-256 digest. A stale index produces an error. The preview has no editing, Save or recovery commands.
+The local preview restores the saved tabs in order and renders the active cut at its saved playhead. Browsing a bin uses its directory and a name index. Selecting a timeline reads that cut and its missing sources, including sources in closed bins. The index is a separate file bound to the manifest’s SHA-256 digest. A stale index produces an error. The preview has no editing, Save or recovery commands.
 
 | Clips | Open path | First frame (ms) | List 12 reels (ms) | Switch to reel 2 and draw (ms) | Peak RSS (MiB) |
 | ---: | --- | ---: | ---: | ---: | ---: |
@@ -188,4 +188,32 @@ manifest="$destination/folder/project.fcmod"
 "$bench" frames "$manifest" "$bin_id" "$index_file"
 ```
 
-**Next stage.** Validate the name index across real save history. Start with rename, move, Discard and historical restore as a copy. Measure the cost of refreshing only changed entries and check that an interrupted refresh or stale index can be rebuilt from the published revision. Verify identical bin listings and master playback after moves in every reopen order. Keep the production editor on its complete model until global search, relink, Save and recovery preserve and account for deferred records.
+### Refreshing the preview after a published save
+
+The preview reads bin membership from the published manifest and its bin records. It uses the same copy-identity rules as the full editor. A saved move can leave two logical cuts pointing to one immutable timeline payload. The index therefore keys each label by project item ID, payload digest, and any copy-identity override. A refresh reads changed item records, drops vanished IDs, and writes the complete index to a new file. Its checksum covers the revision, keys, and labels. An older index without keys can be upgraded with a full inventory read.
+
+| Clips | Published edit | Full rebuild (ms) | Refresh (ms) | Item records read, refresh / rebuild | Item data read, refresh / rebuild (MB) |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 24,000 | One linked trim | 156 | 35 | 1 / 1,212 | 1.42 / 18.11 |
+| 24,000 | Save the move destination | 169 | 43 | 1 / 1,213 | 1.42 / 19.53 |
+| 48,000 | One linked trim | 287 | 43 | 1 / 2,412 | 2.83 / 36.27 |
+| 48,000 | Save the move destination | 332 | 68 | 1 / 2,413 | 2.83 / 39.10 |
+
+Each fixture received a one-reel trim and Save, then a move of that reel and Save of its destination alone. Five fresh processes followed a warm-up per case on local APFS. The table gives median elapsed time through durable index publication. Both paths also read the directory. The refresh reads the previous index and writes about 144 kB or 288 kB. Every refreshed index was byte-identical to the full rebuild for that revision. These are separate preview maintenance timings. Editor Save does not run the refresh.
+
+The small generated-media fixture also exercised the following decisions:
+
+- Renaming an item and its bin appeared after publication. Discarding an unpublished rename kept the previous index valid.
+- After two destination-only saves, all six orders of visiting the three bins matched a full reopen. Each surviving cut rendered its own version, and the master used the last saved arrival throughout.
+- Saving the source removal and discarding the destination left the cut out of both bin listings. The master could still play it by ID. Restoring an older cut as a copy preserved the current cut’s edit.
+- A missing changed payload stopped publication. An unchanged, unavailable payload allowed its cached label to be listed and produced an error when requested for playback. Corrupt index data was rejected.
+- On the 48,000-clip fixture a forced process kill during index-file staging left the project manifest and old index intact and the new index unpublished. The killed process left an unreferenced staging file. Retrying against the published revision produced the exact full rebuild.
+
+To refresh, supply the previous index and a new destination file outside the project folder. Opening a stale index reports the mismatch. Use `index` with a new destination to rebuild if the previous index is missing or damaged.
+
+```sh
+"$bench" refresh "$manifest" "$previous_index" "$new_index"
+"$bench" preview "$manifest" "$new_index"
+```
+
+**Next stage.** Have the read-only preview locate and refresh its own local index. Test a save that publishes another revision during a refresh, a missing cache, and cleanup of abandoned staging files after an interrupted refresh. Keep cache maintenance off the editor Save path. Once the preview reliably selects the current revision, qualify project-wide search and relink across unloaded bins before allowing writes from a partially loaded project. [History tests](../crates/ui-egui/examples/bench_bin_open/history_tests.rs)
