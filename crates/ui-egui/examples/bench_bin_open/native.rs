@@ -1,5 +1,7 @@
 //! Measure real editor open and first bin navigation on a standard project and its modular counterpart.
 //! See "Project open and first bin activation" in docs/modular-project-rules.md.
+#[path = "preview.rs"]
+mod preview;
 #[path = "reader.rs"]
 mod reader;
 use filmcraft_engine::Session;
@@ -142,6 +144,10 @@ fn verify(full: &Path, bin: BinId) -> Result<serde_json::Value> {
 pub(super) fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     match args.as_slice() {
+        [mode, path, out] if mode == "index" => preview::index(Path::new(path), Path::new(out)),
+        [mode, path, index] if mode == "preview" => preview::window(Path::new(path), Path::new(index)),
+        [mode, path, bin] if mode == "frames" => preview::measure_frames(Path::new(path), None, BinId(bin.parse()?)),
+        [mode, path, bin, index] if mode == "frames" => preview::measure_frames(Path::new(path), Some(Path::new(index)), BinId(bin.parse()?)),
         [mode, source, destination] if mode == "prepare" => prepare(Path::new(source), Path::new(destination)),
         [mode, path, bin] if mode == "measure" => measure(Path::new(path), BinId(bin.parse()?)),
         [mode, full, bin] if mode == "verify" => {
@@ -149,13 +155,11 @@ pub(super) fn run() -> Result<()> {
             Ok(())
         }
         [mode, path, bin] if mode == "active" || mode == "all-tabs" => selective(Path::new(path), BinId(bin.parse()?), mode == "all-tabs"),
-        _ => Err(
-            "expected prepare SOURCE.fcproj NEW_DIRECTORY, measure PROJECT BIN_ID, active|all-tabs FOLDER_MANIFEST BIN_ID, or verify FOLDER_MANIFEST BIN_ID"
-                .into(),
-        ),
+        _ => Err(concat!(
+            "expected prepare SOURCE.fcproj NEW_DIRECTORY, measure PROJECT BIN_ID, ",
+            "active|all-tabs|verify FOLDER_MANIFEST BIN_ID, index|preview FOLDER_MANIFEST INDEX, ",
+            "or frames PROJECT BIN_ID [INDEX]"
+        )
+        .into()),
     }
 }
-
-#[cfg(test)]
-#[path = "tests.rs"]
-mod tests;

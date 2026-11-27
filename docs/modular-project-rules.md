@@ -140,7 +140,7 @@ The active reel required 1,000 of 1,200 sources at the smaller size and 2,000 of
 
 The feature fixtures use offline media. A separate generated-media test places the master, nested cut and camera in three different bins. Before any bin navigation, the active-only reader's records produced the same sampled RGBA frame and non-silent PCM as the full editor. An unrelated missing record allowed active-only startup and produced an error when its bin was requested.
 
-**Next stage.** Prototype read-only editor open with saved tab identities and the active timeline's complete playback dependencies. Measure time to first displayed frame, first bin listing and switching to a deferred tab. The Reels result makes it important to measure listing sequence names independently of opening those sequences for playback. Before enabling writes, verify that Save, Discard, recovery and global operations such as search and relink account for every deferred item and surface unreadable records. The current writable editor and its recovery path continue to use a complete project.
+The next experiment separates showing a bin’s names from loading its timelines for playback. The measurements below cover that read-only path.
 
 To reproduce on a project with a saved active sequence, build the native example and run the following commands. Choose a new destination directory and set `bin_id` to a bin in the source project. Use a footage bin and a bin containing several sequences for the two activation cases.
 
@@ -157,3 +157,35 @@ cargo test -p filmcraft-ui-egui --example bench_bin_open
 ```
 
 The experiment supports fresh current-schema packs. Existing histories, reconciled move copies and project migrations are exercised through the production reader. [Benchmark and playback comparison](../crates/ui-egui/examples/bench_bin_open/native.rs) · [Generated-media regression](../crates/ui-egui/examples/bench_bin_open/tests.rs)
+
+### Read-only preview and deferred timeline tabs
+
+The local preview restores the saved tabs in order and renders the active cut at its saved playhead. Browsing a bin uses its directory and a name index. Selecting a timeline reads that cut and its missing sources, including sources in closed bins. The index is a separate file prepared from a fresh pack and bound to the manifest’s SHA-256 digest. A stale index produces an error. The preview has no editing, Save or recovery commands.
+
+| Clips | Open path | First frame (ms) | List 12 reels (ms) | Switch to reel 2 and draw (ms) | Peak RSS (MiB) |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 24,000 | Standard .fcproj | 102 | 6.1 | 13 | 169 |
+| 24,000 | Modular, full open | 307 | 5.9 | 13 | 577 |
+| 24,000 | Modular, deferred preview | 52 | 6.2 | 24 | 77 |
+| 48,000 | Standard .fcproj | 184 | 5.8 | 13 | 279 |
+| 48,000 | Modular, full open | 596 | 5.9 | 13 | 1,095 |
+| 48,000 | Modular, deferred preview | 86 | 6.2 | 33 | 92 |
+
+All three paths used the same read-only window and quarter-resolution program image. The first two opened the project through the editor’s ordinary `file.open` command. Each measurement ended after painting the window and reading back the completed GPU image in a 960 × 720 offscreen viewport. The GPU was initialized before the timer. Physical display presentation and launching the desktop application are outside these measurements. The figures are medians of five fresh processes after one warm-up, with rotating case order on local APFS. RSS is the highest process peak through the tab switch.
+
+Listing Reels read zero additional project records at either size. Switching to reel 2 read 68 additional records at each size, totaling 1.48 MB and 2.90 MB respectively. The first-frame figures assume an existing index. Building the 55 kB and 110 kB indexes separately took 187 ms and 427 ms respectively, including process launch and durable publication. A full rebuild on each open would erase the measured startup benefit.
+
+The generated-media regression opens the master while a source required only by another saved tab is unavailable. The bin still lists that cut. Selecting its tab by keyboard reports an error and keeps the master frame visible. Restoring the source and selecting the cut again reproduces the ordinary editor’s frame and non-silent audio at the cut’s saved playhead. Returning to the master reuses the resident records. [Preview implementation](../crates/ui-egui/examples/bench_bin_open/preview.rs) · [Playback and retry test](../crates/ui-egui/examples/bench_bin_open/tests.rs)
+
+After preparing a fixture with the commands above, choose a new path outside the project folder for `index_file`. The interactive window accepts the same index used by the headless comparison.
+
+```sh
+manifest="$destination/folder/project.fcmod"
+"$bench" index "$manifest" "$index_file"
+"$bench" preview "$manifest" "$index_file"
+"$bench" frames "$destination/project.fcproj" "$bin_id"
+"$bench" frames "$manifest" "$bin_id"
+"$bench" frames "$manifest" "$bin_id" "$index_file"
+```
+
+**Next stage.** Validate the name index across real save history. Start with rename, move, Discard and historical restore as a copy. Measure the cost of refreshing only changed entries and check that an interrupted refresh or stale index can be rebuilt from the published revision. Verify identical bin listings and master playback after moves in every reopen order. Keep the production editor on its complete model until global search, relink, Save and recovery preserve and account for deferred records.
