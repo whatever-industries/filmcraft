@@ -14,6 +14,10 @@ fn refresh_and_compare(f: &Fixture, old: &Path, out: &Path) -> Result<Preview> {
     let disk = open(&f.path)?;
     let view = Preview::open(&f.path, Some(out))?;
     assert_eq!(view.session.project.root, disk.project.root);
+    for name in ["Unsaved title", "Cut", "Assembly"] {
+        let query = filmcraft_project::FindQuery::simple("Name", filmcraft_project::FindOp::Contains, name);
+        discovery::check_saved_search(&f.path, &disk, &out.with_file_name("search-cache"), &query)?;
+    }
     let expected: BTreeMap<_, _> = disk.project.items.iter().map(|(&id, it)| (id, (it.name.as_str(), it.as_sequence().is_some()))).collect();
     assert_eq!(view.labels.iter().map(|(&id, l)| (id, (l.name.as_str(), l.sequence))).collect::<BTreeMap<_, _>>(), expected);
     assert_eq!(view.view.open_sequences, disk.state.open_sequences);

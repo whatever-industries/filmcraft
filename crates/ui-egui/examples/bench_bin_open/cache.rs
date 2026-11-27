@@ -12,7 +12,7 @@ const STAGE_PREFIX: &str = ".preview-index-stage-";
 
 pub(super) fn open(path: &Path) -> Result<Preview> {
     let root = filmcraft_engine::autosave::default_data_dir().ok_or("no FilmCraft user data directory")?;
-    open_in(path, &root, || Ok(()))
+    open_with(path, &root, || Ok(()), Preview::from_index).map(|(view, _)| view)
 }
 
 // Resolve existing ancestors before creating anything, including when the data directory
@@ -46,7 +46,24 @@ fn cache_directory(path: &Path, root: &Path) -> Result<PathBuf> {
     Ok(dir)
 }
 
-fn open_in(path: &Path, data_root: &Path, mut after_staging: impl FnMut() -> Result<()>) -> Result<Preview> {
+#[cfg(test)]
+fn open_in(path: &Path, data_root: &Path, after_staging: impl FnMut() -> Result<()>) -> Result<Preview> {
+    open_with(path, data_root, after_staging, Preview::from_index).map(|(view, _)| view)
+}
+
+#[derive(Default)]
+pub(super) struct CacheCost {
+    pub project_bytes: u64,
+    pub records: usize,
+    pub cache_written: u64,
+}
+
+pub(super) fn open_with<T>(
+    path: &Path,
+    data_root: &Path,
+    mut after_staging: impl FnMut() -> Result<()>,
+    mut make: impl FnMut(&Path, Reader, Index) -> Result<T>,
+) -> Result<(T, CacheCost)> {
     let path = std::path::absolute(path)?;
     let dir = cache_directory(&path, data_root)?;
     let lock = fs::File::options().create(true).truncate(false).read(true).write(true).open(dir.join("index.lock"))?;
@@ -62,27 +79,45 @@ fn open_in(path: &Path, data_root: &Path, mut after_staging: impl FnMut() -> Res
         }
     }
     let dest = dir.join("index.json");
-    let mut revision = FolderDirectory::published_revision(&path)?;
+    let mut cost = CacheCost::default();
+    // The directory reader accounts for its own manifest, envelope and bin reads.
+    let revision_check = |cost: &mut CacheCost| -> Result<String> {
+        let (revision, bytes) = FolderDirectory::published_revision_size(&path)?;
+        cost.project_bytes += bytes;
+        Ok(revision)
+    };
+    let mut revision = revision_check(&mut cost)?;
     for _ in 0..3 {
-        let prepared = (|| -> Result<(Preview, Option<NamedTempFile>)> {
+        let prepared = (|| -> Result<(T, Option<NamedTempFile>)> {
             let reader = Reader::open(&path)?;
+            cost.project_bytes += reader.bytes;
             revision.clone_from(&reader.directory.revision);
             // The cache is disposable. An unreadable or incomplete index is rebuilt from verified project records.
             let old = Index::read(&dest).ok().filter(|v| v.checksum.is_some());
             let (index, stage) = match old {
-                Some(index) if index.manifest == revision && reader.inventory().eq(index.labels.keys().copied()) => (index, None),
+                Some(index)
+                    if index.manifest == revision
+                        && index.labels.values().all(|l| l.class.is_some())
+                        && reader.inventory().eq(index.labels.keys().copied()) =>
+                {
+                    (index, None)
+                }
                 seed => {
-                    let (index, _, _) = Index::build(&reader.directory, seed)?;
+                    let (index, records, bytes) = Index::build(&reader.directory, seed)?;
+                    cost.records += records;
+                    cost.project_bytes += bytes;
                     let mut stage = tempfile::Builder::new().prefix(STAGE_PREFIX).tempfile_in(&dir)?;
-                    stage.write_all(&index.bytes()?)?;
+                    let encoded = index.bytes()?;
+                    stage.write_all(&encoded)?;
+                    cost.cache_written += encoded.len() as u64;
                     stage.as_file().sync_all()?;
                     after_staging()?;
                     (index, Some(stage))
                 }
             };
-            Ok((Preview::from_index(&path, reader, index)?, stage))
+            Ok((make(&path, reader, index)?, stage))
         })();
-        let current = FolderDirectory::published_revision(&path)?;
+        let current = revision_check(&mut cost)?;
         if current != revision {
             revision = current;
             continue;
@@ -92,13 +127,13 @@ fn open_in(path: &Path, data_root: &Path, mut after_staging: impl FnMut() -> Res
             stage.persist(&dest).map_err(|error| error.error)?;
             #[cfg(unix)]
             fs::File::open(&dir)?.sync_all()?;
-            let published = FolderDirectory::published_revision(&path)?;
+            let published = revision_check(&mut cost)?;
             if published != revision {
                 revision = published;
                 continue;
             }
         }
-        return Ok(preview);
+        return Ok((preview, cost));
     }
     Err(io::Error::other("the project kept changing during refresh; reopen the preview").into())
 }

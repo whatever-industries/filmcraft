@@ -175,6 +175,17 @@ impl FindQuery {
         self.row_matches_text(r, &column_text(p, it, &r.column))
     }
 
+    /// Evaluate a query using only a visible item's name. Other columns require its record.
+    pub fn name_matcher(&self) -> Option<impl Fn(&str) -> bool + '_> {
+        if !self.active_rows().all(|row| row.column.eq_ignore_ascii_case("name")) {
+            return None;
+        }
+        Some(move |name: &str| {
+            let mut rows = self.active_rows();
+            !self.is_empty() && if self.match_all { rows.all(|r| self.row_matches_text(r, name)) } else { rows.any(|r| self.row_matches_text(r, name)) }
+        })
+    }
+
     /// Does the item match? Graphic sources (not shown in the Project panel) never match.
     pub fn matches(&self, p: &Project, it: &ProjectItem) -> bool {
         if matches!(it.kind, ItemKind::Graphic { .. }) || self.is_empty() {

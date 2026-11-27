@@ -35,7 +35,13 @@ struct Record {
 impl FolderDirectory {
     /// Read only the current manifest to check whether a captured directory is still current.
     pub fn published_revision(path: &Path) -> io::Result<String> {
-        Ok(digest(&read_member(path, MANIFEST_LIMIT)?))
+        Self::published_revision_size(path).map(|(revision, _)| revision)
+    }
+
+    /// Digest and number of bytes read by a manifest freshness check.
+    pub fn published_revision_size(path: &Path) -> io::Result<(String, u64)> {
+        let bytes = read_member(path, MANIFEST_LIMIT)?;
+        Ok((digest(&bytes), bytes.len() as u64))
     }
 
     pub fn open(path: &Path) -> io::Result<Self> {

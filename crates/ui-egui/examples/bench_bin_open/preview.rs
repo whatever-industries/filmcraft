@@ -2,6 +2,8 @@
 //! viewer. Its only interactions are bin navigation and rendering a selected timeline.
 #[path = "cache.rs"]
 mod cache;
+#[path = "discovery.rs"]
+pub(super) mod discovery;
 use super::{Result, reader::Reader};
 use egui_kittest::{Harness, kittest::Queryable};
 use filmcraft_engine::Session;
@@ -18,10 +20,25 @@ use std::{collections::BTreeMap, path::Path, sync::Arc, time::Instant};
 struct Label {
     name: String,
     sequence: bool,
+    // Older checksummed indexes are still readable. Refresh them once to classify every record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    class: Option<RecordClass>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum RecordClass {
+    Graphic,
+    FileMedia,
+    Other,
 }
 impl From<&ProjectItem> for Label {
     fn from(item: &ProjectItem) -> Self {
-        Self { name: item.name.clone(), sequence: item.as_sequence().is_some() }
+        use filmcraft_project::{ItemKind, MediaRef};
+        let class = match &item.kind {
+            ItemKind::Graphic { .. } => RecordClass::Graphic,
+            ItemKind::Media(m) if matches!(m.media, MediaRef::File { .. }) => RecordClass::FileMedia,
+            _ => RecordClass::Other,
+        };
+        Self { name: item.name.clone(), sequence: item.as_sequence().is_some(), class: Some(class) }
     }
 }
 
@@ -61,7 +78,11 @@ impl Index {
         let mut keys = BTreeMap::new();
         let mut decoded = 0;
         for (id, key) in directory.item_keys() {
-            let reused = old.as_mut().filter(|index| index.keys.get(&id).is_some_and(|k| k == key)).and_then(|index| index.labels.remove(&id));
+            let reused = old
+                .as_mut()
+                .filter(|index| index.keys.get(&id).is_some_and(|k| k == key))
+                .and_then(|index| index.labels.remove(&id))
+                .filter(|label| label.class.is_some());
             let label = match reused {
                 Some(label) => label,
                 None => {
