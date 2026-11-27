@@ -118,3 +118,42 @@ Each size ran one warm-up and five measured trials on the same local Mac. Times 
 | 48,000 | Modular folder | 643.7 | 193.4 | 185.1 | 372,027 | 1048 / 1058 |
 
 Both sizes passed the one-bin trim gate. Saving an arrival reused the prior sequence payload and kept Bin A’s saved bin digest. A clean folder Save wrote zero bytes. Folder open remained slower and used more memory at both sizes.
+
+## Project open and first bin activation
+
+The writable editor reads the entire modular project on open. On a 48,000-clip project that took 574 ms, compared with 164 ms for the equivalent standard project. To measure what could be deferred, a read-only experiment opened the same modular folder, read the complete bin directory and global settings, and followed item references from the active timeline across closed bins. It also measured the cost of loading every saved timeline tab. Both fixtures had 12 open reel tabs and 24 shoot-day bins.
+
+| Timeline clips | Open operation | Median open (ms) | Project data at open (MB) | First shoot-day bin (ms) | Peak RSS (MiB) |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 24,000 | Standard editor | 82 | 18.13 | 0.010 | 126 |
+| 24,000 | Modular editor | 283 | 18.23 | 0.042 | 536 |
+| 24,000 | Reader, active reel | 33 | 2.44 | 0.190 | 21 |
+| 24,000 | Reader, all saved tabs | 129 | 18.23 | 0.012 | 106 |
+| 48,000 | Standard editor | 164 | 36.31 | 0.015 | 236 |
+| 48,000 | Modular editor | 574 | 36.49 | 0.045 | 1,053 |
+| 48,000 | Reader, active reel | 66 | 4.89 | 0.396 | 32 |
+| 48,000 | Reader, all saved tabs | 261 | 36.49 | 0.027 | 202 |
+
+One warm-up preceded five fresh-process trials per case, with rotating case order on local APFS, using the workspace dev profile. Editor timings cover the `file.open` command, then bin navigation through construction of the visible item list. Reader timings cover reading, hashing and decoding the selected project records. Editor media registration, relink checks, full validation and GUI rendering are outside the reader measurement. MB denotes logical project bytes: file size for the standard project, size of the live manifest and its records for the fully loaded folder, and bytes actually read by the experimental reader. RSS is the largest whole-process high-water mark through first activation, from macOS `/usr/bin/time -l`.
+
+The active reel required 1,000 of 1,200 sources at the smaller size and 2,000 of 2,400 at the larger size. Opening the first shoot-day bin then read only eight additional items (7,832 bytes) or 16 (15,876 bytes). Opening **Reels** first gave a different result. Loading all 12 timelines in that bin and their sources added 15.79 MB in 97 ms or 31.60 MB in 195 ms. A repeat activation read zero additional record bytes. Restoring every saved tab at startup also pulled in the entire project at both sizes.
+
+The feature fixtures use offline media. A separate generated-media test places the master, nested cut and camera in three different bins. Before any bin navigation, the active-only reader's records produced the same sampled RGBA frame and non-silent PCM as the full editor. An unrelated missing record allowed active-only startup and produced an error when its bin was requested.
+
+**Next stage.** Prototype read-only editor open with saved tab identities and the active timeline's complete playback dependencies. Measure time to first displayed frame, first bin listing and switching to a deferred tab. The Reels result makes it important to measure listing sequence names independently of opening those sequences for playback. Before enabling writes, verify that Save, Discard, recovery and global operations such as search and relink account for every deferred item and surface unreadable records. The current writable editor and its recovery path continue to use a complete project.
+
+To reproduce on a project with a saved active sequence, build the native example and run the following commands. Choose a new destination directory and set `bin_id` to a bin in the source project. Use a footage bin and a bin containing several sequences for the two activation cases.
+
+```sh
+cargo build -p filmcraft-ui-egui --example bench_bin_open
+bench="${CARGO_TARGET_DIR:-target}/debug/examples/bench_bin_open"
+"$bench" prepare "$source_fcproj" "$destination"
+"$bench" measure "$destination/project.fcproj" "$bin_id"
+"$bench" measure "$destination/folder/project.fcmod" "$bin_id"
+"$bench" active "$destination/folder/project.fcmod" "$bin_id"
+"$bench" all-tabs "$destination/folder/project.fcmod" "$bin_id"
+"$bench" verify "$destination/folder/project.fcmod" "$bin_id"
+cargo test -p filmcraft-ui-egui --example bench_bin_open
+```
+
+The experiment supports fresh current-schema packs. Existing histories, reconciled move copies and project migrations are exercised through the production reader. [Benchmark and playback comparison](../crates/ui-egui/examples/bench_bin_open/native.rs) · [Generated-media regression](../crates/ui-egui/examples/bench_bin_open/tests.rs)
