@@ -226,4 +226,54 @@ A cache-only lock protects staging, publication, and cleanup. A second preview t
 
 The regression tests paused a refresh after staging, renamed the master and switched its camera through an ordinary editor Save, and compared the first frame, listing, and index against a full reopen and rebuild. A second test killed a process holding the cache lock after staging. Another preview had respected its live staging file. Reopening preserved the project and previous publication through the interruption, removed the abandoned file, and rebuilt the exact index for the saved cut. Warm reuse, incremental refresh with an unavailable deferred cut, damaged-cache rebuild, and the retry limit are also covered. [Automatic refresh tests](../crates/ui-egui/examples/bench_bin_open/cache_tests.rs)
 
-**Next stage.** Qualify project-wide search and relink across unloaded bins before allowing writes from a partially loaded project.
+### Project-wide Find and relink discovery across unopened bins
+
+The local developer harness accepts the editor’s Find parameters and the existing Link Media search parameters. Each modular command reads one saved revision. Find returns ordered pairs of item ID and containing bin ID. An unfiled item has a null bin ID. Relink discovery returns the offline inventory and the editor’s ranked candidates, including failed checks and items with no candidate.
+
+```sh
+"$bench" search "$manifest" '{"column":"Name","operator":"contains","text":"Shot 000"}'
+"$bench" search "$manifest" '{"column":"File Path","text":"shot-00017"}'
+"$bench" relink-discovery "$manifest" '{"folder":"/path/to/moved/media"}'
+```
+
+The same commands accept a standard `.fcproj` for comparison. A name-only query uses the checksummed label index. The index records which items are hidden graphics and which are media. Older caches rebuild when that information is missing. Other Find queries read the searchable records and use the normal editor matcher, including parent media for subclip properties. Relink reads media records, registers their stored paths against the project document, and uses the editor’s media scan and candidate checks. An unavailable required record stops the operation with an error.
+
+The small regression fixture exercised duplicate names in different bins, hidden graphics, metadata, and subclip video properties. A destination-only saved move, a discarded rename, and a source retained by the master after its last bin entry disappeared all matched the full editor’s Find order and bin membership. Moving an actual media folder produced the same missing items, candidate order, and diagnostics as a full reopen. The original image passed the fingerprint check, a same-named replacement failed it, and the other item had no candidate. Discovery preserved the saved manifest, media paths, and bin edit states. [Discovery tests](../crates/ui-egui/examples/bench_bin_open/discovery.rs) · [Move and discard tests](../crates/ui-egui/examples/bench_bin_open/history_tests.rs)
+
+#### Feature-scale measurements
+
+These are copies of the 24,000- and 48,000-placement fixtures, with 1,200 and 2,400 file media items respectively. The original fixtures mark the media intentionally offline. For this run the copies used ordinary file links into a moved folder, so project-wide discovery exercised missing-file candidate search. One generated movie in the chosen folder matched a stored filename. Each trial compared the entire output to a full standard reopen, resolving stored paths against their respective document folders for comparison. Name Find returned 100 items, File Path Find returned one, and discovery reported every missing media item.
+
+Each row covers open through result construction in a fresh process on local APFS. Time is the median of five trials after one warm-up, and RSS is the highest whole-process peak among those five. Cold starts with an empty private index directory. Warm starts with the previously built index. The OS file cache stayed enabled throughout. Project MB counts logical project-file bytes read, including manifest rechecks. Decodes count item records, including a second decode if the cold build and the query both needed the item. RSS includes rendering-library and process overhead. The OS denied writes under both project paths for every trial, and file inventories, sizes, modification times and SHA-256 digests matched before and after. **Project bytes written were zero throughout.**
+
+**24,000 timeline placements**
+
+| Operation | Open | Time (ms) | Project read (MB) | Item decodes | Peak RSS (MiB) |
+|---|---|---:|---:|---:|---:|
+| Name Find | Full .fcproj | 97.8 | 18.13 | 1,212 | 125.7 |
+| Name Find | Modular, cold | 155.3 | 18.49 | 1,212 | 25.4 |
+| Name Find | Modular, warm | 5.5 | 0.30 | 0 | 16.3 |
+| File Path Find | Full .fcproj | 97.6 | 18.13 | 1,212 | 127.7 |
+| File Path Find | Modular, cold | 298.4 | 36.59 | 2,424 | 112.5 |
+| File Path Find | Modular, warm | 143.3 | 18.40 | 1,212 | 111.2 |
+| Relink discovery | Full .fcproj | 104.7 | 18.13 | 1,212 | 129.4 |
+| Relink discovery | Modular, cold | 192.7 | 19.57 | 2,412 | 31.0 |
+| Relink discovery | Modular, warm | 41.0 | 1.38 | 1,200 | 22.6 |
+
+**48,000 timeline placements**
+
+| Operation | Open | Time (ms) | Project read (MB) | Item decodes | Peak RSS (MiB) |
+|---|---|---:|---:|---:|---:|
+| Name Find | Full .fcproj | 193.5 | 36.28 | 2,412 | 236.7 |
+| Name Find | Modular, cold | 290.5 | 37.00 | 2,412 | 38.2 |
+| Name Find | Modular, warm | 8.4 | 0.58 | 0 | 18.2 |
+| File Path Find | Full .fcproj | 194.0 | 36.28 | 2,412 | 236.7 |
+| File Path Find | Modular, cold | 574.3 | 73.23 | 4,824 | 211.7 |
+| File Path Find | Modular, warm | 286.6 | 36.82 | 2,412 | 208.3 |
+| Relink discovery | Full .fcproj | 207.6 | 36.28 | 2,412 | 243.3 |
+| Relink discovery | Modular, cold | 373.5 | 39.16 | 4,812 | 44.1 |
+| Relink discovery | Modular, warm | 80.4 | 2.75 | 2,400 | 29.8 |
+
+Cold opens wrote a separate preview index of 162,919 or 326,121 bytes. Warm opens wrote zero index bytes. Warm name searches decoded zero item payloads. Warm relink skipped the large sequence records. File Path Find used the general metadata fallback and was slower than a full standard reopen at both sizes. Cold index creation also cost more time than a full standard reopen in all six comparisons.
+
+**Next stage.** Plan how applying a verified relink marks the affected bins Unsaved, how Save and Discard settle those changes, and how a stale saved revision is handled. Keep partial-project writes gated on that qualification.

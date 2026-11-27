@@ -83,7 +83,11 @@ fn relink_candidates(session: &Session, params: &Value) -> Result<Value> {
 }
 
 fn full_search(project: &Project, query: &FindQuery) -> Value {
-    json!(query.find(project).into_iter().map(|id| (id, project.root.parent_of(id))).collect::<Vec<_>>())
+    // Attach the actual bin at each occurrence in the full editor's ordered results.
+    let hits = query.find(project);
+    let mut hits = hits.into_iter().peekable();
+    let entries = panel_order(&project.root, project.items.keys().copied());
+    json!(entries.into_iter().filter(|(id, _)| hits.next_if_eq(id).is_some()).collect::<Vec<_>>())
 }
 
 pub(in super::super) fn run(mode: &str, path: &Path, params: &str) -> Result<()> {
@@ -96,7 +100,7 @@ pub(in super::super) fn run(mode: &str, path: &Path, params: &str) -> Result<()>
     let start = Instant::now();
     let (results, project_bytes, decoded, cache_written) = if path.extension().is_some_and(|ext| ext == "fcmod") {
         let data = filmcraft_engine::autosave::default_data_dir().ok_or("no FilmCraft user data directory")?;
-        let (mut view, cost) = cache::open_with(path, &data, || Ok(()), Discovery::new)?;
+        let (mut view, cost) = cache::open_with(path, &data, || Ok(()), Discovery::new).map_err(|e| format!("incomplete {mode}: {e}"))?;
         let results = match &query {
             Some(query) => view.search(query)?,
             None => {
@@ -130,6 +134,8 @@ pub(in super::super) fn run(mode: &str, path: &Path, params: &str) -> Result<()>
 pub(super) fn check_saved_search(path: &Path, reference: &Session, cache_dir: &Path, query: &FindQuery) -> Result<Value> {
     let (mut view, _) = cache::open_with(path, cache_dir, || Ok(()), Discovery::new)?;
     let results = view.search(query)?;
+    let rows: Vec<(ItemId, Option<BinId>)> = serde_json::from_value(results.clone())?;
+    assert_eq!(rows.iter().map(|(id, _)| *id).collect::<Vec<_>>(), query.find(&reference.project));
     assert_eq!(results, full_search(&reference.project, query));
     Ok(results)
 }
