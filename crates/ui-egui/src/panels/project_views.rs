@@ -391,7 +391,8 @@ fn item_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, id: ItemId, kind: &ItemK
         for (label, cmd) in [(tl!("Link Media…"), "media.linkMedia"), (tl!("Make Offline…"), "media.makeOffline")] {
             if ui.button(label).clicked() {
                 actions.push(("project.select".into(), sel()));
-                actions.push((cmd.into(), json!({})));
+                let params = if cmd == "media.linkMedia" && app.session.folder_revision().is_some() { json!({"item":id}) } else { json!({}) };
+                actions.push((cmd.into(), params));
                 ui.close();
             }
         }

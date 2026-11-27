@@ -156,6 +156,14 @@ impl FolderSnapshot {
         Ok((guard, prior_bytes, prior, delta))
     }
 
+    /// Hold publication at this snapshot while a reviewed in-memory edit is installed.
+    pub fn lock_current_revision(&self) -> io::Result<fs::File> {
+        let folder = self.directory()?;
+        let guard = revisions::writer(folder)?;
+        revisions::read_base(folder, &self.revision)?;
+        Ok(guard)
+    }
+
     /// Keep a verified revision locked while committing a local recovery decision.
     pub fn while_current<T>(&self, action: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
         let (_guard, _, _, _) = self.verified_writer()?;

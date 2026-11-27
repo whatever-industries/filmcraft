@@ -14,6 +14,8 @@
 //!   `pm.handles`, `pm.includeProxies`, `pm.includePreviews`, `pm.destination`, `pm.browse`,
 //!   `pm.calculate`, `pm.sizes`, `pm.ok`, `pm.cancel`.
 
+#[path = "bin_relink.rs"]
+mod bin_relink;
 use egui::{Color32, RichText};
 use serde_json::{Value, json};
 
@@ -56,7 +58,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
 /// Menu / shortcut entry points without params open a dialog. Returns None for other ids.
 pub fn route(app: &mut FilmcraftApp, id: &str, params: &Value) -> Option<Result<Value, String>> {
     let empty = params.as_object().is_none_or(|m| m.is_empty());
-    if !empty {
+    if !empty && !(id == "media.linkMedia" && params["item"].is_u64() && app.session.folder_revision().is_some()) {
         return None;
     }
     let enabled = |app: &FilmcraftApp, id: &str| filmcraft_engine::find_command(id).map_or(Ok(()), |c| (c.enabled)(&app.session));
@@ -69,7 +71,11 @@ pub fn route(app: &mut FilmcraftApp, id: &str, params: &Value) -> Option<Result<
                 app.ui.status = tl!("All media is online.").into();
                 return Some(r);
             }
-            app.ui.link_media = Some(LinkMediaDraft::default());
+            let selected = match app.session.state.project_selection.as_slice() {
+                [id] if app.session.folder_revision().is_some() && app.session.offline.missing.contains(id) => Some(id.0),
+                _ => None,
+            };
+            app.ui.link_media = Some(LinkMediaDraft { source_item: params["item"].as_u64().or(selected), ..Default::default() });
             Some(r)
         }
         "media.makeOffline" => Some(enabled(app, id).map(|_| {
@@ -148,12 +154,18 @@ fn preview_texture(app: &FilmcraftApp, ctx: &egui::Context, path: &str) -> Optio
 
 fn link_media(app: &mut FilmcraftApp, ctx: &egui::Context) {
     let Some(mut d) = app.ui.link_media.clone() else { return };
+    if let Some((epoch, review)) = d.pending_bin_review.take() {
+        bin_relink::confirm(app, ctx, &mut d, epoch, review);
+        app.ui.link_media = Some(d);
+        return;
+    }
+    let modular = app.session.folder_revision().is_some();
     if d.pending_script_mark_relink.is_some() {
         review_script_mark_relink(app, ctx, &mut d);
         app.ui.link_media = Some(d);
         return;
     }
-    let rows: Vec<_> = missing_list(app).into_iter().filter(|r| !d.skipped.contains(&r.0)).collect();
+    let rows: Vec<_> = missing_list(app).into_iter().filter(|r| !d.skipped.contains(&r.0) && d.source_item.is_none_or(|id| id == r.0)).collect();
     if rows.is_empty() {
         app.ui.link_media = None;
         app.session.offline.prompt = false;
@@ -202,26 +214,28 @@ fn link_media(app: &mut FilmcraftApp, ctx: &egui::Context) {
                     });
                 });
                 ui.separator();
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(tl!("Match file properties:"));
-                    for (id, label, v) in [
-                        ("fileName", tl!("File Name"), &mut d.file_name),
-                        ("extension", tl!("File Extension"), &mut d.extension),
-                        ("clipId", tl!("Clip ID (fingerprint)"), &mut d.clip_id),
-                        ("duration", tl!("Duration"), &mut d.duration),
-                        ("mediaStart", tl!("Media Start"), &mut d.media_start),
-                        ("metadata", tl!("Frame Size / Rate"), &mut d.metadata),
-                    ] {
-                        let r = ui.checkbox(v, label);
-                        push(&mut elems, format!("linkMedia.match.{id}"), &r, label);
-                    }
-                });
-                ui.horizontal_wrapped(|ui| {
-                    let r = ui.checkbox(&mut d.align_timecode, tl!("Align Timecode"));
-                    push(&mut elems, "linkMedia.alignTimecode", &r, "Align Timecode");
-                    let r = ui.checkbox(&mut d.relink_others, tl!("Relink others automatically"));
-                    push(&mut elems, "linkMedia.relinkOthers", &r, "Relink others automatically");
-                });
+                if !modular {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(tl!("Match file properties:"));
+                        for (id, label, v) in [
+                            ("fileName", tl!("File Name"), &mut d.file_name),
+                            ("extension", tl!("File Extension"), &mut d.extension),
+                            ("clipId", tl!("Clip ID (fingerprint)"), &mut d.clip_id),
+                            ("duration", tl!("Duration"), &mut d.duration),
+                            ("mediaStart", tl!("Media Start"), &mut d.media_start),
+                            ("metadata", tl!("Frame Size / Rate"), &mut d.metadata),
+                        ] {
+                            let r = ui.checkbox(v, label);
+                            push(&mut elems, format!("linkMedia.match.{id}"), &r, label);
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        let r = ui.checkbox(&mut d.align_timecode, tl!("Align Timecode"));
+                        push(&mut elems, "linkMedia.alignTimecode", &r, "Align Timecode");
+                        let r = ui.checkbox(&mut d.relink_others, tl!("Relink others automatically"));
+                        push(&mut elems, "linkMedia.relinkOthers", &r, "Relink others automatically");
+                    });
+                }
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {
                     ui.label(tl!("Search in:"));
@@ -297,8 +311,10 @@ fn link_media(app: &mut FilmcraftApp, ctx: &egui::Context) {
                         action = Some(id);
                     }
                 }
-                let r = ui.add_enabled(d.candidate.is_some(), egui::Button::new(RichText::new(tl!("Link")).color(Color32::WHITE)).fill(accent));
-                push(&mut elems, "linkMedia.link", &r, "Link");
+                let label = if modular { tl!("Review in Source Bin…") } else { tl!("Link") };
+                let enabled = if modular { d.candidate.and_then(|k| d.bin_reviews.get(k)).is_some_and(Option::is_some) } else { d.candidate.is_some() };
+                let r = ui.add_enabled(enabled, egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(accent));
+                push(&mut elems, "linkMedia.link", &r, label);
                 if r.clicked() {
                     action = Some("link");
                 }
@@ -325,6 +341,9 @@ fn link_media(app: &mut FilmcraftApp, ctx: &egui::Context) {
             p["exactName"] = json!(d.exact_name);
             match app.session.execute("media.search", p) {
                 Ok(v) => {
+                    d.search_epoch = Some(app.session.document_epoch);
+                    d.bin_reviews =
+                        v["results"][0]["candidates"].as_array().into_iter().flatten().map(|c| serde_json::from_value(c["review"].clone()).ok()).collect();
                     d.candidates = v["results"][0]["candidates"]
                         .as_array()
                         .map(|a| {
@@ -338,7 +357,13 @@ fn link_media(app: &mut FilmcraftApp, ctx: &egui::Context) {
                         })
                         .unwrap_or_default();
                     d.candidate = d.candidates.iter().position(|c| c.1);
-                    d.message = if d.candidates.is_empty() { tl!("Nothing found with that name.").into() } else { String::new() };
+                    d.message = if d.candidates.is_empty() {
+                        tl!("Nothing found with that name.").into()
+                    } else if modular && d.bin_reviews.iter().all(Option::is_none) {
+                        tl!("A verified relink needs a matching file fingerprint and one owning bin.").into()
+                    } else {
+                        String::new()
+                    };
                 }
                 Err(e) => d.message = e.to_string(),
             }
@@ -348,13 +373,43 @@ fn link_media(app: &mut FilmcraftApp, ctx: &egui::Context) {
                 filmcraft_media::VIDEO_EXTENSIONS.iter().chain(filmcraft_media::AUDIO_EXTENSIONS).chain(filmcraft_media::STILL_EXTENSIONS).copied().collect();
             let mut params = match_params(&d);
             params["item"] = json!(item);
+            let revision = app.session.folder_revision().map(str::to_owned);
+            let epoch = app.session.document_epoch;
+            if let Some(rev) = &revision {
+                params["reviewOnly"] = json!(true);
+                params["revision"] = json!(rev);
+            }
             let hint = RelinkHint { command: "media.relink".into(), params };
             let item = json!(item);
             app.pick_ui(FileDialog::Relink { exts: exts.iter().map(ToString::to_string).collect(), hint }, move |app, paths| {
                 let (Some(path), Some(mut d)) = (paths.into_iter().next(), app.ui.link_media.clone()) else { return };
-                relink_to(app, &mut d, &item, path);
+                if let Some(rev) = &revision {
+                    let result = if epoch != app.session.document_epoch {
+                        Err(tl!("Project changed. Search again.").to_string())
+                    } else {
+                        app.session
+                            .execute("media.relink", json!({"reviewOnly":true,"revision":rev,"item":item,"path":path}))
+                            .map_err(|e| e.to_string())
+                            .and_then(|v| serde_json::from_value(v["review"].clone()).map_err(|e| e.to_string()))
+                            .and_then(|review| bin_relink::open(app, &mut d, review))
+                    };
+                    if let Err(e) = result {
+                        d.message = e;
+                    }
+                } else {
+                    relink_to(app, &mut d, &item, path);
+                }
                 app.ui.link_media = Some(d);
             });
+        }
+        Some("link") if modular => {
+            if let Some(review) = d.candidate.and_then(|k| d.bin_reviews.get(k)).cloned().flatten() {
+                if review.item.0 != item || d.search_epoch != Some(app.session.document_epoch) {
+                    d.message = tl!("Source selection changed. Search again.").into();
+                } else if let Err(e) = bin_relink::open(app, &mut d, review) {
+                    d.message = e;
+                }
+            }
         }
         Some("link") => {
             if let Some(path) = d.candidate.and_then(|c| d.candidates.get(c)).map(|c| c.0.clone()) {

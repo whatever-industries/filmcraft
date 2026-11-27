@@ -24,6 +24,9 @@ use serde_json::{Value, json};
 use crate::commands::{CommandSpec, always, bad, bool_p, str_p, u64_p};
 use crate::{EngineError, MediaPool, Result, Services, Session};
 
+#[path = "relink/review.rs"]
+pub mod review;
+
 /// Bytes hashed at each end of the file.
 pub const FINGERPRINT_SPAN: usize = 1 << 20;
 
@@ -333,7 +336,14 @@ fn needs_script_review(s: &Session, media: ItemId, identity: Option<MediaIdentit
 }
 
 /// Apply planned relinks as one undo step.
-fn apply(s: &mut Session, plans: Vec<Plan>, align_timecode: bool, confirmed_item: Option<ItemId>, label: &str) -> Result<Vec<Value>> {
+fn apply(
+    s: &mut Session,
+    plans: Vec<Plan>,
+    align_timecode: bool,
+    confirmed_item: Option<ItemId>,
+    only_source: Option<ItemId>,
+    label: &str,
+) -> Result<Vec<Value>> {
     // A Script take, like a sequence clip, refers to a Project item. Resolve all subclips
     // before changing any media so both direct and nested references are checked together.
     let script_sources: Vec<_> = plans
@@ -357,6 +367,7 @@ fn apply(s: &mut Session, plans: Vec<Plan>, align_timecode: bool, confirmed_item
     let rows: Vec<Value> = plans.iter().map(|p| json!({"item": p.item.0, "path": p.cand.path})).collect();
     let sources: Vec<(ItemId, String, filmcraft_media::SharedSource)> =
         plans.iter().filter_map(|p| p.cand.source.clone().map(|src| (p.item, p.cand.path.clone(), src))).collect();
+    let before = s.project.clone();
     s.edit(label, |proj, _| {
         for (p, (users, identity)) in plans.iter().zip(&script_sources) {
             let Some(m) = proj.item_mut(p.item).and_then(|i| i.as_media_mut()) else { continue };
@@ -390,6 +401,17 @@ fn apply(s: &mut Session, plans: Vec<Plan>, align_timecode: bool, confirmed_item
                 // while the file was missing still have an "auto" (NaN) anchor waiting for it:
                 // centre it in the real picture. Points that are numbers are not touched.
                 proj.resolve_placed_auto_points(|_| true, |source| source.id == p.item);
+            }
+        }
+        if let Some(source) = only_source {
+            let changed: Vec<_> = proj
+                .items
+                .iter()
+                .filter(|(id, value)| **id != source && before.item(**id) != Some(*value))
+                .map(|(id, value)| format!("{} (item {})", value.name, id.0))
+                .collect();
+            if !changed.is_empty() {
+                return Err(EngineError::RelinkRequiresFullEditor { records: changed.join(", ") });
             }
         }
         Ok(())
@@ -446,6 +468,12 @@ fn others(s: &Session, skip: ItemId, old: &str, new: &str, o: &MatchOptions) -> 
 pub fn relink(s: &mut Session, p: &Value) -> Result<Value> {
     let item = u64_p(p, "item").map(ItemId).ok_or_else(|| bad("media.relink", "need `item`"))?;
     let path = str_p(p, "path").ok_or_else(|| bad("media.relink", "need `path`"))?.to_string();
+    if p.get("review").is_some() || p.get("fullEditorReview").is_some() || bool_p(p, "reviewOnly") == Some(true) {
+        #[cfg(not(target_arch = "wasm32"))]
+        return review::verified(s, p, item, &path);
+        #[cfg(target_arch = "wasm32")]
+        return Err(bad("media.relink", "verified bin relink requires a local project folder"));
+    }
     let force = bool_p(p, "force").unwrap_or(false);
     let o = MatchOptions::from_params(p);
     let old = match s.project.item(item).and_then(|i| i.as_media()).map(|m| m.media.clone()) {
@@ -477,7 +505,7 @@ pub fn relink(s: &mut Session, p: &Value) -> Result<Value> {
         }
     }
     let confirmed_item = bool_p(p, "confirmScriptSameFootage").unwrap_or(false).then_some(item);
-    let rows = apply(s, plans, o.align_timecode, confirmed_item, "Link Media")?;
+    let rows = apply(s, plans, o.align_timecode, confirmed_item, None, "Link Media")?;
     Ok(json!({"relinked": rows, "needsReview": needs_review, "remaining": s.offline.missing.iter().map(|i| i.0).collect::<Vec<_>>()}))
 }
 
@@ -526,7 +554,7 @@ pub fn auto_relink(s: &mut Session, p: &Value) -> Result<Value> {
             true
         }
     });
-    let rows = if plans.is_empty() { Vec::new() } else { apply(s, plans, o.align_timecode, None, "Link Media")? };
+    let rows = if plans.is_empty() { Vec::new() } else { apply(s, plans, o.align_timecode, None, None, "Link Media")? };
     refresh(s);
     Ok(json!({"relinked": rows, "failed": failed, "needsReview": needs_review, "remaining": s.offline.missing.iter().map(|i| i.0).collect::<Vec<_>>()}))
 }
@@ -599,7 +627,11 @@ pub fn search(s: &Session, p: &Value) -> Result<Value> {
         cands.sort_by(|a, b| b.score.cmp(&a.score).then(a.path.cmp(&b.path)));
         out.push(json!({"item": id.0, "candidates": cands}));
     }
-    Ok(json!({"results": out}))
+    let mut report = json!({"results": out});
+    if let Some(revision) = s.folder_revision() {
+        review::annotate(&s.project, revision, &mut report);
+    }
+    Ok(report)
 }
 
 /// Whether Make Offline ▸ delete may remove `path` for item `id`: a regular file (not a link or
@@ -742,7 +774,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Relink Media",
             menu: &[],
             shortcut: None,
-            params: r#"{"item":id,"path":str,"force":bool=false,"confirmScriptSameFootage":bool=false,"relinkOthers":bool=true,"alignTimecode":bool=false,"match":{"fileName":bool,"extension":bool,"clipId":bool,"duration":bool,"mediaStart":bool,"metadata":bool}?}"#,
+            params: r#"{"item":id,"path":str,"force":bool=false,"confirmScriptSameFootage":bool=false,"relinkOthers":bool=true,"alignTimecode":bool=false,"reviewOnly":bool=false,"revision":str?,"bin":id?,"review":object?,"fullEditorReview":object?,"match":{"fileName":bool,"extension":bool,"clipId":bool,"duration":bool,"mediaStart":bool,"metadata":bool}?}"#,
             enabled: always,
             run: relink,
             journal: true,

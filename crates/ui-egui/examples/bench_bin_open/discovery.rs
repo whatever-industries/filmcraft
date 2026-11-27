@@ -76,10 +76,14 @@ fn panel_order(root: &Bin, ids: impl Iterator<Item = ItemId>) -> Vec<(ItemId, Op
 }
 
 // Use the editor's missing-media scan, candidate ordering, fingerprint checks and stored-path policy.
-fn relink_candidates(session: &Session, params: &Value) -> Result<Value> {
+fn relink_candidates(session: &Session, params: &Value, revision: Option<&str>) -> Result<Value> {
     let missing = filmcraft_engine::relink::scan(&session.project, &session.media, &*session.services);
-    let search = filmcraft_engine::relink::search(session, params)?;
-    Ok(json!({"missing":missing,"results":search["results"]}))
+    let mut report = filmcraft_engine::relink::search(session, params)?;
+    if let Some(revision) = revision {
+        filmcraft_engine::relink::review::annotate(&session.project, revision, &mut report);
+    }
+    report["missing"] = json!(missing);
+    Ok(report)
 }
 
 fn full_search(project: &Project, query: &FindQuery) -> Value {
@@ -105,7 +109,7 @@ pub(in super::super) fn run(mode: &str, path: &Path, params: &str) -> Result<()>
             Some(query) => view.search(query)?,
             None => {
                 view.load(|class| class == RecordClass::Media)?;
-                relink_candidates(&view.session, &params)?
+                relink_candidates(&view.session, &params, Some(&view.reader.directory.revision))?
             }
         };
         (
@@ -119,7 +123,7 @@ pub(in super::super) fn run(mode: &str, path: &Path, params: &str) -> Result<()>
         session.execute("file.open", json!({"path":path}))?;
         let results = match &query {
             Some(query) => full_search(&session.project, query),
-            None => relink_candidates(&session, &params)?,
+            None => relink_candidates(&session, &params, None)?,
         };
         (results, fs::metadata(path)?.len(), session.project.items.len(), 0)
     };
@@ -233,7 +237,7 @@ mod relink_tests {
         view.load(|class| class == RecordClass::Media)?;
         assert!(!view.session.project.items.contains_key(&f.master));
         let paths_before = view.session.project.clone();
-        let report = relink_candidates(&view.session, &params)?;
+        let report = relink_candidates(&view.session, &params, Some(&view.reader.directory.revision))?;
         assert_eq!(report["results"], expected["results"]);
         assert_eq!(report["missing"], json!(filmcraft_engine::relink::scan(&full.project, &full.media, &*full.services)));
         assert_eq!(report["missing"].as_array().unwrap().len(), 2);

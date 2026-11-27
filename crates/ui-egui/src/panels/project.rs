@@ -1130,6 +1130,11 @@ pub fn new_bin(app: &mut FilmcraftApp, params: &Value) -> Result<Value, String> 
     Ok(r)
 }
 
+/// The front bin, including a focused floating modular bin.
+pub(crate) fn focused_bin(app: &FilmcraftApp) -> BinId {
+    view_of(app, bin_views::focused_index(app).map_or(Inst::Main, Inst::Tab)).bin
+}
+
 /// The bin the Project panel is showing, `None` at the project's root: where a New Item or File ▸ New
 /// puts what it makes.
 pub fn shown_bin(app: &FilmcraftApp) -> Option<u64> {

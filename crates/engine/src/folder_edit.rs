@@ -218,6 +218,24 @@ impl Session {
         Ok(json!({"dirtyBins":status.bins,"projectSettingsDirty":status.settings,"unfiledItemsDirty":status.unfiled}))
     }
 
+    /// History restores model snapshots while the offline inventory and decoders live in the session.
+    pub(crate) fn refresh_restored_media(&mut self, previous: &Project) {
+        if self.editing_folder.is_none() {
+            return;
+        }
+        let mut changed = false;
+        for (&id, item) in &previous.items {
+            let Some(before) = item.as_media() else { continue };
+            if self.project.item(id).and_then(|it| it.as_media()).is_none_or(|after| before.media != after.media || before.offline != after.offline) {
+                self.media.remove(id);
+                changed = true;
+            }
+        }
+        if changed || self.project.items.iter().any(|(id, it)| it.as_media().is_some() && previous.item(*id).and_then(|it| it.as_media()).is_none()) {
+            crate::relink::refresh(self);
+        }
+    }
+
     pub(crate) fn refresh_folder_dirty(&mut self) {
         if let Some(folder) = &self.editing_folder {
             if self.project.next_id < folder.project.next_id {
@@ -315,7 +333,8 @@ impl Session {
             // destination that is still open keeps its independently editable cut.
             folder.departures.retain(|(source, _), _| *source != id);
         }
-        self.project = next;
+        let previous = std::mem::replace(&mut self.project, next);
+        self.refresh_restored_media(&previous);
         self.history.undo = undo;
         self.history.redo = redo;
         self.history.merge_key = None;

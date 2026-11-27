@@ -763,6 +763,18 @@ pub struct LinkMediaDraft {
     /// Rows the user set offline in this session of the dialog (item ids).
     pub skipped: Vec<u64>,
     pub message: String,
+    #[serde(skip)]
+    pub source_item: Option<u64>,
+    #[serde(skip)]
+    pub bin_reviews: Vec<Option<filmcraft_engine::relink::review::Review>>,
+    #[serde(skip)]
+    pub pending_bin_review: Option<(u64, filmcraft_engine::relink::review::Review)>,
+    #[serde(skip)]
+    pub full_editor_reason: Option<(u64, String)>,
+    #[serde(skip)]
+    pub search_epoch: Option<u64>,
+    #[serde(skip)]
+    pub focus_relink_review: bool,
     /// Original `media.relink` request awaiting explicit review of Script marks.
     pub pending_script_mark_relink: Option<serde_json::Value>,
 }
@@ -785,6 +797,12 @@ impl Default for LinkMediaDraft {
             candidate: None,
             skipped: vec![],
             message: String::new(),
+            source_item: None,
+            bin_reviews: Vec::new(),
+            pending_bin_review: None,
+            full_editor_reason: None,
+            search_epoch: None,
+            focus_relink_review: false,
             pending_script_mark_relink: None,
         }
     }

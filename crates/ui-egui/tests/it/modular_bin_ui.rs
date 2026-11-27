@@ -450,3 +450,4 @@ fn restoring_a_saved_sequence_is_undoable_and_export_preserves_a_changed_nested_
     assert_eq!(reopened.project.sequence(sequence).unwrap().start_timecode, 23);
     assert_eq!(reopened.project.settings.title_safe, (12.0, 14.0));
 }
+mod verified_relink;

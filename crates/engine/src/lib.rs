@@ -163,6 +163,8 @@ pub enum EngineError {
     Edit(#[from] filmcraft_edit::EditError),
     #[error("media: {0}")]
     Media(#[from] filmcraft_media::MediaError),
+    #[error("Other records would change: {records}. Use the full editor relink workflow.")]
+    RelinkRequiresFullEditor { records: String },
     #[error("folder revision {revision} was published, recovery cleanup failed: {message}. Retry Save Bin.")]
     BinPublished { revision: String, message: String },
     #[error("{0}")]
@@ -1274,6 +1276,8 @@ impl Session {
             folder.capture_moves(&self.project, &prev);
         }
         let cur = std::mem::replace(&mut self.project, prev);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.refresh_restored_media(&cur);
         self.history.redo.push((label.clone(), cur, origin));
         self.fix_state();
         self.bump();
@@ -1290,6 +1294,8 @@ impl Session {
             folder.capture_moves(&self.project, &next);
         }
         let cur = std::mem::replace(&mut self.project, next);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.refresh_restored_media(&cur);
         self.history.undo.push((label.clone(), cur, origin));
         self.fix_state();
         self.bump();
