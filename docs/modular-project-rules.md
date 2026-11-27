@@ -356,11 +356,11 @@ Separate untimed runs counted successful file I/O under the project directory, e
 
 ### Crash recovery after a partial relink
 
-In the local developer harness, run `relink-edit` with `apply,checkpoint` to exercise the first recovery stage. The worker verifies the saved revision, loads its complete project, and substitutes the working source record. It acknowledges the checkpoint after publishing a self-contained draft in the recovery directory. The owning bin stays Unsaved. A stale revision fails the checkpoint and preserves the previously acknowledged draft.
+In the local developer harness, run `relink-edit` with `apply,checkpoint` to exercise the first recovery stage. The worker verifies the saved revision and the reviewed source before copying its records to local recovery storage. It applies the edit to that source and keeps unopened sequences and independent copy identities in the draft. It acknowledges the checkpoint after publishing a self-contained draft in the recovery directory. The owning bin stays Unsaved. A stale revision fails the checkpoint and preserves the previously acknowledged draft.
 
 A normal project open shows the last explicit Save. Recover Unsaved Changes opens a detached draft and checks the chosen file against FilmCraft’s recorded media fingerprint before playback. An unreadable, missing, or fingerprint-mismatched file stays offline at the chosen path and opens Link Media for review. Saving the detached copy preserves the path, clip name and offline state. A second crash during editing retains the review requirement. An acknowledged Discard clears the draft.
 
-The force-quit regression covers unchanged footage, a moved file, and different playable footage at the same path. It removes access to the original project folder before recovery, checks an unopened sequence and project settings, and reopens the saved copy in a fresh process. The next stage connects this opt-in path to desktop Find and verifies its bin-close and global Save behavior. [Recovery regression](../crates/ui-egui/examples/bench_bin_open/source_recovery_tests.rs)
+The force-quit regression covers unchanged footage, a moved file, and different playable footage at the same path. It removes access to the original project folder before recovery, checks an unopened sequence and project settings, and reopens the saved copy in a fresh process. [Recovery regression](../crates/ui-egui/examples/bench_bin_open/source_recovery_tests.rs)
 
 ### Desktop relink with deferred timelines
 
@@ -388,7 +388,7 @@ These local APFS runs used the same reviewed source and saved timeline tabs for 
 | 48,000 | Full modular | 1260.3 | 32.1 | 79.1 | 1373.1 | 360,066 | 1063.8 |
 | 48,000 | Warm modular | 112.9 | 9.9 | 190.3 | 315.2 | 360,066 | 51.4 |
 
-Separate runs measured the first durable checkpoint after Apply and the first transition to the full editor while the source was unsaved. The checkpoint bytes include its recovery records and marker. The transition ends when the full editor can answer a project-settings query.
+Before the incremental checkpoint writer, separate runs measured the first durable checkpoint after Apply and the first transition to the full editor while the source was unsaved. The checkpoint bytes include its recovery records and marker. The transition ends when the full editor can answer a project-settings query.
 
 | Placements | Checkpoint ms | Checkpoint bytes | Checkpoint peak RSS MiB | Transition ms | Transition peak RSS MiB |
 |---:|---:|---:|---:|---:|---:|
@@ -397,4 +397,26 @@ Separate runs measured the first durable checkpoint after Apply and the first tr
 
 Every measured Save produced the same relinked media record across editors. Both modular routes changed exactly one item key and preserved the envelope and every bin key. To repeat a run, pass the fixture and discovery review to the `bench_bin_open` example as `relink-desktop PROJECT REVIEW_JSON ACTION`. Use `full` on the standard and modular references and `save`, `checkpoint`, or `promote` on a modular copy with a current index.
 
-Keep the feature opt-in. Warm open and immediate bin Save use less peak memory than the full modular route. The first durable checkpoint still builds a complete recovery model, and promotion still reads the complete project. Reducing checkpoint memory while retaining recovery after the source volume is disconnected is the next performance milestone.
+#### First checkpoint with the original project drive disconnected
+
+Copying starts when an unsaved relink reaches the recovery worker. The worker checks the captured project revision, hashes and validates each record, then publishes the marker that makes the draft recoverable. While a replacement is being written, the previous marker still opens the earlier draft. A failed first copy can retry against the same revision with the edit still Unsaved.
+
+On macOS, a desktop editor wrote a checkpoint with the project and footage on a disposable APFS volume and its recovery directory on a separate volume. After acknowledgement the editor was killed and the project volume ejected. A fresh editor read the complete draft from local recovery storage. It matched a full-project reference, including the unopened cut and settings. Save As and reopen preserved the offline clip and its chosen path.
+
+The paired benchmark uses the same saved project and relink in two fresh, warm editor processes. One flushes the first checkpoint while the other holds the same edit Unsaved. The sampler reads both processes’ resident memory at approximately 1 ms intervals until confirmation of the edit revision. Each fixture gets one warm-up and five measured pairs, alternating launch order. The timed interval covers the forced flush through the final editor status poll. It excludes the intentional hold after Apply. Run `python3 crates/ui-egui/examples/bench_bin_open/checkpoint_memory.py BINARY MANIFEST REVIEW_FILE 5` on macOS. [Benchmark driver](../crates/ui-egui/examples/bench_bin_open/checkpoint_memory.py)
+
+| Placements | Previous max extra RSS | New max extra RSS | Previous median | New median (range) | Recovery bytes written |
+|---:|---:|---:|---:|---:|---:|
+| 24,000 | 536.1 MiB | 11.8 MiB | 477.7 ms | 310.7 ms (288.2–401.1) | 18,234,809 |
+| 48,000 | 1,070.6 MiB | 21.0 MiB | 916.2 ms | 487.4 ms (438.6–545.7) | 36,492,991 |
+
+The extra RSS is the largest simultaneous writer-minus-pending difference observed across the five measured runs. Both projects meet the 64 MiB limit. The table below gives the largest absolute RSS observed in each arm across those runs. Memory after confirmation was sampled while the bin was still Unsaved.
+
+| Placements | Arm | Peak during checkpoint | After confirmation | Process lifetime peak |
+|---:|---|---:|---:|---:|
+| 24,000 | Writer | 43.5 MiB | 43.5 MiB | 43.5 MiB |
+| 24,000 | Pending | 31.7 MiB | 31.7 MiB | 31.8 MiB |
+| 48,000 | Writer | 66.3 MiB | 66.3 MiB | 66.4 MiB |
+| 48,000 | Pending | 45.5 MiB | 45.5 MiB | 45.6 MiB |
+
+The desktop relink remains opt-in. These local timing measurements are available for choosing a limit.

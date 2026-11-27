@@ -217,3 +217,64 @@ fn dependent_marked_replaced_or_unreadable_source_never_applies() -> Result<()> 
 
 #[path = "source_recovery_tests.rs"]
 mod crash;
+
+#[test]
+fn interrupted_stream_never_displaces_the_confirmed_draft() -> Result<()> {
+    use filmcraft_format::project_folder::{CheckpointStore, FolderSnapshot, load_checkpoint};
+    let tmp = tempfile::tempdir()?;
+    let mut f = cut(tmp.path(), Case::Plain)?;
+    // A destination-only save leaves an unopened sequence copy sharing its stored payload.
+    let mut editor = open(&f.manifest)?;
+    editor.execute("project.moveToBin", json!({"items":[f.other], "bin":f.review.bin}))?;
+    editor.execute("project.saveBin", json!({"bin":f.review.bin}))?;
+    let review = editor.execute("media.search", json!({"item":f.review.item, "folder":tmp.path().join("Moved")}))?;
+    f.review = serde_json::from_value(review["results"][0]["candidates"][0]["review"].clone())?;
+    drop(editor);
+    let mut edit = warm(&f, &tmp.path().join("cache"))?;
+    edit.apply()?;
+    let saved = edit.saved.as_ref().unwrap();
+    let mut working = edit.source()?.clone();
+    let session = tmp.path().join("journal");
+    fs::create_dir(&session)?;
+    let marker = session.join("marker");
+    let publish = |root: &str, _: usize, _: &str| {
+        filmcraft_format::atomic_write_no_follow(&marker, root.as_bytes())?;
+        Ok(root.len())
+    };
+    let mut store = CheckpointStore::default();
+    let manifest = raw(&f.manifest)?;
+    assert!(manifest["identities"].as_object().is_some_and(|ids| !ids.is_empty()));
+    let records = manifest["items"].as_array().unwrap();
+    let last = records.iter().rev().find(|r| r[0] != json!(saved.id)).unwrap();
+    let payload = f.manifest.parent().unwrap().join(last[1].as_str().unwrap());
+    let unavailable = session.join("unavailable");
+    fs::rename(&payload, &unavailable)?;
+    assert!(store.publish_relink(&session, &f.manifest, &edit.revision, saved, &working, publish).is_err());
+    assert!(!marker.exists());
+    assert!(session.join("checkpoint-records/records.bin").metadata()?.len() > 0);
+    assert!(edit.dirty());
+    fs::rename(&unavailable, &payload)?;
+    store.publish_relink(&session, &f.manifest, &edit.revision, saved, &working, publish)?;
+    let first = fs::read_to_string(&marker)?;
+    let (_, mut reference) = FolderSnapshot::open(&f.manifest)?;
+    *reference.project.item_mut(saved.id).unwrap() = working.clone();
+    assert_eq!(load_checkpoint(&session, &first)?.project, reference.project);
+    working.name = "Second edit".into();
+    fs::rename(&payload, &unavailable)?;
+    assert!(store.publish_relink(&session, &f.manifest, &edit.revision, saved, &working, publish).is_err());
+    fs::rename(&unavailable, &payload)?;
+    assert!(store.publish_relink(&session, &f.manifest, "stale", saved, &working, publish).is_err());
+    assert!(store.publish_relink(&session, &f.manifest, &edit.revision, saved, &working, |_, _, _| Err(std::io::ErrorKind::StorageFull.into())).is_err());
+    assert_eq!(fs::read_to_string(&marker)?, first);
+    assert_eq!(load_checkpoint(&session, &first)?.project, reference.project);
+    store.publish_relink(&session, &f.manifest, &edit.revision, saved, &working, publish)?;
+    *reference.project.item_mut(saved.id).unwrap() = working;
+    assert_eq!(load_checkpoint(&session, &fs::read_to_string(marker)?)?.project, reference.project);
+    *reference.project.item_mut(saved.id).unwrap() = edit.source()?.clone();
+    edit.checkpoint()?;
+    fs::rename(&payload, &unavailable)?;
+    let rotation = edit.journal.as_ref().unwrap().auto_save_now()?.unwrap();
+    assert_eq!(filmcraft_format::decode(&fs::read(rotation)?)?.project, reference.project);
+    assert!(edit.dirty());
+    Ok(())
+}

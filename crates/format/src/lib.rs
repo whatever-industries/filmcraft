@@ -133,14 +133,47 @@ pub fn decode(bytes: &[u8]) -> Result<Loaded, FormatError> {
 /// Refuse only values that would overflow or exhaust memory later (`Sequence::check_bounds`);
 /// structural rules such as overlaps are left to the editor, so projects that open today still open.
 pub fn validate_loaded(mut loaded: Loaded) -> Result<Loaded, FormatError> {
+    validate_records(&mut loaded.project)?;
+    let project = &mut loaded.project;
+    // A missing linked clip must not make an otherwise sound project impossible to open.
+    let valid_take_sources: std::collections::HashSet<_> = project
+        .items
+        .keys()
+        .copied()
+        .filter(|source| {
+            project.item(*source).is_some_and(|linked| match &linked.kind {
+                filmcraft_project::ItemKind::Media(_) => true,
+                filmcraft_project::ItemKind::Subclip { .. } => project.resolve_media(*source).is_some(),
+                filmcraft_project::ItemKind::Sequence(sequence) => sequence.multicam.is_some(),
+                _ => false,
+            })
+        })
+        .collect();
+    for item in project.items.values_mut() {
+        let name = item.name.clone();
+        if let Some(doc) = item.as_script_mut() {
+            for take in doc.slates.iter_mut().flat_map(|slate| &mut slate.takes) {
+                if take.source.is_some_and(|source| !valid_take_sources.contains(&source)) {
+                    log::warn!("script `{name}`: take {} lost its source, unlinked", take.id.0);
+                    take.source = None;
+                }
+            }
+        }
+    }
+    Ok(loaded)
+}
+
+/// Checks that can run on the envelope and on each item independently. Resolving
+/// linked script takes requires the complete project and remains in validate_loaded.
+fn validate_records(project: &mut Project) -> Result<(), FormatError> {
     // Graphic layers written before they carried a uid get a stable identity now, before any
     // undo history exists. The field is optional in the schema, so this is not a schema upgrade.
-    loaded.project.ensure_graphic_layer_uids();
+    project.ensure_graphic_layer_uids();
     // Embedded LUT text is rendered on the hot path. Drop oversize entries at load time so a
     // hostile project cannot retain an unrenderable multi-megabyte source or repeatedly offer it
     // to renderers. Clips that refer to one simply have no LUT, like a deleted library entry.
     let max_lut = filmcraft_project::MAX_LUT_TEXT_BYTES;
-    loaded.project.luts.retain(|lut| {
+    project.luts.retain(|lut| {
         let keep = lut.text.len() <= max_lut;
         if !keep {
             log::warn!("LUT `{}`: {} bytes, dropping entry above {max_lut} byte limit", lut.name, lut.text.len());
@@ -151,7 +184,7 @@ pub fn validate_loaded(mut loaded: Loaded) -> Result<Loaded, FormatError> {
     // whole project over one bad index. A media item keeps its first `MAX_AUDIO_STREAMS` streams; a
     // clip pointing past that plays stream 0.
     let max = filmcraft_media::MAX_AUDIO_STREAMS;
-    for item in loaded.project.items.values_mut() {
+    for item in project.items.values_mut() {
         let name = item.name.clone();
         match &mut item.kind {
             filmcraft_project::ItemKind::Media(m) => {
@@ -177,45 +210,18 @@ pub fn validate_loaded(mut loaded: Loaded) -> Result<Loaded, FormatError> {
             _ => {}
         }
     }
-    for item in loaded.project.sequences() {
+    for item in project.sequences() {
         if let filmcraft_project::ItemKind::Sequence(sequence) = &item.kind {
             sequence.check_bounds().map_err(|e| FormatError::Corrupt(format!("sequence `{}`: {e}", item.name)))?;
         }
     }
-    for item in loaded.project.items.values() {
+    for item in project.items.values() {
         if let filmcraft_project::ItemKind::Script(doc) = &item.kind {
             doc.validate().map_err(|e| FormatError::Corrupt(format!("script `{}`: {e}", item.name)))?;
         }
     }
-    // A missing linked clip must not make an otherwise sound project impossible to open.
-    let valid_take_sources: std::collections::HashSet<_> = loaded
-        .project
-        .items
-        .keys()
-        .copied()
-        .filter(|source| {
-            loaded.project.item(*source).is_some_and(|linked| match &linked.kind {
-                filmcraft_project::ItemKind::Media(_) => true,
-                filmcraft_project::ItemKind::Subclip { .. } => loaded.project.resolve_media(*source).is_some(),
-                filmcraft_project::ItemKind::Sequence(sequence) => sequence.multicam.is_some(),
-                _ => false,
-            })
-        })
-        .collect();
-    for item in loaded.project.items.values_mut() {
-        let name = item.name.clone();
-        if let Some(doc) = item.as_script_mut() {
-            for take in doc.slates.iter_mut().flat_map(|slate| &mut slate.takes) {
-                if take.source.is_some_and(|source| !valid_take_sources.contains(&source)) {
-                    log::warn!("script `{name}`: take {} lost its source, unlinked", take.id.0);
-                    take.source = None;
-                }
-            }
-        }
-    }
     // Every new id is `next_id`, read from the file as is. One that lags behind the ids in it (an
     // older build, a hand edit) would hand out an id in use, and the new item replace the old (#2809).
-    let project = &mut loaded.project;
     let max = project.max_id();
     let past = max.checked_add(1).ok_or_else(|| FormatError::Corrupt(format!("project ID space exhausted (id {max} in use)")))?;
     if project.next_id < past {
@@ -225,7 +231,7 @@ pub fn validate_loaded(mut loaded: Loaded) -> Result<Loaded, FormatError> {
     if project.next_id > Project::MAX_NEXT_ID {
         return Err(FormatError::Corrupt(format!("project ID space exhausted (next id {})", project.next_id)));
     }
-    Ok(loaded)
+    Ok(())
 }
 
 #[cfg(test)]

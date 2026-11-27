@@ -95,12 +95,17 @@ impl FolderDirectory {
     pub fn read_item(&self, id: ItemId, remaining: &mut u64) -> io::Result<ProjectItem> {
         let rec = self.items.get(&id).ok_or_else(|| invalid(format!("missing item {}", id.0)))?;
         let bytes = verified_bytes(&self.folder, &rec.hash, remaining)?;
+        self.decode_item(id, &bytes)
+    }
+
+    pub(super) fn decode_item(&self, id: ItemId, bytes: &[u8]) -> io::Result<ProjectItem> {
+        let rec = self.items.get(&id).ok_or_else(|| invalid("missing item"))?;
         let item: ProjectItem = if let Some(copy) = &rec.identity {
-            let mut raw = serde_json::from_slice(&bytes)?;
+            let mut raw = serde_json::from_slice(bytes)?;
             copy.apply(id.0, &mut raw)?;
             serde_json::from_value(raw)?
         } else {
-            serde_json::from_slice(&bytes)?
+            serde_json::from_slice(bytes)?
         };
         if item.id != id {
             return Err(invalid("mismatched item identity"));

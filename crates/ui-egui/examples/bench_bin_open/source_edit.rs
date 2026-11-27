@@ -211,14 +211,24 @@ pub(in super::super) fn baseline(path: &Path, input: &str, action: Option<&str>)
     let start = Instant::now();
     let mut editor = Session::local_folder_editor();
     if let Some(action) = action {
-        if !matches!(action, "save" | "checkpoint" | "promote" | "full") {
-            return Err("expected save, checkpoint, promote or full".into());
+        if !matches!(action, "save" | "checkpoint" | "checkpoint-pair" | "promote" | "full") {
+            return Err("expected save, checkpoint, checkpoint-pair, promote or full".into());
         }
         let data = filmcraft_engine::autosave::default_data_dir().ok_or("no benchmark data root")?;
         if action != "full" {
             editor.enable_experimental_modular_relink(data.clone());
         }
-        editor.start_autosave(AutosaveConfig::new(data))?;
+        let mut config = AutosaveConfig::new(data);
+        if action == "checkpoint-pair" {
+            config.journal_debounce = std::time::Duration::from_secs(600);
+        }
+        editor.start_autosave(config)?;
+        if action == "checkpoint-pair" {
+            let mut prefs = editor.prefs.clone();
+            prefs.auto_save.enabled = false;
+            prefs.auto_save.recovery_interval_seconds = 600;
+            editor.set_prefs(prefs)?;
+        }
     }
     let opening = Instant::now();
     let opened = editor.execute("file.open", json!({"path":path}))?;
@@ -239,8 +249,21 @@ pub(in super::super) fn baseline(path: &Path, input: &str, action: Option<&str>)
     let began = Instant::now();
     editor.execute("media.relink", args)?;
     let apply = began.elapsed();
+    let paired = action == Some("checkpoint-pair");
+    if paired {
+        use std::io::Write;
+        println!("ready");
+        std::io::stdout().flush()?;
+        let mut command = String::new();
+        std::io::stdin().read_line(&mut command)?;
+        match command.trim() {
+            "finish" => return Ok(()),
+            "flush" => {}
+            _ => return Err("expected flush or finish".into()),
+        }
+    }
     let began = Instant::now();
-    if action == Some("checkpoint") {
+    if paired || action == Some("checkpoint") {
         let revision = editor.persistence.as_ref().ok_or("missing worker")?.flush()?;
         if revision != Some(editor.revision) {
             return Err("unconfirmed checkpoint".into());
@@ -251,6 +274,15 @@ pub(in super::super) fn baseline(path: &Path, input: &str, action: Option<&str>)
             "{}",
             json!({"checkpointBytes":bytes,"openMs":open_ms,"checkpointMs":began.elapsed().as_secs_f64()*1000.0,"applyMs":apply.as_secs_f64()*1000.0})
         );
+        if paired {
+            use std::io::Write;
+            std::io::stdout().flush()?;
+            let mut end = String::new();
+            std::io::stdin().read_line(&mut end)?;
+            if end.trim() != "finish" {
+                return Err("expected finish".into());
+            }
+        }
         return Ok(());
     }
     if action == Some("promote") {

@@ -168,7 +168,7 @@ pub(super) fn run() -> Result<()> {
             "expected prepare SOURCE.fcproj NEW_DIRECTORY, measure PROJECT BIN_ID, ",
             "active|all-tabs|verify FOLDER_MANIFEST BIN_ID, index FOLDER_MANIFEST INDEX, preview FOLDER_MANIFEST [INDEX], ",
             "refresh FOLDER_MANIFEST PRIOR_INDEX NEW_INDEX, frames PROJECT BIN_ID [INDEX], search PROJECT QUERY_JSON, relink-discovery PROJECT MEDIA_SEARCH_JSON, relink-impact FOLDER_MANIFEST REVIEW_JSON, ",
-            "relink-edit DISPOSABLE_MANIFEST REVIEW_JSON ACTIONS, relink-edit-baseline DISPOSABLE_PROJECT REVIEW_JSON, relink-desktop DISPOSABLE_MANIFEST REVIEW_JSON save|checkpoint|promote|full, relink-impact-baseline STANDARD_FIXTURE REVIEW_JSON, or verify-relink-impact DISPOSABLE_MANIFEST REVIEW_JSON"
+            "relink-edit DISPOSABLE_MANIFEST REVIEW_JSON ACTIONS, relink-edit-baseline DISPOSABLE_PROJECT REVIEW_JSON, relink-desktop DISPOSABLE_MANIFEST REVIEW_JSON save|checkpoint|checkpoint-pair|promote|full, relink-impact-baseline STANDARD_FIXTURE REVIEW_JSON, or verify-relink-impact DISPOSABLE_MANIFEST REVIEW_JSON"
         )
         .into()),
     }

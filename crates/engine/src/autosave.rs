@@ -732,7 +732,7 @@ impl RelinkDraft {
         use filmcraft_project::MediaRef;
         let Self { manifest, base_revision, saved, working, revision } = self;
         // The records are immutable. Reading a pinned snapshot leaves the writer lock
-        // available for Apply, Save and promotion while the journal materializes it.
+        // available when a rotating Auto Save precedes the first recovery checkpoint.
         let (snapshot, mut loaded) = FolderSnapshot::open(&manifest)?;
         if snapshot.revision() != base_revision {
             return Err(io::Error::other("stale relink checkpoint base"));
@@ -1108,6 +1108,15 @@ struct Worker {
     meta: JournalMeta,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn publish_checkpoint_meta(dir: &Path, meta: &mut JournalMeta, root: &str, bytes: usize) -> io::Result<usize> {
+    meta.checkpoint = Some(root.to_owned());
+    meta.bytes = bytes;
+    let marker = serde_json::to_vec(meta)?;
+    filmcraft_format::atomic_write_no_follow(&dir.join(META), &marker)?;
+    Ok(marker.len())
+}
+
 impl Worker {
     fn autosave_interval(&self) -> Duration {
         Duration::from_secs(self.prefs.interval_minutes as u64 * 60)
@@ -1119,26 +1128,6 @@ impl Worker {
             return Some(d.revision);
         }
         self.latest.as_ref().map(|s| s.revision)
-    }
-
-    fn materialize_draft(&mut self) -> Result<(), String> {
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(d) = &self.draft {
-            match (**d).clone().snapshot() {
-                Ok(s) => {
-                    self.latest = Some(s);
-                    self.draft = None;
-                }
-                Err(e) => {
-                    self.last_change = Instant::now();
-                    self.first_pending = Some(self.last_change);
-                    let message = format!("relink recovery: {e}");
-                    self.error(message.clone());
-                    return Err(message);
-                }
-            }
-        }
-        Ok(())
     }
 
     fn journal_due(&self) -> Option<Instant> {
@@ -1190,7 +1179,10 @@ impl Worker {
                 #[cfg(not(target_arch = "wasm32"))]
                 Some(Msg::CheckpointRelink(draft, reply)) => {
                     let result = if self.prefs.recovery_journal {
-                        draft.snapshot().map_err(|e| e.to_string()).and_then(|snapshot| self.replace_bin_journal(Some(snapshot)))
+                        self.write_relink(&draft).map(|_| {
+                            self.latest = None;
+                            self.draft = Some(draft);
+                        })
                     } else {
                         Err("recovery journal is disabled".into())
                     };
@@ -1252,7 +1244,12 @@ impl Worker {
     }
 
     fn write_journal(&mut self) -> Result<u64, String> {
-        self.materialize_draft()?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(draft) = self.draft.take() {
+            let result = self.write_relink(&draft);
+            self.draft = Some(draft);
+            return result;
+        }
         let Some(s) = &self.latest else { return Err("no unsaved recovery state to write".into()) };
         let unix = unix_now();
         let mut meta = self.meta.clone();
@@ -1266,17 +1263,10 @@ impl Worker {
             if s.modular {
                 let path = s.path.as_deref().filter(|p| is_folder_manifest(p)).ok_or_else(|| io::Error::other("missing modular recovery origin"))?;
                 meta.project_path = Some(std::path::absolute(path)?.to_str().ok_or_else(|| io::Error::other("non-UTF-8 recovery origin"))?.to_owned());
-                let written = self.checkpoints.publish(&self.session_dir, &s.project, |root, bytes| {
-                    meta.checkpoint = Some(root.to_owned());
-                    meta.bytes = bytes;
-                    let marker = serde_json::to_vec(&meta)?;
-                    filmcraft_format::atomic_write_no_follow(&self.session_dir.join(META), &marker)?;
-                    Ok(marker.len())
-                })?;
-                if let Some(error) = written.cleanup_error.or_else(|| remove_if_present(&self.session_dir.join(SNAPSHOT)).err()) {
-                    let _ = self.events.send(WorkerEvent::Error(format!("checkpoint saved; recovery cleanup: {error}")));
-                }
-                return Ok((written.bytes, written.serialize.as_secs_f64() * 1000.0, written.write.as_secs_f64() * 1000.0));
+                let written = self
+                    .checkpoints
+                    .publish(&self.session_dir, &s.project, |root, bytes| publish_checkpoint_meta(&self.session_dir, &mut meta, root, bytes))?;
+                return Ok(Self::checkpoint_metrics(&self.events, &self.session_dir, written));
             }
             let t0 = Instant::now();
             let bytes = filmcraft_format::encode(&s.project, false);
@@ -1294,12 +1284,49 @@ impl Worker {
             }
             Ok((bytes.len(), serialize_ms, t1.elapsed().as_secs_f64() * 1000.0))
         })();
+        self.finish_journal(s.revision, unix, result)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn write_relink(&mut self, draft: &RelinkDraft) -> Result<u64, String> {
+        let unix = unix_now();
+        let mut meta = self.meta.clone();
+        meta.saved_unix = unix;
+        meta.revision = draft.revision;
+        meta.reviewed_source = Some(draft.saved.id);
+        let result = (|| {
+            meta.project_path = Some(std::path::absolute(&draft.manifest)?.to_str().ok_or_else(|| io::Error::other("non-UTF-8 recovery origin"))?.to_owned());
+            let written = self.checkpoints.publish_relink(
+                &self.session_dir,
+                &draft.manifest,
+                &draft.base_revision,
+                &draft.saved,
+                &draft.working,
+                |root, bytes, name| {
+                    meta.project_name = name.to_owned();
+                    publish_checkpoint_meta(&self.session_dir, &mut meta, root, bytes)
+                },
+            )?;
+            Ok(Self::checkpoint_metrics(&self.events, &self.session_dir, written))
+        })();
+        self.finish_journal(draft.revision, unix, result)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn checkpoint_metrics(events: &Sender<WorkerEvent>, dir: &Path, written: filmcraft_format::project_folder::CheckpointWrite) -> (usize, f64, f64) {
+        if let Some(error) = written.cleanup_error.or_else(|| remove_if_present(&dir.join(SNAPSHOT)).err()) {
+            let _ = events.send(WorkerEvent::Error(format!("checkpoint saved; recovery cleanup: {error}")));
+        }
+        (written.bytes, written.serialize.as_secs_f64() * 1000.0, written.write.as_secs_f64() * 1000.0)
+    }
+
+    fn finish_journal(&mut self, revision: u64, unix: i64, result: io::Result<(usize, f64, f64)>) -> Result<u64, String> {
         match result {
             Ok((bytes, serialize_ms, write_ms)) => {
-                self.journaled = s.revision;
+                self.journaled = revision;
                 self.first_pending = None;
-                let _ = self.events.send(WorkerEvent::Journaled { revision: s.revision, unix, serialize_ms, write_ms, bytes });
-                Ok(s.revision)
+                let _ = self.events.send(WorkerEvent::Journaled { revision, unix, serialize_ms, write_ms, bytes });
+                Ok(revision)
             }
             Err(e) => {
                 // Try again at the next interval rather than spinning.
@@ -1372,8 +1399,38 @@ impl Worker {
     }
 
     fn auto_save(&mut self) -> Result<PathBuf, String> {
-        self.materialize_draft()?;
-        let Some(s) = &self.latest else { return Err("nothing to save".into()) };
+        #[cfg(not(target_arch = "wasm32"))]
+        let materialized = self
+            .draft
+            .as_ref()
+            .map(|draft| -> io::Result<Snapshot> {
+                if self.journaled == draft.revision {
+                    let meta = read_meta(&self.session_dir)?;
+                    if meta.revision != draft.revision {
+                        return Err(io::Error::other("stale local relink checkpoint"));
+                    }
+                    let root = meta.checkpoint.ok_or_else(|| io::Error::other("missing local relink checkpoint"))?;
+                    let loaded = filmcraft_format::project_folder::load_checkpoint(&self.session_dir, &root)?;
+                    Ok(Snapshot {
+                        project: Arc::new(loaded.project),
+                        path: meta.project_path,
+                        revision: draft.revision,
+                        modular: true,
+                        reviewed_source: meta.reviewed_source,
+                    })
+                } else {
+                    (**draft).clone().snapshot()
+                }
+            })
+            .transpose()
+            .map_err(|e| {
+                let message = format!("relink recovery: {e}");
+                self.error(message.clone());
+                message
+            })?;
+        #[cfg(target_arch = "wasm32")]
+        let materialized: Option<Snapshot> = None;
+        let Some(s) = materialized.as_ref().or(self.latest.as_ref()) else { return Err("nothing to save".into()) };
         let scratch = crate::project_tools::trusted_scratch(s.project.settings.scratch.auto_save.as_deref(), s.path.as_deref(), &self.prefs.scratch_folders);
         let (dir, name) = match (&s.path, scratch) {
             // Project Settings ▸ Scratch Disks ▸ Project Auto Save

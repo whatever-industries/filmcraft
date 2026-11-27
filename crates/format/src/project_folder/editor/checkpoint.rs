@@ -16,6 +16,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod relink;
+
 const RECORDS: &str = "checkpoint-records";
 const DATA: &str = "records.bin";
 
@@ -186,7 +188,25 @@ impl CheckpointStore {
             items.push((id.0, hash));
         }
         let records = Manifest { format: FORMAT.into(), layout: 1, revision: None, copies: Vec::new(), identities: BTreeMap::new(), envelope, bins, items };
-        let serialize = start.elapsed();
+        self.publish_records(
+            session,
+            records,
+            start.elapsed(),
+            Some(project.clone()),
+            |_, hash, needed| Ok(if needed { pending.remove(hash) } else { None }),
+            publish_marker,
+        )
+    }
+
+    fn publish_records(
+        &mut self,
+        session: &Path,
+        records: Manifest,
+        serialize: Duration,
+        previous: Option<Arc<Project>>,
+        mut record: impl FnMut(usize, &str, bool) -> io::Result<Option<Vec<u8>>>,
+        publish_marker: impl FnOnce(&str, usize) -> io::Result<usize>,
+    ) -> io::Result<CheckpointWrite> {
         let writing = Instant::now();
         let dir = directory(session, true)?;
         #[cfg(unix)]
@@ -217,11 +237,13 @@ impl CheckpointStore {
         let mut locations = Vec::new();
         let mut payload_bytes = 0usize;
         let mut total = 0u64;
-        for hash in hashes(&records) {
-            let extent = if let Some(existing) = next.get(hash).or_else(|| self.live.get(hash)) {
+        for (position, hash) in hashes(&records).enumerate() {
+            let existing = next.get(hash).or_else(|| self.live.get(hash));
+            let data = record(position, hash, existing.is_none())?;
+            let extent = if let Some(existing) = existing {
                 *existing
             } else {
-                let data = pending.remove(hash).ok_or_else(|| invalid("missing checkpoint record"))?;
+                let data = data.ok_or_else(|| invalid("missing checkpoint record"))?;
                 let extent = free.reserve(data.len() as u64)?;
                 file.seek(SeekFrom::Start(extent.0))?;
                 file.write_all(&data)?;
@@ -257,7 +279,7 @@ impl CheckpointStore {
         }
         let marker_bytes = publish_marker(&root, payload_bytes)?;
         self.published = Some((root.clone(), index_stamp));
-        self.previous = Some(project.clone());
+        self.previous = previous;
         self.item_hashes = index.records.items.into_iter().collect();
         self.live = next;
         let cleanup = (|| -> io::Result<()> {
