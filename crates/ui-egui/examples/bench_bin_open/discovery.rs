@@ -75,18 +75,35 @@ fn panel_order(root: &Bin, ids: impl Iterator<Item = ItemId>) -> Vec<(ItemId, Op
     entries
 }
 
+// Use the editor's missing-media scan, candidate ordering, fingerprint checks and stored-path policy.
+fn relink_candidates(session: &Session, params: &Value) -> Result<Value> {
+    let missing = filmcraft_engine::relink::scan(&session.project, &session.media, &*session.services);
+    let search = filmcraft_engine::relink::search(session, params)?;
+    Ok(json!({"missing":missing,"results":search["results"]}))
+}
+
 fn full_search(project: &Project, query: &FindQuery) -> Value {
     json!(query.find(project).into_iter().map(|id| (id, project.root.parent_of(id))).collect::<Vec<_>>())
 }
 
 pub(in super::super) fn run(mode: &str, path: &Path, params: &str) -> Result<()> {
     let params: Value = serde_json::from_str(params)?;
-    let query = query_p(&params, mode)?;
+    let query = match mode {
+        "search" => Some(query_p(&params, mode)?),
+        "relink-discovery" => None,
+        _ => return Err("unknown discovery command".into()),
+    };
     let start = Instant::now();
     let (results, project_bytes, decoded, cache_written) = if path.extension().is_some_and(|ext| ext == "fcmod") {
         let data = filmcraft_engine::autosave::default_data_dir().ok_or("no FilmCraft user data directory")?;
         let (mut view, cost) = cache::open_with(path, &data, || Ok(()), Discovery::new)?;
-        let results = view.search(&query)?;
+        let results = match &query {
+            Some(query) => view.search(query)?,
+            None => {
+                view.load(|class| class == RecordClass::Media)?;
+                relink_candidates(&view.session, &params)?
+            }
+        };
         (
             results,
             cost.project_bytes + (view.reader.directory.remaining_item_bytes - view.remaining),
@@ -96,7 +113,11 @@ pub(in super::super) fn run(mode: &str, path: &Path, params: &str) -> Result<()>
     } else {
         let mut session = Session::local_folder_editor();
         session.execute("file.open", json!({"path":path}))?;
-        (full_search(&session.project, &query), fs::metadata(path)?.len(), session.project.items.len(), 0)
+        let results = match &query {
+            Some(query) => full_search(&session.project, query),
+            None => relink_candidates(&session, &params)?,
+        };
+        (results, fs::metadata(path)?.len(), session.project.items.len(), 0)
     };
     println!(
         "{}",
@@ -165,6 +186,64 @@ mod tests {
         assert_eq!(cost.records, 0);
         assert_eq!(warm.search(&names)?, found);
         assert!(warm.search(&FindQuery::simple("Scene", FindOp::Matches, "Night")).unwrap_err().to_string().contains("incomplete discovery"));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod relink_tests {
+    use super::*;
+    use crate::native::preview::tests::fixture;
+
+    #[test]
+    fn moved_media_is_ranked_across_unopened_bins_without_changing_the_project() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let f = fixture(tmp.path())?;
+        let media = tmp.path().join("Media");
+        fs::create_dir(&media)?;
+        let mut editor = Session::local_folder_editor();
+        editor.execute("file.open", json!({"path":f.path}))?;
+        let mut ids = Vec::new();
+        for (name, bin, color) in [("hero.png", f.cameras, 32), ("lost.png", f.other, 96)] {
+            let path = media.join(name);
+            image::RgbImage::from_pixel(12, 8, image::Rgb([color, 17, 0])).save(&path)?;
+            let imported = editor.execute("file.import", json!({"paths":[path],"bin":bin}))?;
+            let id: ItemId = serde_json::from_value(imported["items"][0].clone())?;
+            ids.push(id);
+        }
+        editor.execute("file.save", json!({}))?;
+        let saved = fs::read(&f.path)?;
+        let moved = tmp.path().join("Moved");
+        fs::rename(media, &moved)?;
+        fs::rename(moved.join("lost.png"), tmp.path().join("aside.png"))?;
+        let wrong = moved.join("different");
+        fs::create_dir(&wrong)?;
+        image::RgbImage::from_pixel(12, 8, image::Rgb([128u8, 1, 4])).save(wrong.join("hero.png"))?;
+        let params = json!({"folder":moved});
+        let mut full = Session::local_folder_editor();
+        full.execute("file.open", json!({"path":f.path}))?;
+        let expected = full.execute("media.search", params.clone())?;
+        let (mut view, _) = cache::open_with(&f.path, &tmp.path().join("data"), || Ok(()), Discovery::new)?;
+        view.load(|class| class == RecordClass::Media)?;
+        assert!(!view.session.project.items.contains_key(&f.master));
+        let paths_before = view.session.project.clone();
+        let report = relink_candidates(&view.session, &params)?;
+        assert_eq!(report["results"], expected["results"]);
+        assert_eq!(report["missing"], json!(filmcraft_engine::relink::scan(&full.project, &full.media, &*full.services)));
+        assert_eq!(report["missing"].as_array().unwrap().len(), 2);
+        let rows = report["results"].as_array().unwrap();
+        let hero = rows.iter().find(|r| r["item"] == json!(ids[0])).unwrap()["candidates"].as_array().unwrap();
+        assert_eq!(hero.len(), 2);
+        assert_eq!(hero[0]["ok"], true);
+        assert_eq!(hero[0]["identityMatch"], true);
+        assert_eq!(hero[1]["ok"], false);
+        assert_eq!(hero[1]["identityMatch"], false);
+        assert!(!hero[1]["problems"].as_array().unwrap().is_empty());
+        assert_eq!(rows.iter().find(|r| r["item"] == json!(ids[1])).unwrap()["candidates"], json!([]));
+        assert!(Arc::ptr_eq(&paths_before, &view.session.project));
+        assert!(!view.session.is_dirty());
+        assert!(view.session.dirty_folder_bins().is_empty());
+        assert_eq!(fs::read(&f.path)?, saved);
         Ok(())
     }
 }

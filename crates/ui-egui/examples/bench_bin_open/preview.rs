@@ -27,16 +27,16 @@ struct Label {
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum RecordClass {
     Graphic,
-    FileMedia,
-    Other,
+    Media,
+    NonMedia,
 }
 impl From<&ProjectItem> for Label {
     fn from(item: &ProjectItem) -> Self {
-        use filmcraft_project::{ItemKind, MediaRef};
+        use filmcraft_project::ItemKind;
         let class = match &item.kind {
             ItemKind::Graphic { .. } => RecordClass::Graphic,
-            ItemKind::Media(m) if matches!(m.media, MediaRef::File { .. }) => RecordClass::FileMedia,
-            _ => RecordClass::Other,
+            ItemKind::Media(_) => RecordClass::Media,
+            _ => RecordClass::NonMedia,
         };
         Self { name: item.name.clone(), sequence: item.as_sequence().is_some(), class: Some(class) }
     }
