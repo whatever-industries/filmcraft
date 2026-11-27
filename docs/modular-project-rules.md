@@ -319,3 +319,37 @@ Times are medians of five fresh-process trials after one warm-up on local APFS. 
 | 48,000 | Source + sequence | Warm index | 29.4 | 3.60 | 2 | 52.7 | 0 |
 
 **Rollout decision.** The warm index passed the accuracy and speed gates at both sizes for both operations. A warm, verified source-only change qualifies for planning partial Apply. A warm dependent result can direct the user to full-editor review. Cold index creation took longer than the full reopen in all four comparisons, so cold checks stay on the full-editor route. The next milestone is to validate one source-only edit through Apply, Undo, bin Save or Discard, and reopen, including a newer publication between prediction and Apply.
+
+### Applying one source-only relink with a warm index
+
+In the local developer harness, a verified source-only relink makes its owning bin Unsaved. Apply, Undo, Redo, and Discard write zero project-content bytes. Saving the bin publishes one new source record, archives the previous manifest for recovery, and atomically replaces the head. A second Save of the same working state creates zero additional backup versions.
+
+On a disposable copy, pass the discovery candidate’s `review` object and reuse the external data directory containing its warm index.
+
+```sh
+"$bench" relink-edit "$manifest" "$review" apply,undo,redo,save
+"$bench" relink-edit-baseline "$disposable_project" "$review"
+```
+
+Each invocation has its own working session. For a manual concurrency test, pass `-` as the action list and enter one action per line. The working edit survives a failed Save or Discard while that process stays open. A newer publication before Apply requires fresh discovery. Cold or stale indexes, an original that came back online, and dependent changes require the full editor. Marked Scripts retain their review requirement. Ordinary preview stays read-only.
+
+Apply pins the reviewed manifest under the existing writer lock, rereads the required records, repeats the impact and fingerprint checks, and runs the editor’s relink operation. Save verifies ownership and the saved before-image, overlays the changed fields on the original source record, and hashes the remaining immutable records before carrying their keys forward. Unknown fields survive on the rewritten source. Unopened bin contents, saved views, settings, and move-copy identities keep their existing manifest entries. Bin-backup accounting and retention use the existing revision mechanism.
+
+The regression test compares rendered frames, source identity, missing-media status, Undo, and bin dirtiness with a full editor opened on a separate copy of the same revision. It reopens both the saved and discarded cases and rescues a nested cut from the bin backup to check that its source still resolves to the original path. A failed archive write leaves the old revision readable. Retrying publishes once. A newer save leaves the pending edit available and the newer head intact. [Regression fixtures](../crates/ui-egui/examples/bench_bin_open/source_edit_tests.rs)
+
+#### Feature-scale measurements
+
+Each route ran in a fresh process on copies of the feature fixtures from the impact check, using the same reviewed media. One warm-up preceded five timed trials per route, with rotating route order, local APFS and the OS file cache enabled. Open-to-save starts before opening the project and ends when publication returns. Apply and Save are separate median times. Peak RSS is the highest of the five process peaks. Each modular publication changed only the source item key, backed up one bin and retained the previous manifest. All three routes produced the same saved source record.
+
+| Placements | Editor | Apply ms | Save ms | Open-to-save ms | Project MB read | Project bytes written | Item decodes | Peak RSS MiB |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| 24,000 | Partial, warm | 0.9 | 160.0 | 165.6 | 18.51 | 182,464 | 2 | 21.1 |
+| 24,000 | Full modular | 13.8 | 73.0 | 389.7 | 18.40 | 182,464 | 1,212 | 540.3 |
+| 24,000 | Full .fcproj | 7.4 | 195.3 | 295.1 | 18.13 | 18,129,962 | 1,212 | 149.5 |
+| 48,000 | Partial, warm | 1.2 | 288.7 | 297.3 | 37.05 | 360,066 | 2 | 26.8 |
+| 48,000 | Full modular | 30.6 | 100.9 | 736.3 | 36.82 | 360,066 | 2,412 | 1065.2 |
+| 48,000 | Full .fcproj | 17.1 | 387.5 | 583.2 | 36.28 | 36,284,849 | 2,412 | 279.9 |
+
+Separate untimed runs counted successful file I/O under the project directory, excluding user data and candidate media. Apply → Undo → Redo → Discard recorded zero project bytes written at both sizes. The partial path decoded the source once at Apply and once at Save. Save still read and hashed every retained payload. For these fixtures the partial and full modular editors wrote the same number of project bytes.
+
+**Rollout decision.** Warm source-only relinks passed the correctness and open-to-save speed gates against both reference editors at both sizes. They qualify for planning editor integration. Save alone was slower than in an already-open full modular editor, which can reuse verified file stamps. Retain the full-editor route for already-loaded projects, cold indexes, and dependent changes. The next integration milestone is routing this qualified case from project-wide search while preserving bin close, global Save, and background checkpoint behavior.

@@ -14,7 +14,7 @@ use std::{
 };
 
 impl Index {
-    fn impact_items(&self, source: ItemId) -> Result<BTreeSet<ItemId>> {
+    pub(super) fn impact_items(&self, source: ItemId) -> Result<BTreeSet<ItemId>> {
         let mut children: BTreeMap<_, Vec<_>> = BTreeMap::new();
         for (&id, label) in &self.labels {
             if let Some(ImpactRecord::Subclip(parent)) = &label.impact {
@@ -58,7 +58,7 @@ impl Index {
     }
 }
 
-fn check(path: &Path, data: &Path, candidate: &Review, before_recheck: impl FnOnce() -> Result<()>) -> Result<Value> {
+pub(super) fn check(path: &Path, data: &Path, candidate: &Review, before_recheck: impl FnOnce() -> Result<()>) -> Result<Value> {
     let start = Instant::now();
     let (mut view, cost) = cache::open_with(path, data, || Ok(()), Discovery::new)?;
     if candidate.revision != view.reader.directory.revision {

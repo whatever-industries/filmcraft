@@ -6,6 +6,11 @@ mod cache;
 pub(super) mod discovery;
 #[path = "impact.rs"]
 pub(super) mod impact;
+#[cfg(test)]
+#[path = "relink_fixture.rs"]
+mod relink_fixture;
+#[path = "source_edit.rs"]
+pub(super) mod source_edit;
 use super::{Result, reader::Reader};
 use egui_kittest::{Harness, kittest::Queryable};
 use filmcraft_engine::Session;

@@ -124,6 +124,26 @@ fn verified_candidate(s: &Session, current: &Review) -> Result<super::Candidate>
 /// complete affected record set and recheck the published revision before using the result.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn impact(s: &Session, revision: &str, review: &Review) -> Result<Value> {
+    predict(s, revision, review).map(|(report, _)| report)
+}
+
+/// For the local developer harness. The caller holds the saved revision lock and
+/// has hydrated the complete impact set. Repeat prediction on the actual working model.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn apply_source_only(s: &mut Session, revision: &str, review: &Review) -> Result<()> {
+    let (report, plan) = predict(s, revision, review)?;
+    if report["status"] != "source-only" {
+        return Err(bad("relink-apply", format!("full editor required: {report}")));
+    }
+    if super::identity_of(&*s.services, &review.path).ok() != Some(review.identity) {
+        return Err(bad("relink-apply", "candidate changed; refresh discovery"));
+    }
+    apply(s, vec![plan], false, None, Some(review.item), "Link Media")?;
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn predict(s: &Session, revision: &str, review: &Review) -> Result<(Value, Plan)> {
     let item = review.item;
     let owner = owners(&s.project.root).get(&item).copied().flatten();
     if owner != Some(review.bin) || review_for(&s.project, revision, review.bin, item, &review.path).as_ref() != Some(review) {
@@ -132,10 +152,11 @@ pub fn impact(s: &Session, revision: &str, review: &Review) -> Result<Value> {
     let cand = verified_candidate(s, review)?;
     let users = super::script_users(s, item);
     let scripts: Vec<_> = super::scripts_needing_review(&s.project, &users, cand.identity).collect();
+    let plan = Plan { item, cand };
     let mut changed = Vec::new();
     let status = if scripts.is_empty() {
         let mut model = (*s.project).clone();
-        super::update_records(&mut model, &Plan { item, cand }, &users, false);
+        super::update_records(&mut model, &plan, &users, false);
         changed.extend(model.items.iter().filter(|(id, value)| s.project.item(**id) != Some(*value)).map(|(id, _)| *id));
         if changed.is_empty() {
             "unchanged"
@@ -156,5 +177,5 @@ pub fn impact(s: &Session, revision: &str, review: &Review) -> Result<Value> {
         }
     });
     let unfiled: Vec<_> = changed.iter().filter(|id| bins.get(id).is_some_and(|bins| bins.is_empty())).collect();
-    Ok(json!({"revision":revision, "source":item, "status":status, "changed":changed,"scriptReview":scripts,"owners":bins,"unfiled":unfiled}))
+    Ok((json!({"revision":revision, "source":item, "status":status, "changed":changed,"scriptReview":scripts,"owners":bins,"unfiled":unfiled}), plan))
 }

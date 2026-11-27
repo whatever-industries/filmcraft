@@ -32,17 +32,23 @@ impl Discovery {
     }
 
     pub(super) fn load_ids(&mut self, ids: impl IntoIterator<Item = ItemId>) -> Result<()> {
-        let items = &mut Arc::make_mut(&mut self.session.project).items;
+        let missing: Vec<_> = ids.into_iter().filter(|id| !self.session.project.items.contains_key(id)).collect();
+        let mut remaining = self.remaining;
+        self.read_ids(missing, &mut remaining)?;
+        self.remaining = remaining;
+        Ok(())
+    }
+
+    // Read and verify all requested records before installing any of them. Apply calls
+    // this under its revision lock, even for records previously hydrated for playback.
+    pub(super) fn read_ids(&mut self, ids: impl IntoIterator<Item = ItemId>, remaining: &mut u64) -> Result<()> {
+        let mut records = Vec::new();
         for id in ids {
-            if let std::collections::btree_map::Entry::Vacant(entry) = items.entry(id) {
-                let item = self
-                    .reader
-                    .directory
-                    .read_item(id, &mut self.remaining)
-                    .map_err(|error| format!("incomplete discovery: could not read item {}: {error}", id.0))?;
-                entry.insert(item);
-            }
+            let item =
+                self.reader.directory.read_item(id, remaining).map_err(|error| format!("incomplete discovery: could not read item {}: {error}", id.0))?;
+            records.push((id, item));
         }
+        Arc::make_mut(&mut self.session.project).items.extend(records);
         self.session.media.add_stored(&self.session.project, self.session.path.as_deref());
         filmcraft_engine::still_migration::migrate_legacy_still_sizes(Arc::make_mut(&mut self.session.project), &self.session.media, &*self.session.services);
         Ok(())

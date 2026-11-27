@@ -46,6 +46,21 @@ fn cache_directory(path: &Path, root: &Path) -> Result<PathBuf> {
     Ok(dir)
 }
 
+// Apply may consume a published warm index but may never rebuild one to qualify an edit.
+pub(super) fn warm_index(path: &Path, root: &Path, reader: &Reader) -> Result<Index> {
+    let path = std::path::absolute(path)?;
+    let index = Index::read(&cache_directory(&path, root)?.join("index.json")).map_err(|_| "full editor required: no usable warm index")?;
+    if index.checksum.is_none()
+        || index.manifest != reader.directory.revision
+        || !reader.directory.item_keys().all(|(id, key)| index.keys.get(&id).is_some_and(|k| k == key))
+        || !reader.inventory().eq(index.labels.keys().copied())
+        || !index.labels.values().all(|label| label.class.is_some() && label.impact.is_some())
+    {
+        return Err("full editor required: the impact index is stale or incomplete".into());
+    }
+    Ok(index)
+}
+
 #[cfg(test)]
 fn open_in(path: &Path, data_root: &Path, after_staging: impl FnMut() -> Result<()>) -> Result<Preview> {
     open_with(path, data_root, after_staging, Preview::from_index).map(|(view, _)| view)
