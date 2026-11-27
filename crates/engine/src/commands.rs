@@ -5529,6 +5529,9 @@ fn schema_backup_path(path: &str, schema: u32) -> String {
 pub(crate) fn install_project(s: &mut Session, mut proj: filmcraft_project::Project, path: Option<String>, clean: bool) {
     #[cfg(not(target_arch = "wasm32"))]
     {
+        s.reviewed_relink = None;
+        s.promoted_undo = None;
+        s.warm_folder = None;
         s.editing_folder = None;
     }
     let proxies = s.media.use_proxies();
@@ -5568,9 +5571,21 @@ fn open_project(s: &mut Session, path: &str) -> Result<Value> {
         if !s.allow_project_folders {
             return Err(EngineError::Other("project folders require a local desktop editor".into()));
         }
+        if let Some(root) = &s.warm_cache
+            && let Ok((folder, loaded)) = crate::folder_edit::warm::WarmFolder::open(std::path::Path::new(path), root)
+        {
+            let revision = folder.revision.clone();
+            let mut result = install_loaded_project(s, path, loaded, |s| s.warm_folder = Some(folder));
+            let working_view = s.project_view();
+            if let Some(w) = &mut s.warm_folder {
+                w.view = working_view;
+            }
+            result["folderRevision"] = json!(revision);
+            return Ok(result);
+        }
         let (mut snapshot, loaded) =
             filmcraft_format::project_folder::FolderSnapshot::open(std::path::Path::new(path)).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
-        let mut result = install_loaded_project(s, path, loaded);
+        let mut result = install_loaded_project(s, path, loaded, |_| {});
         result["folderRevision"] = json!(snapshot.revision());
         if let Err(e) = snapshot.schedule_retention() {
             s.error_toast("project.recoveryRetention", format!("Bin backup cleanup needs attention. {e}"));
@@ -5587,13 +5602,14 @@ fn open_project(s: &mut Session, path: &str) -> Result<Value> {
     }
     let bytes = s.services.read_file_bounded(path, filmcraft_format::MAX_PROJECT_BYTES).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     let loaded = filmcraft_format::decode(&bytes).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
-    Ok(install_loaded_project(s, path, loaded))
+    Ok(install_loaded_project(s, path, loaded, |_| {}))
 }
 
-fn install_loaded_project(s: &mut Session, path: &str, loaded: filmcraft_format::Loaded) -> Value {
+fn install_loaded_project(s: &mut Session, path: &str, loaded: filmcraft_format::Loaded, attach: impl FnOnce(&mut Session)) -> Value {
     let (from, migrated) = (loaded.schema_version, loaded.migrated());
     crate::masks::discard_jobs(s);
     install_project(s, loaded.project, Some(path.to_string()), true);
+    attach(s);
     if let Some(view) = loaded.view.filter(|_| s.prefs.timeline.restore_open_sequences) {
         s.restore_project_view(view);
     }

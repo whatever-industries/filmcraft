@@ -716,6 +716,7 @@ struct Snapshot {
 /// A single working source from the opt-in partial editor. The worker reads the rest
 /// of the project from the verified base before acknowledging its recovery copy.
 #[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
 pub struct RelinkDraft {
     pub manifest: PathBuf,
     pub base_revision: String,
@@ -727,11 +728,15 @@ pub struct RelinkDraft {
 #[cfg(not(target_arch = "wasm32"))]
 impl RelinkDraft {
     fn snapshot(self) -> io::Result<Snapshot> {
-        use filmcraft_format::project_folder::{FolderSnapshot, lock_source_revision};
+        use filmcraft_format::project_folder::FolderSnapshot;
         use filmcraft_project::MediaRef;
         let Self { manifest, base_revision, saved, working, revision } = self;
-        let _lock = lock_source_revision(&manifest, &base_revision)?;
-        let (_, mut loaded) = FolderSnapshot::open(&manifest)?;
+        // The records are immutable. Reading a pinned snapshot leaves the writer lock
+        // available for Apply, Save and promotion while the journal materializes it.
+        let (snapshot, mut loaded) = FolderSnapshot::open(&manifest)?;
+        if snapshot.revision() != base_revision {
+            return Err(io::Error::other("stale relink checkpoint base"));
+        }
         let id = saved.id;
         let item = loaded.project.item_mut(id).ok_or_else(|| io::Error::other("missing reviewed source"))?;
         let source_identity =
@@ -749,6 +754,8 @@ impl RelinkDraft {
 enum Msg {
     /// The project has unsaved changes at this revision.
     Dirty(Snapshot),
+    #[cfg(not(target_arch = "wasm32"))]
+    DirtyRelink(Box<RelinkDraft>),
     #[cfg(not(target_arch = "wasm32"))]
     ReplaceJournal(Option<Snapshot>, Sender<Result<(), String>>),
     #[cfg(not(target_arch = "wasm32"))]
@@ -869,6 +876,8 @@ impl Persistence {
             #[cfg(not(target_arch = "wasm32"))]
             checkpoints: Default::default(),
             latest: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            draft: None,
             journaled: 0,
             autosaved: 0,
             first_pending: None,
@@ -903,12 +912,23 @@ impl Persistence {
         self.send(Msg::Dirty(Snapshot { project, revision, path, modular, reviewed_source: self.reviewed_source.map(|(_, id)| id) }));
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn send_dirty_relink(&self, draft: RelinkDraft) {
+        self.send(Msg::DirtyRelink(Box::new(draft)));
+    }
+
     /// FIFO barrier for an explicit bin decision. Once queued, wait for its actual
     /// result: a timeout could otherwise let a failed discard take effect later.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn replace_bin_journal(&self, project: Option<Arc<Project>>, revision: u64, path: Option<String>) -> Result<(), String> {
+    pub(crate) fn replace_bin_journal(
+        &self,
+        project: Option<Arc<Project>>,
+        revision: u64,
+        path: Option<String>,
+        reviewed_source: Option<ItemId>,
+    ) -> Result<(), String> {
         let (reply, result) = channel();
-        let snapshot = project.map(|project| Snapshot { project, revision, path, modular: true, reviewed_source: None });
+        let snapshot = project.map(|project| Snapshot { project, revision, path, modular: true, reviewed_source });
         self.tx.send(Msg::ReplaceJournal(snapshot, reply)).map_err(|_| self.stopped_error())?;
         result.recv().map_err(|_| self.stopped_error())?
     }
@@ -924,7 +944,7 @@ impl Persistence {
     /// Commit the clean recovery state before acknowledging Save or Discard in the partial editor.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn clear_relink_checkpoint(&self) -> Result<(), String> {
-        self.replace_bin_journal(None, 0, None)
+        self.replace_bin_journal(None, 0, None, None)
     }
 
     pub(crate) fn send_clean(&self) {
@@ -1077,6 +1097,8 @@ struct Worker {
     checkpoints: filmcraft_format::project_folder::CheckpointStore,
     /// Newest unsaved state (None = clean).
     latest: Option<Snapshot>,
+    #[cfg(not(target_arch = "wasm32"))]
+    draft: Option<Box<RelinkDraft>>,
     /// Revision currently in the journal (0 = none) / last auto-saved revision.
     journaled: u64,
     autosaved: u64,
@@ -1091,9 +1113,37 @@ impl Worker {
         Duration::from_secs(self.prefs.interval_minutes as u64 * 60)
     }
 
+    fn pending_revision(&self) -> Option<u64> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(d) = &self.draft {
+            return Some(d.revision);
+        }
+        self.latest.as_ref().map(|s| s.revision)
+    }
+
+    fn materialize_draft(&mut self) -> Result<(), String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(d) = &self.draft {
+            match (**d).clone().snapshot() {
+                Ok(s) => {
+                    self.latest = Some(s);
+                    self.draft = None;
+                }
+                Err(e) => {
+                    self.last_change = Instant::now();
+                    self.first_pending = Some(self.last_change);
+                    let message = format!("relink recovery: {e}");
+                    self.error(message.clone());
+                    return Err(message);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn journal_due(&self) -> Option<Instant> {
-        let s = self.latest.as_ref()?;
-        if !self.prefs.recovery_journal || s.revision == self.journaled {
+        let rev = self.pending_revision()?;
+        if !self.prefs.recovery_journal || rev == self.journaled {
             return None;
         }
         let max = self.first_pending.unwrap_or(self.last_change) + Duration::from_secs(self.prefs.recovery_interval_seconds as u64);
@@ -1115,7 +1165,18 @@ impl Worker {
                 },
             };
             match msg {
+                #[cfg(not(target_arch = "wasm32"))]
+                Some(Msg::DirtyRelink(d)) => {
+                    self.last_change = Instant::now();
+                    self.first_pending.get_or_insert(self.last_change);
+                    self.latest = None;
+                    self.draft = Some(d);
+                }
                 Some(Msg::Dirty(s)) => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        self.draft = None;
+                    }
                     let now = Instant::now();
                     self.first_pending.get_or_insert(now);
                     self.last_change = now;
@@ -1136,6 +1197,10 @@ impl Worker {
                     let _ = reply.send(result);
                 }
                 Some(Msg::Clean) => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        self.draft = None;
+                    }
                     self.latest = None;
                     self.first_pending = None;
                     self.clear_journal();
@@ -1152,14 +1217,14 @@ impl Worker {
                     }
                 }
                 Some(Msg::AutoSaveNow(reply)) => {
-                    let r = if self.latest.is_some() { self.auto_save() } else { Err(String::new()) };
+                    let r = if self.pending_revision().is_some() { self.auto_save() } else { Err(String::new()) };
                     let _ = reply.send(r);
                 }
                 Some(Msg::Flush(ack)) => {
-                    let result = match self.latest.as_ref() {
+                    let result = match self.pending_revision() {
                         None => Ok(None),
                         Some(_) if !self.prefs.recovery_journal => Err("recovery journal is disabled".to_string()),
-                        Some(s) if s.revision == self.journaled => Ok(Some(self.journaled)),
+                        Some(rev) if rev == self.journaled => Ok(Some(self.journaled)),
                         Some(_) => self.write_journal().map(Some),
                     };
                     let _ = ack.send(result);
@@ -1173,7 +1238,7 @@ impl Worker {
                 let _ = self.write_journal();
             }
             if self.prefs.enabled && self.next_autosave <= now {
-                if self.latest.as_ref().is_some_and(|s| s.revision != self.autosaved) {
+                if self.pending_revision().is_some_and(|rev| rev != self.autosaved) {
                     let _ = self.auto_save();
                 }
                 self.next_autosave = now + self.autosave_interval();
@@ -1187,6 +1252,7 @@ impl Worker {
     }
 
     fn write_journal(&mut self) -> Result<u64, String> {
+        self.materialize_draft()?;
         let Some(s) = &self.latest else { return Err("no unsaved recovery state to write".into()) };
         let unix = unix_now();
         let mut meta = self.meta.clone();
@@ -1248,6 +1314,7 @@ impl Worker {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn replace_bin_journal(&mut self, snapshot: Option<Snapshot>) -> Result<(), String> {
+        let draft = self.draft.take();
         let previous = std::mem::replace(&mut self.latest, snapshot);
         let result = if let Some(snapshot) = &self.latest
             && self.prefs.recovery_journal
@@ -1256,7 +1323,9 @@ impl Worker {
             // is unique within a session and the snapshot is immutable.
             if snapshot.revision == self.journaled
                 && read_meta(&self.session_dir).is_ok_and(|m| {
-                    m.revision == snapshot.revision && m.checkpoint.as_ref().is_some_and(|root| self.checkpoints.confirmed(&self.session_dir, root))
+                    m.revision == snapshot.revision
+                        && m.reviewed_source == snapshot.reviewed_source
+                        && m.checkpoint.as_ref().is_some_and(|root| self.checkpoints.confirmed(&self.session_dir, root))
                 })
             {
                 Ok(())
@@ -1267,6 +1336,7 @@ impl Worker {
             self.remove_journal().map_err(|e| e.to_string())
         };
         if result.is_err() {
+            self.draft = draft;
             self.latest = previous;
         } else {
             self.first_pending = None;
@@ -1302,6 +1372,7 @@ impl Worker {
     }
 
     fn auto_save(&mut self) -> Result<PathBuf, String> {
+        self.materialize_draft()?;
         let Some(s) = &self.latest else { return Err("nothing to save".into()) };
         let scratch = crate::project_tools::trusted_scratch(s.project.settings.scratch.auto_save.as_deref(), s.path.as_deref(), &self.prefs.scratch_folders);
         let (dir, name) = match (&s.path, scratch) {

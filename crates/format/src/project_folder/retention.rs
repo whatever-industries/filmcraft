@@ -61,7 +61,7 @@ impl Catalog {
     fn outstanding(&self, total: u64) -> u64 {
         self.ordinary_backups.saturating_add(total.saturating_sub(self.processed_backups))
     }
-    fn due(&self, total: u64) -> bool {
+    pub(super) fn due(&self, total: u64) -> bool {
         self.policy.enabled && (!self.pending.is_empty() || self.outstanding(total) > u64::from(self.policy.max_bin_backups))
     }
     fn write(&self, folder: &Path) -> io::Result<()> {

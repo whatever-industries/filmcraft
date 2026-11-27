@@ -213,6 +213,8 @@ pub fn navigate(app: &mut FilmcraftApp, inst: Inst, bin: Option<u64>) {
 /// Open a bin as Settings ▸ General ▸ Bins says (`how`: `openInPlace` | `openNewTab` |
 /// `openNewWindow`, or None for the double-click setting with these modifiers).
 pub fn open_bin(app: &mut FilmcraftApp, inst: Inst, bin: u64, how: Option<&str>, mods: egui::Modifiers) -> Result<Value, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    app.session.prepare_bin_view(BinId(bin)).map_err(|e| e.to_string())?;
     if app.session.project.root.find_bin(BinId(bin)).is_none() {
         return Err(format!("no bin {bin}"));
     }

@@ -389,19 +389,7 @@ impl FilmcraftApp {
         let ctx = ui.ctx().clone();
         let blocked = self.modal_open(&ctx);
         let seqs = SeqTabs {
-            open: self
-                .session
-                .state
-                .open_sequences
-                .iter()
-                .filter_map(|id| {
-                    self.session
-                        .project
-                        .item(*id)
-                        .filter(|item| matches!(item.kind, filmcraft_project::ItemKind::Sequence(_)))
-                        .map(|item| (id.0, item.name.clone()))
-                })
-                .collect(),
+            open: self.session.state.open_sequences.iter().filter_map(|id| self.session.sequence_name(*id).map(|name| (id.0, name.to_owned()))).collect(),
             active: self.session.state.active_sequence.map(|id| id.0),
         };
         let timeline_title = seqs.open.is_empty().then(|| seqs.label());

@@ -1,10 +1,11 @@
 //! Per-project cache used only by the developer preview. Save never acquires this lock.
 use super::{FolderDirectory, Index, Preview, Reader, Result};
-use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::path::PathBuf;
 use std::{
     fs,
     io::{self, Write},
-    path::{Path, PathBuf},
+    path::Path,
 };
 use tempfile::NamedTempFile;
 
@@ -15,51 +16,8 @@ pub(super) fn open(path: &Path) -> Result<Preview> {
     open_with(path, &root, || Ok(()), Preview::from_index).map(|(view, _)| view)
 }
 
-// Resolve existing ancestors before creating anything, including when the data directory
-// is overridden. A project must never acquire cache files just because it was previewed.
-fn cache_directory(path: &Path, root: &Path) -> Result<PathBuf> {
-    let project = fs::canonicalize(path.parent().ok_or("missing project folder")?)?;
-    let key = Sha256::digest(project.as_os_str().as_encoded_bytes());
-    let root = std::path::absolute(root)?;
-    let existing = root.ancestors().find(|p| p.exists()).ok_or("missing cache volume")?;
-    let root = fs::canonicalize(existing)?.join(root.strip_prefix(existing)?);
-    let base = root.join("Preview indexes");
-    let dir = base.join(format!("{key:x}"));
-    if dir.starts_with(&project) || dir.components().any(|part| part == std::path::Component::ParentDir) {
-        return Err("the preview cache must be outside the project folder".into());
-    }
-    let mut builder = fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt as _;
-        builder.mode(0o700);
-    }
-    builder.recursive(true).create(&root)?;
-    // Never follow a redirected cache directory into an unrelated staging area.
-    for path in [&base, &dir] {
-        match builder.recursive(false).create(path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && fs::symlink_metadata(path)?.is_dir() => {}
-            Err(e) => return Err(e.into()),
-        }
-    }
-    Ok(dir)
-}
-
-// Apply may consume a published warm index but may never rebuild one to qualify an edit.
-pub(super) fn warm_index(path: &Path, root: &Path, reader: &Reader) -> Result<Index> {
-    let path = std::path::absolute(path)?;
-    let index = Index::read(&cache_directory(&path, root)?.join("index.json")).map_err(|_| "full editor required: no usable warm index")?;
-    if index.checksum.is_none()
-        || index.manifest != reader.directory.revision
-        || !reader.directory.item_keys().all(|(id, key)| index.keys.get(&id).is_some_and(|k| k == key))
-        || !reader.inventory().eq(index.labels.keys().copied())
-        || !index.labels.values().all(|label| label.class.is_some() && label.impact.is_some())
-    {
-        return Err("full editor required: the impact index is stale or incomplete".into());
-    }
-    Ok(index)
-}
+use filmcraft_format::project_folder::index::cache_directory;
+pub(super) use filmcraft_format::project_folder::index::warm_index;
 
 #[cfg(test)]
 fn open_in(path: &Path, data_root: &Path, after_staging: impl FnMut() -> Result<()>) -> Result<Preview> {

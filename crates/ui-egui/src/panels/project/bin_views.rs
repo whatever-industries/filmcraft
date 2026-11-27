@@ -194,6 +194,8 @@ fn finish(app: &mut FilmcraftApp, bin: BinId, decision: Option<&str>) -> Result<
             _ => None,
         })
         .collect();
+    #[cfg(not(target_arch = "wasm32"))]
+    app.session.prepare_closing_sequences(&owned).map_err(|e| e.to_string())?;
     if let Some(command) = decision
         && let Err(error) = app.session.execute(command, json!({"bin":bin}))
     {

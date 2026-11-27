@@ -11,6 +11,10 @@ use std::io;
 use std::path::Path;
 
 mod directory;
+pub mod index;
+mod reader;
+pub use reader::Reader;
+pub type IndexResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 mod editor;
 mod overlay;
 mod paths;

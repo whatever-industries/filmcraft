@@ -494,7 +494,7 @@ fn app_creator(
     created: Arc<AtomicBool>,
     session_notice: Option<SessionNotice>,
 ) -> eframe::AppCreator<'static> {
-    let Launch { control_port, control_input_only, files, demo, startup_flag, recover, data_dir, graphics: _ } = launch;
+    let Launch { control_port, control_input_only, files, demo, experimental_modular_relink, startup_flag, recover, data_dir, graphics: _ } = launch;
     Box::new(move |cc| {
         filmcraft_ui_egui::framework::install(&cc.egui_ctx, filmcraft_ui_egui::os_window::app_id())
             .map_err(|error| format!("the UI runtime could not be installed: {error}"))?;
@@ -523,6 +523,9 @@ fn app_creator(
         );
         let mut session = Session::local_folder_editor();
         if let Some(dir) = data_dir.clone().or_else(default_data_dir) {
+            if experimental_modular_relink {
+                session.enable_experimental_modular_relink(dir.clone());
+            }
             let mut cfg = AutosaveConfig::new(dir);
             cfg.local_offset = local_offset;
             if let Err(e) = session.start_autosave(cfg) {

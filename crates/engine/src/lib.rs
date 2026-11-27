@@ -559,6 +559,14 @@ pub struct Session {
     #[cfg(not(target_arch = "wasm32"))]
     allow_project_folders: bool,
     #[cfg(not(target_arch = "wasm32"))]
+    warm_cache: Option<std::path::PathBuf>,
+    #[cfg(not(target_arch = "wasm32"))]
+    reviewed_relink: Option<ItemId>,
+    #[cfg(not(target_arch = "wasm32"))]
+    promoted_undo: Option<(std::sync::Weak<Project>, std::sync::Weak<Project>)>,
+    #[cfg(not(target_arch = "wasm32"))]
+    warm_folder: Option<folder_edit::warm::WarmFolder>,
+    #[cfg(not(target_arch = "wasm32"))]
     editing_folder: Option<folder_edit::EditingFolder>,
     /// Render preview files + render-bar segments (shared with the frontend's frame workers).
     pub previews: Arc<previews::PreviewStore>,
@@ -684,6 +692,14 @@ impl Session {
             #[cfg(not(target_arch = "wasm32"))]
             allow_project_folders: false,
             #[cfg(not(target_arch = "wasm32"))]
+            warm_folder: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            warm_cache: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            reviewed_relink: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            promoted_undo: None,
+            #[cfg(not(target_arch = "wasm32"))]
             editing_folder: None,
             previews: Arc::new(previews::PreviewStore::temp()),
             mixrec: Default::default(),
@@ -783,8 +799,23 @@ impl Session {
         if !dirty || p.reviewed_source.is_some_and(|(epoch, _)| epoch != self.document_epoch) {
             p.reviewed_source = None;
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (Some(id), Some(folder)) = (self.reviewed_relink, &self.editing_folder) {
+            p.reviewed_source = (self.project.item(id) != folder.project.item(id)).then_some((self.document_epoch, id));
+        }
         let cur = autosave::Sent { revision: self.revision, saved_revision: self.saved_revision, path: self.path.clone() };
         if p.last_sent.as_ref() == Some(&cur) {
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(w) = &self.warm_folder {
+            if let Some(draft) = w.draft(&self.project, self.revision) {
+                p.reviewed_source = Some((self.document_epoch, draft.saved.id));
+                p.send_dirty_relink(draft);
+            } else {
+                p.send_clean();
+            }
+            p.last_sent = Some(cur);
             return;
         }
         if dirty {
@@ -872,7 +903,7 @@ impl Session {
     pub fn folder_revision(&self) -> Option<&str> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.editing_folder.as_ref().map(|folder| folder.snapshot.revision())
+            self.warm_folder.as_ref().map(|w| w.revision.as_str()).or_else(|| self.editing_folder.as_ref().map(|folder| folder.snapshot.revision()))
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -901,7 +932,7 @@ impl Session {
     pub fn bin_needs_cleanup(&self, bin: filmcraft_project::BinId) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.editing_folder.as_ref().is_some_and(|f| f.cleanup == Some(bin))
+            self.warm_folder.as_ref().is_some_and(|w| w.cleanup == Some(bin)) || self.editing_folder.as_ref().is_some_and(|f| f.cleanup == Some(bin))
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -917,6 +948,8 @@ impl Session {
     /// Run a command by id.
     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
         let spec = commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.prepare_warm_command(id, &params)?;
         // headless sessions (CLI, MCP, control channel) have no UI frame loop calling
         // `poll_persistence`: apply background mask tracking before each command (#3302)
         if self.exec_depth == 0 && !self.mask_jobs.is_empty() {
@@ -1040,9 +1073,21 @@ impl Session {
         commands::find(id).is_some_and(|c| (c.enabled)(self).is_ok())
     }
 
+    /// A timeline tab can retain its name while its tracks are deferred.
+    pub fn sequence_name(&self, id: ItemId) -> Option<&str> {
+        if let Some(item) = self.project.item(id) {
+            return item.as_sequence().map(|_| item.name.as_str());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(w) = &self.warm_folder {
+            return w.sequence_name(id);
+        }
+        None
+    }
+
     /// What is open, to store beside the project when it is saved.
     pub fn project_view(&self) -> filmcraft_project::ProjectView {
-        let is_seq = |id: &ItemId| self.project.sequence(*id).is_some();
+        let is_seq = |id: &ItemId| self.sequence_name(*id).is_some();
         filmcraft_project::ProjectView {
             open_sequences: self.state.open_sequences.iter().copied().filter(is_seq).collect(),
             active_sequence: self.state.active_sequence.filter(is_seq),
@@ -1059,7 +1104,7 @@ impl Session {
     pub fn restore_project_view(&mut self, view: filmcraft_project::ProjectView) {
         let mut open: Vec<ItemId> = Vec::new();
         for id in view.open_sequences {
-            if self.project.sequence(id).is_some() && !open.contains(&id) {
+            if self.sequence_name(id).is_some() && !open.contains(&id) {
                 open.push(id);
             }
         }
@@ -1068,7 +1113,7 @@ impl Session {
             self.state.open_sequences = open;
         }
         self.state.timeline_views =
-            view.sequences.into_iter().filter(|(id, _)| self.project.sequence(*id).is_some()).filter_map(|(id, v)| Some((id, v.checked()?))).collect();
+            view.sequences.into_iter().filter(|(id, _)| self.sequence_name(*id).is_some()).filter_map(|(id, v)| Some((id, v.checked()?))).collect();
         for (id, t) in view.playheads {
             if let Some(seq) = self.project.sequence(id) {
                 let t = t.clamp(Tick::ZERO, filmcraft_project::ProjectView::MAX_PLAYHEAD);
@@ -1108,6 +1153,12 @@ impl Session {
 
     /// Apply an undoable project edit. The closure gets a mutable copy; on error nothing changes.
     pub fn edit<R>(&mut self, label: &str, f: impl FnOnce(&mut Project, &mut EditorState) -> Result<R>) -> Result<R> {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.promote_warm_folder()?;
+        self.edit_resident(label, f)
+    }
+
+    fn edit_resident<R>(&mut self, label: &str, f: impl FnOnce(&mut Project, &mut EditorState) -> Result<R>) -> Result<R> {
         let mut p = (*self.project).clone();
         let mut st = self.state.clone();
         let r = f(&mut p, &mut st)?;
@@ -1133,6 +1184,8 @@ impl Session {
     /// Like [`Session::edit`], but consecutive calls with the same `key` (and no other edit in
     /// between) share one undo step: dragging a control is one undoable change.
     pub fn edit_merged<R>(&mut self, label: &str, key: &str, f: impl FnOnce(&mut Project, &mut EditorState) -> Result<R>) -> Result<R> {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.promote_warm_folder()?;
         let merge = self.history.merge_key.as_deref() == Some(key) && self.history.undo.last().is_some_and(|u| u.0 == label);
         if !merge {
             let r = self.edit(label, f)?;
@@ -1154,6 +1207,8 @@ impl Session {
     /// Run several undoable edits as one undo step labelled `label`. If `f` fails, every edit it made
     /// is rolled back and the history is as before.
     pub fn edit_group<R>(&mut self, label: &str, f: impl FnOnce(&mut Session) -> Result<R>) -> Result<R> {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.promote_warm_folder()?;
         let (project, state, undo, redo, limit) =
             (self.project.clone(), self.state.clone(), self.history.undo.len(), self.history.redo.clone(), self.history.limit);
         #[cfg(not(target_arch = "wasm32"))]
@@ -1207,6 +1262,13 @@ impl Session {
     /// not: the project returns to how it was at `mark`, and neither undo nor redo keeps them.
     /// Nothing happens when `mark` has left the history. Returns how many steps were taken back.
     pub fn revert_to(&mut self, mark: UndoMark) -> usize {
+        // A pointer gesture may start on the source edit and promote on its first
+        // drag. Keep Escape anchored to that same step across snapshot hydration.
+        #[cfg(not(target_arch = "wasm32"))]
+        let mark = match &self.promoted_undo {
+            Some((old, new)) if mark.0 == Some(old.as_ptr() as usize) => UndoMark(Some(new.as_ptr() as usize)),
+            _ => mark,
+        };
         if let UndoMark(Some(p)) = mark
             && !self.history.undo.iter().any(|u| Arc::as_ptr(&u.1) as usize == p)
         {
@@ -1329,8 +1391,15 @@ impl Session {
         {
             self.state.active_sequence = p.sequences().next().map(|i| i.id);
         }
-        self.state.open_sequences.retain(|s| p.sequence(*s).is_some());
-        self.state.timeline_views.retain(|s, _| p.sequence(*s).is_some());
+        let exists = |id: &ItemId| {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(w) = &self.warm_folder {
+                return w.sequence_name(*id).is_some();
+            }
+            p.sequence(*id).is_some()
+        };
+        self.state.open_sequences.retain(&exists);
+        self.state.timeline_views.retain(|s, _| exists(s));
         if let Some(s) = self.state.source_item
             && p.item(s).is_none()
         {

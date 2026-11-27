@@ -1,5 +1,5 @@
 //! Read-only impact qualification against a pinned saved modular project.
-use super::{ImpactRecord, Index, Result, cache, discovery::Discovery};
+use super::{Result, cache, discovery::Discovery};
 use filmcraft_engine::relink::{
     identity_of,
     review::{self, Review},
@@ -12,51 +12,6 @@ use std::{
     path::Path,
     time::Instant,
 };
-
-impl Index {
-    pub(super) fn impact_items(&self, source: ItemId) -> Result<BTreeSet<ItemId>> {
-        let mut children: BTreeMap<_, Vec<_>> = BTreeMap::new();
-        for (&id, label) in &self.labels {
-            if let Some(ImpactRecord::Subclip(parent)) = &label.impact {
-                children.entry(*parent).or_default().push(id);
-            }
-        }
-        let mut users = BTreeSet::new();
-        let mut pending = vec![source];
-        while let Some(id) = pending.pop() {
-            if users.insert(id)
-                && let Some(subclips) = children.get(&id)
-            {
-                pending.extend(subclips);
-            }
-        }
-        let mut selected = users.clone();
-        for (&id, label) in &self.labels {
-            match label.impact.as_ref().ok_or("incomplete impact index")? {
-                ImpactRecord::Script(refs) if !refs.is_disjoint(&users) => {
-                    selected.insert(id);
-                }
-                ImpactRecord::AutoSequence(refs) => {
-                    // Frame-relative points resolve even when the clip uses unrelated media.
-                    selected.insert(id);
-                    for &clip in refs {
-                        let mut id = clip;
-                        while selected.insert(id) {
-                            let label = self.labels.get(&id).ok_or("missing automatic point source")?;
-                            if let Some(ImpactRecord::Subclip(parent)) = &label.impact {
-                                id = *parent;
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        Ok(selected)
-    }
-}
 
 pub(super) fn check(path: &Path, data: &Path, candidate: &Review, before_recheck: impl FnOnce() -> Result<()>) -> Result<Value> {
     let start = Instant::now();

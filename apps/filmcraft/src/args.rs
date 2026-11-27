@@ -13,6 +13,7 @@ Options:
                      64 random hex characters; see docs/control-protocol.md)
   --control-input-only  accept widget input only from the control server
                      (requires --control or FILMCRAFT_CONTROL_PORT)
+  --experimental-modular-relink  use an existing modular index for source relinks
   --demo             open the demo project
   --empty            start with an empty project
   --recover          recover the newest unsaved changes without asking
@@ -43,6 +44,7 @@ pub struct Launch {
     /// A project and / or media files to open.
     pub files: Vec<String>,
     pub demo: bool,
+    pub experimental_modular_relink: bool,
     /// `--demo` / `--empty` given: skip Settings ▸ General ▸ At Startup.
     pub startup_flag: bool,
     pub recover: Option<bool>,
@@ -67,6 +69,7 @@ pub fn parse(env_control_port: Option<String>, args: impl IntoIterator<Item = Os
         control_port: None,
         control_input_only: false,
         files: Vec::new(),
+        experimental_modular_relink: false,
         demo: true,
         startup_flag: false,
         recover: None,
@@ -85,6 +88,7 @@ pub fn parse(env_control_port: Option<String>, args: impl IntoIterator<Item = Os
                 let port = port.to_string_lossy();
                 l.control_port = Some(port.parse().map_err(|_| format!("--control needs a port number, got `{port}`"))?);
             }
+            "--experimental-modular-relink" => l.experimental_modular_relink = true,
             "--demo" => (l.demo, l.startup_flag) = (true, true),
             "--control-input-only" => l.control_input_only = true,
             "--empty" => (l.demo, l.startup_flag) = (false, true),
@@ -233,6 +237,7 @@ mod tests {
                 control_port: None,
                 control_input_only: false,
                 files: vec![],
+                experimental_modular_relink: false,
                 demo: true,
                 startup_flag: false,
                 recover: None,

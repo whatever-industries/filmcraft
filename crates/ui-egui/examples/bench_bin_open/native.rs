@@ -145,7 +145,8 @@ pub(super) fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     match args.as_slice() {
         [mode, path, review, actions] if mode == "relink-edit" => preview::source_edit::run(Path::new(path),review,actions),
-        [mode, path, review] if mode == "relink-edit-baseline" => preview::source_edit::baseline(Path::new(path),review),
+        [mode, path, review] if mode == "relink-edit-baseline" => preview::source_edit::baseline(Path::new(path),review,None),
+        [mode,path,review,action] if mode=="relink-desktop"=>preview::source_edit::baseline(Path::new(path),review,Some(action)),
         [mode, path, review] if mode == "verify-relink-impact" => preview::impact::verify(Path::new(path), review),
         [mode, path, review] if mode == "relink-impact-baseline" => preview::impact::baseline(Path::new(path), review),
         [mode, path, review] if mode == "relink-impact" => preview::impact::run(Path::new(path), review),
@@ -167,7 +168,7 @@ pub(super) fn run() -> Result<()> {
             "expected prepare SOURCE.fcproj NEW_DIRECTORY, measure PROJECT BIN_ID, ",
             "active|all-tabs|verify FOLDER_MANIFEST BIN_ID, index FOLDER_MANIFEST INDEX, preview FOLDER_MANIFEST [INDEX], ",
             "refresh FOLDER_MANIFEST PRIOR_INDEX NEW_INDEX, frames PROJECT BIN_ID [INDEX], search PROJECT QUERY_JSON, relink-discovery PROJECT MEDIA_SEARCH_JSON, relink-impact FOLDER_MANIFEST REVIEW_JSON, ",
-            "relink-edit DISPOSABLE_MANIFEST REVIEW_JSON ACTIONS, relink-edit-baseline DISPOSABLE_PROJECT REVIEW_JSON, relink-impact-baseline STANDARD_FIXTURE REVIEW_JSON, or verify-relink-impact DISPOSABLE_MANIFEST REVIEW_JSON"
+            "relink-edit DISPOSABLE_MANIFEST REVIEW_JSON ACTIONS, relink-edit-baseline DISPOSABLE_PROJECT REVIEW_JSON, relink-desktop DISPOSABLE_MANIFEST REVIEW_JSON save|checkpoint|promote|full, relink-impact-baseline STANDARD_FIXTURE REVIEW_JSON, or verify-relink-impact DISPOSABLE_MANIFEST REVIEW_JSON"
         )
         .into()),
     }

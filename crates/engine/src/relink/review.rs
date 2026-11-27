@@ -93,18 +93,19 @@ pub fn annotate(project: &Project, revision: &str, report: &mut Value) {
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) fn verified(s: &mut Session, p: &Value, item: ItemId, path: &str) -> Result<Value> {
     let fail = |msg: &str| bad("media.relink", msg);
-    let folder = s.editing_folder.as_ref().ok_or_else(|| fail("open the local project folder first"))?;
-    let rev = folder.snapshot.revision();
+    let rev = s.folder_revision().ok_or_else(|| fail("open the local project folder first"))?.to_owned();
     let owner = owning_bin(&s.project, item).ok_or_else(|| fail("source needs one owning bin"))?;
-    if owning_bin(&folder.project, item) != Some(owner) {
-        return Err(fail("source moved since discovery; save and review again"));
-    }
-    let current = review_for(&s.project, rev, owner, item, path).ok_or_else(|| fail("source has no saved file fingerprint"))?;
-    if Some(&current) != review_for(&folder.project, rev, owner, item, path).as_ref() {
-        return Err(fail("source changed since its last save; review again"));
+    let current = review_for(&s.project, &rev, owner, item, path).ok_or_else(|| fail("source has no saved file fingerprint"))?;
+    if let Some(folder) = &s.editing_folder {
+        if owning_bin(&folder.project, item) != Some(owner) {
+            return Err(fail("source moved since discovery; save and review again"));
+        }
+        if Some(&current) != review_for(&folder.project, &rev, owner, item, path).as_ref() {
+            return Err(fail("source changed since its last save; review again"));
+        }
     }
     if p["reviewOnly"] == true {
-        if p["revision"].as_str() != Some(rev) {
+        if p["revision"].as_str() != Some(rev.as_str()) {
             return Err(fail("project changed; refresh and review again"));
         }
     } else {
@@ -117,18 +118,40 @@ pub(super) fn verified(s: &mut Session, p: &Value, item: ItemId, path: &str) -> 
             return Err(fail("select the source in its owning bin"));
         }
     }
-    let cand = verified_candidate(s, &current)?;
     if p["reviewOnly"] == true {
-        let manifest = folder.snapshot.directory().map_err(|e| fail(&e.to_string()))?.join(filmcraft_format::project_folder::ROOT);
-        if filmcraft_format::project_folder::FolderDirectory::published_revision(&manifest).map_err(|e| fail(&e.to_string()))? != rev {
+        verified_candidate(s, &current)?;
+        let manifest = s.path.as_deref().ok_or_else(|| fail("missing project folder"))?;
+        if filmcraft_format::project_folder::FolderDirectory::published_revision(std::path::Path::new(manifest)).map_err(|e| fail(&e.to_string()))? != rev {
             return Err(fail("project changed; refresh and review again"));
         }
         return Ok(json!({"review":current}));
     }
-    let _guard = folder.snapshot.lock_current_revision().map_err(|e| fail(&format!("refresh and review again: {e}")))?;
-    // Only an explicit handoff to the full editor can accept dependent record edits.
+    let _guard = if let Some(w) = &s.warm_folder {
+        w.lock()?
+    } else {
+        s.editing_folder
+            .as_ref()
+            .ok_or_else(|| fail("missing project folder"))?
+            .snapshot
+            .lock_current_revision()
+            .map_err(|e| fail(&format!("refresh and review again: {e}")))?
+    };
+    let saved = if s.warm_folder.is_some() {
+        s.load_warm_impact(item)?;
+        if !super::refresh(s).iter().any(|m| m.item == item.0 && m.status == "missing") {
+            return Err(fail("the original is no longer missing; review again"));
+        }
+        Some(s.project.item(item).ok_or_else(|| fail("missing source"))?.clone())
+    } else {
+        None
+    };
+    let cand = verified_candidate(s, &current)?;
     let only_source = p.get("review").map(|_| item);
     let rows = apply(s, vec![Plan { item, cand }], false, None, only_source, "Link Media")?;
+    if let (Some(w), Some(saved)) = (&mut s.warm_folder, saved) {
+        w.source = Some((owner, saved));
+        s.reviewed_relink = Some(item);
+    }
     Ok(json!({"relinked": rows,"bin":owner}))
 }
 

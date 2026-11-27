@@ -15,6 +15,7 @@ use std::{
 
 pub struct FolderDirectory {
     folder: PathBuf,
+    total_bin_backups: u64,
     /// Digest of the manifest bytes captured at open.
     pub revision: String,
     pub envelope: Value,
@@ -42,6 +43,11 @@ impl FolderDirectory {
     pub fn published_revision_size(path: &Path) -> io::Result<(String, u64)> {
         let bytes = read_member(path, MANIFEST_LIMIT)?;
         Ok((digest(&bytes), bytes.len() as u64))
+    }
+
+    /// A desktop open must resume pending bin backup maintenance in the full editor.
+    pub fn retention_due(&self) -> io::Result<bool> {
+        Ok(super::retention::Catalog::read(&self.folder)?.due(self.total_bin_backups))
     }
 
     pub fn open(path: &Path) -> io::Result<Self> {
@@ -72,6 +78,7 @@ impl FolderDirectory {
             revision: digest(&bytes),
             bytes_read: bytes.len() as u64 + (MAX_PROJECT_BYTES - remaining),
             remaining_item_bytes: remaining,
+            total_bin_backups: manifest.revision.as_ref().map_or(0, |r| r.total_bin_backups),
             folder,
             envelope,
             bins,

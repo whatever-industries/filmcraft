@@ -240,3 +240,153 @@ fn review_requires_direct_unique_saved_ownership_and_a_recorded_fingerprint() {
         s.undo().unwrap();
     }
 }
+
+/// An inactive tab retains its name and order while its timeline stays on disk.
+fn warm_source(src: &Source, data: &Path) -> (Session, ItemId) {
+    use filmcraft_format::project_folder::{
+        FolderDirectory,
+        index::{Index, cache_directory},
+    };
+    let mut full = open(&src.f.path);
+    let deferred = full
+        .edit("Archive cut", |p, _| {
+            let bin = p.add_bin("Archive", None);
+            Ok(p.new_sequence("Archive reel", Default::default(), 1, 0, Some(bin)))
+        })
+        .unwrap();
+    full.execute("sequence.open", json!({"item":deferred})).unwrap();
+    full.execute("sequence.open", json!({"item":src.f.master})).unwrap();
+    full.execute("file.save", json!({})).unwrap();
+    let mut s = Session::local_folder_editor();
+    s.enable_experimental_modular_relink(data.to_owned());
+    s.execute("file.open", json!({"path":src.f.path})).unwrap();
+    assert!(!s.has_deferred_timelines(), "a cold cache opens the complete editor");
+    let directory = FolderDirectory::open(&src.f.path).unwrap();
+    let (index, ..) = Index::build(&directory, None).unwrap();
+    fs::write(cache_directory(&src.f.path, data).unwrap().join("index.json"), index.bytes().unwrap()).unwrap();
+    s.execute("file.open", json!({"path":src.f.path})).unwrap();
+    assert!(s.has_deferred_timelines());
+    assert!(s.project.item(deferred).is_none());
+    assert_eq!(s.project_view(), full.project_view());
+    assert_eq!(s.sequence_name(deferred), Some("Archive reel"));
+    (s, deferred)
+}
+
+#[test]
+fn warm_relink_promotes_in_place_and_bin_close_preserves_other_edits() {
+    for save in [true, false] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = Source::new(tmp.path());
+        let (s, deferred) = warm_source(&src, &tmp.path().join("data"));
+        let mut d = Driver::open(s, support::with_shots(support::builder()));
+        let offline = picture(&d.app().session);
+        let before = fs::read(&src.f.path).unwrap();
+        apply_from_search(&mut d, &src, true, &offline);
+        let s = &mut d.app().session;
+        assert!(s.has_deferred_timelines(), "the desktop promoted during source-only review");
+        assert_eq!(s.dirty_folder_bins(), [src.f.selects].into());
+        assert!(picture(s) == src.online);
+        s.execute("edit.undo", json!({})).unwrap();
+        assert!(picture(s) == offline);
+        let view = s.project_view();
+        let selection = s.state.project_selection.clone();
+        // A general query hydrates the full model while the relink lives on Redo.
+        s.execute("file.projectSettings.general", json!({})).unwrap();
+        assert!(!s.has_deferred_timelines());
+        assert!(s.project.sequence(deferred).is_some());
+        assert_eq!(s.project_view(), view);
+        assert_eq!(s.state.project_selection, selection);
+        s.execute("edit.redo", json!({})).unwrap();
+        assert!(picture(s) == src.online);
+        s.execute("clip.rename", json!({"item":src.f.master,"name":"Today's cut"})).unwrap();
+        s.execute("file.projectSettings.general", json!({"titleSafe":[12,14]})).unwrap();
+        assert_eq!(fs::read(&src.f.path).unwrap(), before);
+        invoke(&mut d, "closeBinTab", json!({}));
+        d.harness.get_by_role_and_label(Role::Button, if save { "Save" } else { "Discard" }).click();
+        d.frames(3);
+        let s = &mut d.app().session;
+        let disk = open(&src.f.path);
+        assert_eq!(picture(&disk) == src.online, save);
+        assert_ne!(disk.project.item(src.f.master).unwrap().name, "Today's cut");
+        assert_ne!(disk.project.settings, s.project.settings);
+        assert_eq!(s.dirty_folder_bins(), [src.f.cuts].into());
+        assert!(!s.state.open_sequences.contains(&src.f.sequence));
+        s.execute("file.save", json!({})).unwrap();
+        assert_eq!(open(&src.f.path).project, s.project);
+        assert_eq!(s.execute("file.save", json!({})).unwrap()["bytes"], 0);
+    }
+}
+
+#[test]
+fn failed_promotion_preserves_the_working_relink_for_retry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = Source::new(tmp.path());
+    let (mut s, deferred) = warm_source(&src, &tmp.path().join("data"));
+    let review = src.discover(&mut s);
+    src.apply(&mut s, &review);
+    let revision = s.revision;
+    let manifest: Value = serde_json::from_slice(&fs::read(&src.f.path).unwrap()).unwrap();
+    let key = manifest["items"].as_array().unwrap().iter().find(|row| row[0] == deferred.0).unwrap()[1].as_str().unwrap();
+    let record = src.f.path.with_file_name(key);
+    let moved = tmp.path().join("missing-record");
+    fs::rename(&record, &moved).unwrap();
+    let rename = json!({"item":src.f.master,"name":"Today's cut"});
+    assert!(s.execute("clip.rename", rename.clone()).is_err());
+    assert!(s.has_deferred_timelines());
+    assert_eq!(s.revision, revision);
+    assert!(picture(&s) == src.online);
+    let press = s.undo_mark();
+    fs::rename(moved, record).unwrap();
+    s.execute("clip.rename", rename).unwrap();
+    assert_eq!(s.revert_to(press), 1);
+    assert!(picture(&s) == src.online);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(!s.is_dirty());
+    assert!(picture(&s) != src.online);
+}
+
+#[path = "verified_relink_crash.rs"]
+mod crash;
+
+#[test]
+fn source_bin_decision_leaves_deferred_cut_on_disk() {
+    for save in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = Source::new(tmp.path());
+        let (s, deferred) = warm_source(&src, &tmp.path().join("data"));
+        let baseline = open(&src.f.path);
+        let mut d = Driver::open(s, support::with_shots(support::builder()));
+        let offline = picture(&d.app().session);
+        apply_from_search(&mut d, &src, true, &offline);
+        invoke(&mut d, "closeBinTab", json!({}));
+        d.harness.get_by_role_and_label(Role::Button, if save { "Save" } else { "Discard" }).click();
+        d.frames(3);
+        let s = &mut d.app().session;
+        assert!(s.has_deferred_timelines());
+        assert!(s.project.item(deferred).is_none());
+        assert!(!s.is_dirty());
+        let disk = open(&src.f.path);
+        assert_eq!(picture(&disk) == src.online, save);
+        assert_eq!(disk.project.item(deferred), baseline.project.item(deferred));
+        assert_eq!(disk.project.settings, baseline.project.settings);
+        assert_eq!(s.execute("project.saveBin", json!({"bin":src.f.selects})).unwrap()["bytes"], 0);
+    }
+}
+
+#[test]
+fn warm_apply_rechecks_the_published_revision_before_changing_the_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = Source::new(tmp.path());
+    let data = tmp.path().join("data");
+    let (mut s, _) = warm_source(&src, &data);
+    let review = src.discover(&mut s);
+    let mut writer = open(&src.f.path);
+    writer.execute("clip.rename", json!({"item":src.f.master,"name":"New published cut"})).unwrap();
+    writer.execute("project.saveBin", json!({"bin":src.f.cuts})).unwrap();
+    s.execute("project.select", json!({"items":[src.id]})).unwrap();
+    assert!(s.execute("media.relink", src.args(&review)).is_err());
+    assert!(!s.is_dirty());
+    s.execute("file.open", json!({"path":src.f.path})).unwrap();
+    assert!(!s.has_deferred_timelines());
+    assert_eq!(s.project.item(src.f.master).unwrap().name, "New published cut");
+}

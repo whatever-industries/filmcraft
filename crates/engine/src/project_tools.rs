@@ -579,6 +579,8 @@ fn show_result(s: &mut Session, f: &FindState) -> Result<Value> {
         out["index"] = json!(f.index % hits.len().max(1));
         return Ok(out);
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    s.prepare_warm_find(&f.query)?;
     let items = f.query.find(&s.project);
     let Some(id) = items.get(f.index % items.len().max(1)).copied() else { return Err(EngineError::Other("no matches".into())) };
     s.state.project_selection = vec![id];

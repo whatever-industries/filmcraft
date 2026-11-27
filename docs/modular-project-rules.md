@@ -361,3 +361,40 @@ In the local developer harness, run `relink-edit` with `apply,checkpoint` to exe
 A normal project open shows the last explicit Save. Recover Unsaved Changes opens a detached draft and checks the chosen file against FilmCraft’s recorded media fingerprint before playback. An unreadable, missing, or fingerprint-mismatched file stays offline at the chosen path and opens Link Media for review. Saving the detached copy preserves the path, clip name and offline state. A second crash during editing retains the review requirement. An acknowledged Discard clears the draft.
 
 The force-quit regression covers unchanged footage, a moved file, and different playable footage at the same path. It removes access to the original project folder before recovery, checks an unopened sequence and project settings, and reopens the saved copy in a fresh process. The next stage connects this opt-in path to desktop Find and verifies its bin-close and global Save behavior. [Recovery regression](../crates/ui-egui/examples/bench_bin_open/source_recovery_tests.rs)
+
+### Desktop relink with deferred timelines
+
+Launch the native editor with `--experimental-modular-relink` to use an existing index for a saved modular project. Opening the project in the developer preview first builds or refreshes that index in the same FilmCraft data directory. The editor opens the active cut and its sources, keeps inactive timeline tabs in their saved order, and loads media records for project-wide discovery. A cold, stale or damaged index opens the full project. A project with bin backup maintenance due also opens in the full editor so cleanup can resume.
+
+Find a clip whose original file is missing, open Link Media, choose **Review in Source Bin**, then **Apply Relink**. Apply rechecks the saved revision, the selected clip’s owner, the original’s missing status and the replacement’s identity. An eligible relink marks its owning bin Unsaved. A relink that would change a dependent record still requires full-editor review.
+
+- **Save on bin close** publishes that bin. **Discard** restores its last saved source. A successful close also closes timelines owned by the bin.
+- **Global Save** publishes all outstanding bins and changed project settings. Repeating Save with the same document and view writes zero project bytes.
+- **A broader edit** loads the remaining project records and transfers the working relink and its Undo and Redo history into the full editor. Selection, timeline tabs and playheads stay in the same session. A failed load leaves the working edit available for retry.
+- **A background checkpoint** leaves the bin Unsaved. The recovery worker assembles an independent draft using the saved revision and the edited source. On recovery it rechecks the replacement at the chosen path. If that file is missing or its identity differs, the recovered clip stays offline and can be saved in that state.
+
+The desktop regressions drive Find, Link Media and the bin-close dialog by their registered controls. A separate process test kills the editor after a durable checkpoint, promotion, Redo, and selective bin decisions, then recovers in a fresh session. [Desktop relink tests](../crates/ui-egui/tests/it/modular_bin_ui/verified_relink.rs) and [forced-exit tests](../crates/ui-egui/tests/it/modular_bin_ui/verified_relink_crash.rs)
+
+#### Feature-scale desktop measurements
+
+These local APFS runs used the same reviewed source and saved timeline tabs for every route. Each route ran once to warm the filesystem cache, then five times in fresh processes with rotating order. Times are medians. Peak RSS is the highest process peak. Project bytes count the bytes reported by explicit Save. Index preparation ran outside the measured process. Each trial used a disposable project copy and a separate data directory with the recovery worker enabled.
+
+| Placements | Editor | Open ms | Apply ms | Save ms | Start through Save ms | Project bytes written | Peak RSS MiB |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 24,000 | Standard .fcproj | 110.6 | 7.3 | 212.7 | 336.0 | 18,129,962 | 150.2 |
+| 24,000 | Full modular | 714.2 | 13.9 | 79.2 | 810.3 | 182,464 | 541.1 |
+| 24,000 | Warm modular | 71.8 | 5.4 | 137.3 | 218.9 | 182,464 | 32.7 |
+| 48,000 | Standard .fcproj | 187.8 | 16.0 | 191.0 | 397.1 | 36,284,849 | 280.6 |
+| 48,000 | Full modular | 1260.3 | 32.1 | 79.1 | 1373.1 | 360,066 | 1063.8 |
+| 48,000 | Warm modular | 112.9 | 9.9 | 190.3 | 315.2 | 360,066 | 51.4 |
+
+Separate runs measured the first durable checkpoint after Apply and the first transition to the full editor while the source was unsaved. The checkpoint bytes include its recovery records and marker. The transition ends when the full editor can answer a project-settings query.
+
+| Placements | Checkpoint ms | Checkpoint bytes | Checkpoint peak RSS MiB | Transition ms | Transition peak RSS MiB |
+|---:|---:|---:|---:|---:|---:|
+| 24,000 | 588.8 | 18,234,838 | 566.5 | 294.3 | 549.4 |
+| 48,000 | 905.5 | 36,493,020 | 1117.8 | 590.3 | 1080.4 |
+
+Every measured Save produced the same relinked media record across editors. Both modular routes changed exactly one item key and preserved the envelope and every bin key. To repeat a run, pass the fixture and discovery review to the `bench_bin_open` example as `relink-desktop PROJECT REVIEW_JSON ACTION`. Use `full` on the standard and modular references and `save`, `checkpoint`, or `promote` on a modular copy with a current index.
+
+Keep the feature opt-in. Warm open and immediate bin Save use less peak memory than the full modular route. The first durable checkpoint still builds a complete recovery model, and promotion still reads the complete project. Reducing checkpoint memory while retaining recovery after the source volume is disconnected is the next performance milestone.

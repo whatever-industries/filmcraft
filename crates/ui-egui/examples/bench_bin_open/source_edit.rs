@@ -205,12 +205,28 @@ pub(in super::super) fn run(path: &Path, input: &str, actions: &str) -> Result<(
 }
 
 /// The normal editor performs an actual relink and Save on a disposable paired fixture.
-pub(in super::super) fn baseline(path: &Path, input: &str) -> Result<()> {
+pub(in super::super) fn baseline(path: &Path, input: &str, action: Option<&str>) -> Result<()> {
     let review: Review = serde_json::from_str(input)?;
     let modular = path.extension().is_some_and(|ext| ext == "fcmod");
     let start = Instant::now();
     let mut editor = Session::local_folder_editor();
+    if let Some(action) = action {
+        if !matches!(action, "save" | "checkpoint" | "promote" | "full") {
+            return Err("expected save, checkpoint, promote or full".into());
+        }
+        let data = filmcraft_engine::autosave::default_data_dir().ok_or("no benchmark data root")?;
+        if action != "full" {
+            editor.enable_experimental_modular_relink(data.clone());
+        }
+        editor.start_autosave(AutosaveConfig::new(data))?;
+    }
+    let opening = Instant::now();
     let opened = editor.execute("file.open", json!({"path":path}))?;
+    let open_ms = opening.elapsed().as_secs_f64() * 1000.0;
+    if action.is_some_and(|a| a != "full") && !editor.has_deferred_timelines() {
+        return Err("expected a warm project with deferred timelines".into());
+    }
+
     let mut args = json!({"item":review.item,"path":review.path,"relinkOthers":false,"alignTimecode":false});
     if modular {
         if opened["folderRevision"] != review.revision {
@@ -224,11 +240,32 @@ pub(in super::super) fn baseline(path: &Path, input: &str) -> Result<()> {
     editor.execute("media.relink", args)?;
     let apply = began.elapsed();
     let began = Instant::now();
+    if action == Some("checkpoint") {
+        let revision = editor.persistence.as_ref().ok_or("missing worker")?.flush()?;
+        if revision != Some(editor.revision) {
+            return Err("unconfirmed checkpoint".into());
+        }
+        editor.poll_persistence();
+        let bytes = editor.persistence.as_ref().map(|p| p.status.last_bytes);
+        println!(
+            "{}",
+            json!({"checkpointBytes":bytes,"openMs":open_ms,"checkpointMs":began.elapsed().as_secs_f64()*1000.0,"applyMs":apply.as_secs_f64()*1000.0})
+        );
+        return Ok(());
+    }
+    if action == Some("promote") {
+        editor.execute("file.projectSettings.general", json!({}))?;
+        if editor.has_deferred_timelines() || !editor.is_dirty() {
+            return Err("expected an unsaved full editor".into());
+        }
+        println!("{}", json!({"openMs":open_ms,"promotionMs":began.elapsed().as_secs_f64()*1000.0,"applyMs":apply.as_secs_f64()*1000.0}));
+        return Ok(());
+    }
     let result = if modular { editor.execute("project.saveBin", json!({"bin":review.bin}))? } else { editor.execute("file.save", json!({}))? };
     let save = began.elapsed();
     println!(
         "{}",
-        json!({"totalMs":start.elapsed().as_secs_f64()*1000.0,"applyMs":apply.as_secs_f64()*1000.0,"saveMs":save.as_secs_f64()*1000.0,
+        json!({"openMs":open_ms,"totalMs":start.elapsed().as_secs_f64()*1000.0,"applyMs":apply.as_secs_f64()*1000.0,"saveMs":save.as_secs_f64()*1000.0,
          "decoded":editor.project.items.len(),"save":result})
     );
     Ok(())

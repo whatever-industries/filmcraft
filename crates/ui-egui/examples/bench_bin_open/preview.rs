@@ -14,123 +14,12 @@ pub(super) mod source_edit;
 use super::{Result, reader::Reader};
 use egui_kittest::{Harness, kittest::Queryable};
 use filmcraft_engine::Session;
-use filmcraft_format::{MAX_PROJECT_BYTES, atomic_write_new, project_folder::FolderDirectory};
-use filmcraft_media::reader::read_regular_file_bounded;
-use filmcraft_project::{BinEntry, BinId, ItemId, ProjectItem, ProjectView};
+use filmcraft_format::project_folder::index::{Index, Label, RecordClass};
+use filmcraft_format::{atomic_write_new, project_folder::FolderDirectory};
+use filmcraft_project::{BinEntry, BinId, ItemId, ProjectView};
 use filmcraft_ui_egui::i18n::t;
-use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::Path, sync::Arc, time::Instant};
-
-#[derive(Serialize, Deserialize)]
-struct Label {
-    name: String,
-    sequence: bool,
-    // Older checksummed indexes are still readable. Refresh them once to classify every record.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    class: Option<RecordClass>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    impact: Option<ImpactRecord>,
-}
-#[derive(Serialize, Deserialize)]
-enum ImpactRecord {
-    Other,
-    Subclip(ItemId),
-    Script(std::collections::BTreeSet<ItemId>),
-    AutoSequence(std::collections::BTreeSet<ItemId>),
-}
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-enum RecordClass {
-    Graphic,
-    Media,
-    NonMedia,
-}
-impl From<&ProjectItem> for Label {
-    fn from(item: &ProjectItem) -> Self {
-        use filmcraft_project::ItemKind;
-        let class = match &item.kind {
-            ItemKind::Graphic { .. } => RecordClass::Graphic,
-            ItemKind::Media(_) => RecordClass::Media,
-            _ => RecordClass::NonMedia,
-        };
-        let impact = match &item.kind {
-            ItemKind::Subclip { parent, .. } => ImpactRecord::Subclip(*parent),
-            ItemKind::Script(doc) => ImpactRecord::Script(doc.slates.iter().flat_map(|s| &s.takes).filter_map(|take| take.source).collect()),
-            ItemKind::Sequence(seq) => {
-                let sources: std::collections::BTreeSet<_> = seq.clips_with_auto_points().map(|clip| clip.item).collect();
-                if sources.is_empty() { ImpactRecord::Other } else { ImpactRecord::AutoSequence(sources) }
-            }
-            _ => ImpactRecord::Other,
-        };
-        Self { impact: Some(impact), name: item.name.clone(), sequence: item.as_sequence().is_some(), class: Some(class) }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct Index {
-    manifest: String,
-    labels: BTreeMap<ItemId, Label>,
-    // The original preview index contained only the manifest and labels.
-    #[serde(default)]
-    keys: BTreeMap<ItemId, String>,
-    #[serde(default)]
-    checksum: Option<String>,
-}
-
-impl Index {
-    fn digest(&self) -> Result<String> {
-        Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(&(&self.manifest, &self.keys, &self.labels))?)))
-    }
-
-    fn read(path: &Path) -> Result<Self> {
-        let index: Self = serde_json::from_slice(&read_regular_file_bounded(path, MAX_PROJECT_BYTES)?)?;
-        if let Some(checksum) = &index.checksum {
-            if *checksum != index.digest()? || !index.keys.keys().eq(index.labels.keys()) {
-                return Err("damaged name index; rebuild from the published project".into());
-            }
-        } else if !index.keys.is_empty() {
-            return Err("incomplete name index".into());
-        }
-        Ok(index)
-    }
-
-    fn build(directory: &FolderDirectory, old: Option<Self>) -> Result<(Self, usize, u64)> {
-        let mut old = old.filter(|index| index.checksum.is_some());
-        let mut remaining = directory.remaining_item_bytes;
-        let before = remaining;
-        let mut labels = BTreeMap::new();
-        let mut keys = BTreeMap::new();
-        let mut decoded = 0;
-        for (id, key) in directory.item_keys() {
-            let reused = old
-                .as_mut()
-                .filter(|index| index.keys.get(&id).is_some_and(|k| k == key))
-                .and_then(|index| index.labels.remove(&id))
-                .filter(|label| label.class.is_some() && label.impact.is_some());
-            let label = match reused {
-                Some(label) => label,
-                None => {
-                    decoded += 1;
-                    Label::from(&directory.read_item(id, &mut remaining)?)
-                }
-            };
-            labels.insert(id, label);
-            keys.insert(id, key.to_owned());
-        }
-        let mut next = Index { manifest: directory.revision.clone(), labels, keys, checksum: None };
-        next.checksum = Some(next.digest()?);
-        Ok((next, decoded, before - remaining))
-    }
-
-    fn bytes(&self) -> Result<Vec<u8>> {
-        let data = serde_json::to_vec(self)?;
-        if data.len() as u64 > MAX_PROJECT_BYTES {
-            return Err("name index exceeds the size limit".into());
-        }
-        Ok(data)
-    }
-}
 
 pub(super) fn index(path: &Path, out: &Path) -> Result<()> {
     refresh(path, None, out)

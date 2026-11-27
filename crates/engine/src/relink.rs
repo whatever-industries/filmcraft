@@ -403,7 +403,7 @@ fn apply(
     let sources: Vec<(ItemId, String, filmcraft_media::SharedSource)> =
         plans.iter().filter_map(|p| p.cand.source.clone().map(|src| (p.item, p.cand.path.clone(), src))).collect();
     let before = s.project.clone();
-    s.edit(label, |proj, _| {
+    let edit = |proj: &mut Project, _: &mut crate::EditorState| {
         for (p, users) in plans.iter().zip(&script_sources) {
             update_records(proj, p, users, align_timecode);
         }
@@ -419,7 +419,12 @@ fn apply(
             }
         }
         Ok(())
-    })?;
+    };
+    if only_source.is_some() {
+        s.edit_resident(label, edit)?;
+    } else {
+        s.edit(label, edit)?;
+    }
     for p in &plans {
         s.media.allow(&p.cand.path);
     }

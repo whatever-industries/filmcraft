@@ -132,7 +132,7 @@ pub fn decode(bytes: &[u8]) -> Result<Loaded, FormatError> {
 
 /// Refuse only values that would overflow or exhaust memory later (`Sequence::check_bounds`);
 /// structural rules such as overlaps are left to the editor, so projects that open today still open.
-fn validate_loaded(mut loaded: Loaded) -> Result<Loaded, FormatError> {
+pub fn validate_loaded(mut loaded: Loaded) -> Result<Loaded, FormatError> {
     // Graphic layers written before they carried a uid get a stable identity now, before any
     // undo history exists. The field is optional in the schema, so this is not a schema upgrade.
     loaded.project.ensure_graphic_layer_uids();

@@ -89,6 +89,9 @@ impl Session {
     }
 
     pub(crate) fn save_folder(&mut self, path: &str) -> Result<Value> {
+        if self.warm_folder.is_some() {
+            return self.save_warm(None);
+        }
         let started = web_time::Instant::now();
         let view = self.project_view();
         let folder = self.editing_folder.as_mut().ok_or_else(|| EngineError::Other("open this project folder before saving it".into()))?;
@@ -112,9 +115,10 @@ impl Session {
 
 mod recovery;
 mod scope;
+pub(crate) mod warm;
 
 pub(crate) fn available(s: &Session) -> std::result::Result<(), String> {
-    s.editing_folder.as_ref().map(|_| ()).ok_or_else(|| "open a local project folder first".into())
+    s.folder_revision().map(|_| ()).ok_or_else(|| "open a local project folder first".into())
 }
 
 fn bin_id(p: &Value, saved: &Project, working: &Project) -> Result<BinId> {
@@ -125,9 +129,15 @@ fn bin_id(p: &Value, saved: &Project, working: &Project) -> Result<BinId> {
     Ok(id)
 }
 
-fn checkpoint(worker: Option<&crate::autosave::Persistence>, project: Option<Arc<Project>>, revision: u64, path: Option<String>) -> std::io::Result<()> {
+fn checkpoint(
+    worker: Option<&crate::autosave::Persistence>,
+    project: Option<Arc<Project>>,
+    revision: u64,
+    path: Option<String>,
+    reviewed: Option<ItemId>,
+) -> std::io::Result<()> {
     if let Some(worker) = worker {
-        worker.replace_bin_journal(project, revision, path).map_err(std::io::Error::other)?;
+        worker.replace_bin_journal(project, revision, path, reviewed).map_err(std::io::Error::other)?;
     }
     Ok(())
 }
@@ -165,6 +175,9 @@ impl Session {
     }
 
     pub fn dirty_folder_bins(&self) -> std::collections::BTreeSet<BinId> {
+        if let Some(w) = &self.warm_folder {
+            return w.source.as_ref().filter(|(_, i)| self.project.item(i.id) != Some(i)).map(|(id, _)| *id).into_iter().collect();
+        }
         if let Some(folder) = &self.editing_folder {
             return scope::status(&folder.project, &self.project).bins;
         }
@@ -224,13 +237,16 @@ impl Session {
     }
 
     pub(crate) fn bin_status(&mut self, _: &Value) -> Result<Value> {
+        if self.warm_folder.is_some() {
+            return Ok(json!({"dirtyBins":self.dirty_folder_bins(),"projectSettingsDirty":false,"unfiledItemsDirty":false}));
+        }
         let status = scope::status(&self.folder()?.project, &self.project);
         Ok(json!({"dirtyBins":status.bins,"projectSettingsDirty":status.settings,"unfiledItemsDirty":status.unfiled}))
     }
 
     /// History restores model snapshots while the offline inventory and decoders live in the session.
     pub(crate) fn refresh_restored_media(&mut self, previous: &Project) {
-        if self.editing_folder.is_none() {
+        if self.folder_revision().is_none() {
             return;
         }
         let mut changed = false;
@@ -247,6 +263,9 @@ impl Session {
     }
 
     pub(crate) fn refresh_folder_dirty(&mut self) {
+        if self.warm_folder.is_some() && self.dirty_folder_bins().is_empty() {
+            self.saved_revision = self.revision;
+        }
         if let Some(folder) = &self.editing_folder {
             if self.project.next_id < folder.project.next_id {
                 Arc::make_mut(&mut self.project).next_id = folder.project.next_id;
@@ -258,13 +277,20 @@ impl Session {
     }
 
     pub(crate) fn save_bin(&mut self, p: &Value) -> Result<Value> {
+        if self.warm_folder.is_some() {
+            let id = bin_id(p, &self.project, &self.project)?;
+            return self.save_warm(Some(id));
+        }
         let folder = self.folder()?;
         let id = bin_id(p, &folder.project, &self.project)?;
         let status = scope::status(&folder.project, &self.project);
+        let reviewed = self.reviewed_relink.filter(|id| folder.project.item(*id) != self.project.item(*id));
         if !status.bins.contains(&id) {
             folder
                 .snapshot
-                .while_current(|| checkpoint(self.persistence.as_ref(), status.dirty().then(|| self.project.clone()), self.revision, self.path.clone()))
+                .while_current(|| {
+                    checkpoint(self.persistence.as_ref(), status.dirty().then(|| self.project.clone()), self.revision, self.path.clone(), reviewed)
+                })
                 .map_err(|e| EngineError::Other(format!("no new folder revision was published: {e}")))?;
             if let Some(f) = &mut self.editing_folder {
                 f.cleanup = None;
@@ -285,7 +311,7 @@ impl Session {
         if remaining && self.persistence.is_some() {
             folder
                 .snapshot
-                .while_current(|| checkpoint(self.persistence.as_ref(), Some(self.project.clone()), self.revision, self.path.clone()))
+                .while_current(|| checkpoint(self.persistence.as_ref(), Some(self.project.clone()), self.revision, self.path.clone(), reviewed))
                 .map_err(|e| EngineError::Other(format!("bin was not saved: {e}")))?;
         }
         let folder = self.editing_folder.as_mut().ok_or_else(|| EngineError::Other("missing project folder".into()))?;
@@ -309,8 +335,10 @@ impl Session {
         self.history.merge_key = None;
         if !remaining {
             self.saved_revision = self.revision;
+        }
+        if !remaining || reviewed.is_some_and(|id| folder.project.item(id) == self.project.item(id)) {
             folder.cleanup = Some(id);
-            checkpoint(self.persistence.as_ref(), None, self.revision, self.path.clone())
+            checkpoint(self.persistence.as_ref(), remaining.then(|| self.project.clone()), self.revision, self.path.clone(), None)
                 .map_err(|e| EngineError::BinPublished { revision: saved.revision.clone(), message: e.to_string() })?;
         }
         folder.cleanup = None;
@@ -319,13 +347,20 @@ impl Session {
     }
 
     pub(crate) fn discard_bin(&mut self, p: &Value) -> Result<Value> {
+        if self.warm_folder.is_some() {
+            let id = bin_id(p, &self.project, &self.project)?;
+            return self.discard_warm(id);
+        }
         let folder = self.folder()?;
         let id = bin_id(p, &folder.project, &self.project)?;
         let status = scope::status(&folder.project, &self.project);
+        let reviewed = self.reviewed_relink.filter(|id| folder.project.item(*id) != self.project.item(*id));
         if !status.bins.contains(&id) {
             folder
                 .snapshot
-                .while_current(|| checkpoint(self.persistence.as_ref(), status.dirty().then(|| self.project.clone()), self.revision, self.path.clone()))
+                .while_current(|| {
+                    checkpoint(self.persistence.as_ref(), status.dirty().then(|| self.project.clone()), self.revision, self.path.clone(), reviewed)
+                })
                 .map_err(|e| EngineError::Other(e.to_string()))?;
             return Ok(json!({"bin":id,"discarded":false,"folderRevision":folder.snapshot.revision()}));
         }
@@ -336,7 +371,15 @@ impl Session {
         let rev = folder.snapshot.revision().to_owned();
         folder
             .snapshot
-            .while_current(|| checkpoint(self.persistence.as_ref(), remaining.then(|| next.clone()), self.revision + 1, self.path.clone()))
+            .while_current(|| {
+                checkpoint(
+                    self.persistence.as_ref(),
+                    remaining.then(|| next.clone()),
+                    self.revision + 1,
+                    self.path.clone(),
+                    reviewed.filter(|id| next.item(*id) != folder.project.item(*id)),
+                )
+            })
             .map_err(|e| EngineError::Other(format!("bin was not discarded: {e}")))?;
         if let Some(folder) = &mut self.editing_folder {
             // Restoring the source bin cancels that outstanding departure. A
