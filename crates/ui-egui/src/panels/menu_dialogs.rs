@@ -339,16 +339,18 @@ fn defaults(app: &mut FilmcraftApp, cmd: &str, id: &str, bin: Option<Option<u64>
             let general = s.execute("file.projectSettings.general", json!({})).map_err(|e| e.to_string())?;
             let scratch = filmcraft_engine::project_tools::scratch_paths(s);
             let ingest = serde_json::to_value(&st.ingest).unwrap_or_default();
+            let retention =
+                if s.folder_revision().is_some() { s.execute("project.recoveryRetention", json!({})).map_err(|e| e.to_string())? } else { Value::Null };
             let sc = &st.scratch;
             (
                 json!({
-                    "tab": tab,
+                    "tab": tab, "retention":retention,
                     "renderer": general["renderer"], "videoDisplay": general["videoDisplay"], "audioDisplay": general["audioDisplay"],
                     "captureFormat": general["captureFormat"], "titleSafe": general["titleSafe"], "actionSafe": general["actionSafe"],
                     "captured": sc.captured, "videoPreviews": sc.video_previews, "audioPreviews": sc.audio_previews, "autoSave": sc.auto_save,
                     "ingest": ingest.clone(),
                 }),
-                json!({"scratch": scratch, "ingest": ingest, "project": s.project.name}),
+                json!({"retention":retention,"scratch": scratch, "ingest": ingest, "project": s.project.name}),
             )
         }
         "file.mediaProperties" => {
@@ -579,7 +581,10 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
             "project.settings" => {
                 ui.label(tlf!("Project: {name}", name = d.info["project"].as_str().unwrap_or_default()));
                 ui.horizontal(|ui| {
-                    for (k, l) in [("general", tl!("General")), ("scratchDisks", tl!("Scratch Disks")), ("ingest", tl!("Ingest Settings"))] {
+                    let recovery = (!p["retention"].is_null()).then(|| ("recovery", tl!("Recovery")));
+                    for (k, l) in
+                        [("general", tl!("General")), ("scratchDisks", tl!("Scratch Disks")), ("ingest", tl!("Ingest Settings"))].into_iter().chain(recovery)
+                    {
                         let r = ui.selectable_label(p["tab"].as_str() == Some(k), l);
                         push(&mut elems, format!("projectSettings.tab.{k}"), &r, l);
                         if r.clicked() {
@@ -589,6 +594,42 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                 });
                 ui.separator();
                 match p["tab"].as_str().unwrap_or("general") {
+                    "recovery" if !p["retention"].is_null() => {
+                        let policy = &mut p["retention"];
+                        check(ui, &mut elems, "projectSettings.recovery", policy, "enabled", tl!("Automatically prune older bin backups"));
+                        ui.add_enabled_ui(policy["enabled"] == true, |ui| {
+                            for (key, label) in [("maxBinBackups", tl!("Bin backups per project")), ("versionsPerBin", tl!("Versions per bin"))] {
+                                ui.horizontal(|ui| {
+                                    ui.label(label);
+                                    let mut count = policy[key].as_u64().unwrap_or(1);
+                                    let response = ui.add(egui::DragValue::new(&mut count).range(1..=u64::from(u32::MAX)));
+                                    ui.ctx().accesskit_node_builder(response.id, |node| node.set_label(label));
+                                    push(&mut elems, format!("projectSettings.recovery.{key}"), &response, label);
+                                    if response.changed() {
+                                        policy[key] = json!(count);
+                                    }
+                                });
+                            }
+                        });
+                        let label = tl!("Preview cleanup");
+                        let response = ui.button(label);
+                        push(&mut elems, "projectSettings.recovery.preview", &response, label);
+                        if response.clicked() {
+                            let result = app.session.execute("project.previewRecoveryPrune", json!({"policy":policy}));
+                            let message = match result {
+                                Ok(result) => tlf!("Versions eligible for cleanup: {count}", count = result["retire"].as_array().map_or(0, Vec::len)),
+                                Err(error) => error.to_string(),
+                            };
+                            d.info["preview"] = json!({"policy":policy,"message":message,"revision":app.session.folder_revision()});
+                        }
+                        if d.info["preview"]["policy"] == *policy
+                            && d.info["preview"]["revision"].as_str() == app.session.folder_revision()
+                            && let Some(message) = d.info["preview"]["message"].as_str()
+                        {
+                            let r = ui.label(message);
+                            ui.ctx().accesskit_node_builder(r.id, |node| node.set_live(egui::accesskit::Live::Polite));
+                        }
+                    }
                     "scratchDisks" => {
                         for (k, l) in [
                             ("captured", tl!("Captured and Generated:")),
@@ -941,6 +982,9 @@ fn run(app: &mut FilmcraftApp, d: &ClipDialogDraft) -> Result<Option<String>, St
                 json!({"captured": p["captured"], "videoPreviews": p["videoPreviews"], "audioPreviews": p["audioPreviews"], "autoSave": p["autoSave"]}),
             )
             .map_err(|e| e.to_string())?;
+            if p["retention"] != d.info["retention"] {
+                s.execute("project.setRecoveryRetention", p["retention"].clone()).map_err(|e| e.to_string())?;
+            }
             if p["ingest"] != d.info["ingest"] {
                 s.execute("project.ingestSettings", p["ingest"].clone()).map_err(|e| e.to_string())?;
             }

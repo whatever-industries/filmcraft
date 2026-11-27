@@ -53,6 +53,7 @@ pub struct SaveResult {
     /// Bytes passed to successful publication writes.
     pub bytes: u64,
     pub move_backups: Vec<MoveBackup>,
+    pub maintenance_warning: Option<String>,
 }
 
 fn hashes(manifest: &Manifest) -> impl Iterator<Item = &String> {
@@ -86,6 +87,8 @@ pub enum DepartureCut<'a> {
 pub struct TransferSave<'a> {
     pub copies: Vec<BinCopy>,
     pub departures: Vec<Departure<'a>>,
+    pub selected_bin: Option<u64>,
+    pub active_move_bases: std::collections::BTreeSet<String>,
 }
 
 impl FolderSnapshot {
@@ -108,6 +111,10 @@ impl FolderSnapshot {
             return Err(invalid("project records changed during open"));
         }
         Ok((Self { manifest: absolute, revision: digest(&bytes), files }, loaded))
+    }
+
+    pub fn directory(&self) -> io::Result<&Path> {
+        self.manifest.parent().ok_or_else(|| invalid("missing project folder"))
     }
 
     pub fn revision(&self) -> &str {
@@ -257,12 +264,16 @@ impl FolderSnapshot {
         if size > MAX_PROJECT_BYTES {
             return Err(invalid("project records exceed the folder size limit"));
         }
+        let backed_up_bins = moves
+            .selected_bin
+            .map(|id| [id].into_iter().collect())
+            .unwrap_or_else(|| revisions::changed_bins(&prior, &next, &after_bins.0, revisions::changed_attachments(&old_meta, &new_meta)));
         let revision = revisions::commit(
             folder,
             &prior_bytes,
             &prior,
             &mut next,
-            revisions::Transfers { backups, arrivals },
+            revisions::Transfers { backed_up_bins, backups, arrivals, active_move_bases: moves.active_move_bases },
             |_| Ok(()),
             |path, data| {
                 if path.ends_with(ROOT) {
@@ -276,10 +287,15 @@ impl FolderSnapshot {
         )?;
         let files = hashes(&next).filter_map(|hash| delta.files.get_key_value(hash).map(|(k, v)| (k.clone(), *v))).collect();
         let bytes = delta.bytes;
+        let maintenance_warning =
+            if revision != self.revision { super::retention::after_publication(folder, &revision, &next).err().map(|e| e.to_string()) } else { None };
+        if let Some(message) = &maintenance_warning {
+            log::warn!("project saved; recovery maintenance: {message}");
+        }
         self.revision.clone_from(&revision);
         self.files = files;
         let move_backups = next.revision.map(|r| r.moves).unwrap_or_default();
-        Ok(SaveResult { revision, bytes, move_backups })
+        Ok(SaveResult { revision, bytes, move_backups, maintenance_warning })
     }
 }
 

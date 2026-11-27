@@ -535,3 +535,77 @@ fn discard_arrival_then_removal_restores_original_membership_and_other_edits() {
     assert_eq!(frame(&s.project, f.select), 17);
     assert_eq!(status(&mut s)["dirtyBins"], json!([f.selects]));
 }
+
+#[test]
+fn retention_counts_published_bins_across_reopens() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = Fixture::new(dir.path());
+    let mut s = f.open();
+    let defaults = s.execute("project.recoveryRetention", json!({})).unwrap();
+    assert_eq!(defaults["enabled"], true);
+    let mut policy = json!({"enabled":false,"maxBinBackups":2,"versionsPerBin":2});
+    s.execute("project.setRecoveryRetention", policy.clone()).unwrap();
+    let base = s.folder_revision().unwrap().to_owned();
+    let preview = |s: &mut Session| s.execute("project.previewRecoveryPrune", json!({})).unwrap();
+    f.edit_both(&mut s);
+    s.execute("file.save", json!({})).unwrap();
+    assert_eq!(preview(&mut s)["binBackups"], 2);
+    s.execute("file.save", json!({})).unwrap();
+    s.execute("file.projectSettings.general", json!({"titleSafe":[11,13]})).unwrap();
+    s.execute("file.save", json!({})).unwrap();
+    assert_eq!(preview(&mut s)["binBackups"], 2);
+    trim(&mut s, f.cut, 33);
+    s.execute("project.saveBin", json!({"bin":f.cuts})).unwrap();
+    let mut reopened = f.open();
+    assert_eq!(reopened.execute("project.recoveryRetention", json!({})).unwrap(), policy);
+    assert_eq!(preview(&mut reopened)["binBackups"], 3);
+    policy["enabled"] = json!(true);
+    reopened.execute("project.setRecoveryRetention", policy).unwrap();
+    let before = preview(&mut reopened);
+    assert_eq!(before["due"], true);
+    trim(&mut reopened, f.select, 45);
+    let result = reopened.execute("file.save", json!({})).unwrap();
+    assert!(result["retentionWarning"].is_null(), "{result}");
+    assert_eq!(preview(&mut reopened)["due"], false);
+    let mut versions = Vec::new();
+    filmcraft_format::project_folder::history(f.manifest.parent().unwrap(), |_, hash| {
+        versions.push(hash.to_owned());
+        Ok(())
+    })
+    .unwrap();
+    assert!(!versions.contains(&base));
+    assert_eq!(frame(&f.open().project, f.cut), 33);
+    assert_eq!(frame(&f.open().project, f.select), 45);
+}
+
+#[test]
+fn unrelated_bin_cleanup_keeps_the_source_of_an_unpublished_move() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = Fixture::new(dir.path());
+    let mut s = f.open();
+    let third = s.edit("Add a third bin", |p, _| Ok(p.add_bin("Footage", None))).unwrap();
+    s.execute("file.save", json!({})).unwrap();
+    let source = s.folder_revision().unwrap().to_owned();
+    s.execute("project.setRecoveryRetention", json!({"enabled":true,"maxBinBackups":1,"versionsPerBin":1})).unwrap();
+    trim(&mut s, f.cut, 2);
+    s.execute("project.moveToBin", json!({"items":[f.cut],"bin":f.selects})).unwrap();
+    for name in ["Day 1", "Day 2", "Day 3"] {
+        s.execute("project.renameBin", json!({"bin":third,"name":name})).unwrap();
+        let saved = s.execute("project.saveBin", json!({"bin":third})).unwrap();
+        assert!(saved["retentionWarning"].is_null(), "{saved}");
+    }
+    let saved = s.execute("project.saveBin", json!({"bin":f.cuts})).unwrap();
+    assert!(saved["retentionWarning"].is_null(), "{saved}");
+    let folder = f.manifest.parent().unwrap();
+    let mut backups = Vec::new();
+    filmcraft_format::project_folder::move_backups(folder, |_, b| {
+        backups.push(b.clone());
+        Ok(())
+    })
+    .unwrap();
+    assert!(backups.iter().any(|b| b.saved_source == source && b.sequence == f.cut.0));
+    let rescued = dir.path().join("departure.fcproj");
+    filmcraft_format::project_folder::rescue(folder, &backups[0].snapshot, f.cut.0, &rescued).unwrap();
+    let cut = filmcraft_format::decode(&fs::read(rescued).unwrap()).unwrap();
+    assert_eq!(frame(&cut.project, f.cut), 2);
+}

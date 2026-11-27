@@ -73,7 +73,8 @@ impl EditingFolder {
                 Some(Departure { sequence, source, destination: capture.destination, saved_source: &capture.saved_source, cut })
             })
             .collect();
-        TransferSave { copies: Vec::new(), departures }
+        let active_move_bases = captures.iter().filter(|((source, _), _)| bin.is_some_and(|b| b != *source)).map(|(_, c)| c.saved_source.clone()).collect();
+        TransferSave { copies: Vec::new(), departures, selected_bin: bin.map(|id| id.0), active_move_bases }
     }
 }
 
@@ -102,7 +103,10 @@ impl Session {
         self.saved_revision = self.revision;
         self.previews_follow_path();
         self.note_recent_project();
-        Ok(json!({"path":path,"bytes":saved.bytes,"ms":started.elapsed().as_secs_f64()*1000.0,"backup":null,"folderRevision":saved.revision}))
+        self.report_retention_warning(saved.maintenance_warning.as_deref());
+        Ok(
+            json!({"path":path,"bytes":saved.bytes,"ms":started.elapsed().as_secs_f64()*1000.0,"backup":null,"retentionWarning":saved.maintenance_warning,"folderRevision":saved.revision}),
+        )
     }
 }
 
@@ -161,6 +165,46 @@ impl Session {
 
     pub fn dirty_folder_bins(&self) -> std::collections::BTreeSet<BinId> {
         self.editing_folder.as_ref().map(|f| scope::status(&f.project, &self.project).bins).unwrap_or_default()
+    }
+
+    fn report_retention_warning(&mut self, warning: Option<&str>) {
+        if let Some(warning) = warning {
+            self.error_toast("project.recoveryRetention", format!("Saved changes. Bin backup cleanup needs attention. {warning}"));
+        }
+    }
+
+    fn recovery_folder(&self) -> Result<(&Path, &str)> {
+        let snapshot = &self.folder()?.snapshot;
+        Ok((snapshot.directory().map_err(|e| EngineError::Other(e.to_string()))?, snapshot.revision()))
+    }
+
+    pub(crate) fn recovery_retention(&mut self, _: &Value) -> Result<Value> {
+        let (dir, _) = self.recovery_folder()?;
+        Ok(json!(filmcraft_format::project_folder::retention_policy(dir).map_err(|e| EngineError::Other(e.to_string()))?))
+    }
+
+    pub(crate) fn configure_retention(&mut self, p: &Value) -> Result<Value> {
+        let policy = serde_json::from_value(p.clone()).map_err(|e| EngineError::Other(e.to_string()))?;
+        let (dir, rev) = self.recovery_folder()?;
+        filmcraft_format::project_folder::configure_retention(dir, rev, policy).map_err(|e| EngineError::Other(e.to_string()))?;
+        Ok(json!(policy))
+    }
+
+    pub(crate) fn preview_recovery_prune(&mut self, p: &Value) -> Result<Value> {
+        let (dir, rev) = self.recovery_folder()?;
+        let policy = match p.get("policy") {
+            Some(v) => serde_json::from_value(v.clone()).map_err(|e| EngineError::Other(e.to_string()))?,
+            None => filmcraft_format::project_folder::retention_policy(dir).map_err(|e| EngineError::Other(e.to_string()))?,
+        };
+        Ok(json!(filmcraft_format::project_folder::preview_retention(dir, rev, policy).map_err(|e| EngineError::Other(e.to_string()))?))
+    }
+
+    pub(crate) fn keep_recovery_version(&mut self, p: &Value) -> Result<Value> {
+        let version = p["revision"].as_str().ok_or_else(|| EngineError::Other("expected a recovery revision".into()))?;
+        let keep = p["keep"].as_bool().ok_or_else(|| EngineError::Other("expected a keep flag".into()))?;
+        let (dir, rev) = self.recovery_folder()?;
+        filmcraft_format::project_folder::keep_version(dir, rev, version, keep).map_err(|e| EngineError::Other(e.to_string()))?;
+        Ok(json!({"revision":version,"keep":keep}))
     }
 
     pub(crate) fn bin_status(&mut self, _: &Value) -> Result<Value> {
@@ -236,7 +280,8 @@ impl Session {
                 .map_err(|e| EngineError::BinPublished { revision: saved.revision.clone(), message: e.to_string() })?;
         }
         folder.cleanup = None;
-        Ok(json!({"bin":id,"bytes":saved.bytes,"folderRevision":saved.revision}))
+        self.report_retention_warning(saved.maintenance_warning.as_deref());
+        Ok(json!({"bin":id,"bytes":saved.bytes,"retentionWarning":saved.maintenance_warning,"folderRevision":saved.revision}))
     }
 
     pub(crate) fn discard_bin(&mut self, p: &Value) -> Result<Value> {

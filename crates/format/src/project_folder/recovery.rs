@@ -8,9 +8,9 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::{io, path::Path};
 
-const SIDECARS: [&str; 3] = ["transcripts", "source_graphics", "narrations"];
+pub(super) const SIDECARS: [&str; 3] = ["transcripts", "source_graphics", "narrations"];
 
-fn walk(folder: &Path, mut visit: impl FnMut(&str, &Manifest) -> io::Result<bool>) -> io::Result<Option<Manifest>> {
+pub(super) fn walk(folder: &Path, mut visit: impl FnMut(&str, &Manifest) -> io::Result<bool>) -> io::Result<Option<Manifest>> {
     let mut bytes = read_member(&folder.join(ROOT), MANIFEST_LIMIT)?;
     let mut hash = digest(&bytes);
     let mut expected_number = None;
@@ -36,8 +36,12 @@ fn walk(folder: &Path, mut visit: impl FnMut(&str, &Manifest) -> io::Result<bool
 }
 
 pub fn history(folder: &Path, mut visit: impl FnMut(u64, &str) -> io::Result<()>) -> io::Result<()> {
+    let state = super::retention::Catalog::read(folder)?;
     walk(folder, |hash, m| {
-        visit(m.revision.as_ref().map_or(0, |r| r.number), hash)?;
+        let n = m.revision.as_ref().map_or(0, |r| r.number);
+        if state.available(n, hash) {
+            visit(n, hash)?;
+        }
         Ok(false)
     })?;
     Ok(())
@@ -57,10 +61,11 @@ pub fn move_backups(folder: &Path, mut visit: impl FnMut(u64, &super::MoveBackup
 
 fn at(folder: &Path, requested: &str) -> io::Result<Manifest> {
     check_hash(requested)?;
+    let state = super::retention::Catalog::read(folder)?;
     let mut departure = false;
     let manifest = walk(folder, |hash, m| {
         departure = m.revision.as_ref().is_some_and(|r| r.moves.iter().any(|b| b.snapshot == requested));
-        Ok(departure || requested == hash)
+        Ok(departure || requested == hash && state.available(m.revision.as_ref().map_or(0, |r| r.number), hash))
     })?
     .ok_or_else(|| invalid("selected revision is outside the current project history"))?;
     if departure {

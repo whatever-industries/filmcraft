@@ -363,3 +363,19 @@ fn destination_only_save_survives_a_killed_editor() {
 }
 
 mod transfer_playback;
+
+#[test]
+fn modular_recovery_limits_can_be_disabled_in_project_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = Folder::create(dir.path());
+    let mut d = Driver::open(open(&f.path), support::builder());
+    d.ok("ui.menu.invoke", json!({"id":"file.projectSettings.general"}));
+    d.click("projectSettings.tab.recovery");
+    let _ = d.harness.get_by_role_and_label(egui::accesskit::Role::SpinButton, "Bin backups per project");
+    let _ = d.harness.get_by_role_and_label(egui::accesskit::Role::SpinButton, "Versions per bin");
+    d.click("projectSettings.recovery.preview");
+    let _ = d.harness.get_by_label_contains("Versions eligible for cleanup");
+    d.click("projectSettings.recovery.enabled");
+    d.click("projectSettings.ok");
+    assert_eq!(open(&f.path).execute("project.recoveryRetention", json!({})).unwrap()["enabled"], false);
+}

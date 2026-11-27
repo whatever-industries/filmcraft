@@ -204,6 +204,22 @@ fn master_recalls_last_saved_source_after_source_save_and_destination_discard() 
         d.click(&format!("project.closeBin.{decision}"));
     }
     let mut disk = open(&f.path);
+    // Prune actual retired payloads between closing the bins and reopening
+    // the masters. Both the published source and the captured departure survive.
+    disk.execute("project.setRecoveryRetention", json!({"enabled":true,"maxBinBackups":1,"versionsPerBin":1})).unwrap();
+    let mut first = None;
+    for name in ["Assembly", "Review", "Delivery"] {
+        disk.execute("project.renameBin", json!({"bin":f.bins[2],"name":name})).unwrap();
+        let saved = disk.execute("project.saveBin", json!({"bin":f.bins[2]})).unwrap();
+        assert!(saved["retentionWarning"].is_null(), "{saved}");
+        first.get_or_insert_with(|| disk.folder_revision().unwrap().to_owned());
+    }
+    filmcraft_format::project_folder::history(f.path.parent().unwrap(), |_, hash| {
+        assert_ne!(Some(hash), first.as_deref());
+        Ok(())
+    })
+    .unwrap();
+    let mut disk = open(&f.path);
     assert_eq!(disk.project.root.parent_of(f.cut), None);
     for master in f.masters {
         assert!(sample(&mut disk, master, dir.path()) == original);
@@ -267,11 +283,25 @@ fn kill_after_each_arrival_or_final_discard_observes_the_published_cut() {
             d.click(if case == "discard" { "project.closeBin.discard" } else { "project.closeBin.save" });
             assert!(d.app().ui.project_panel.tabs.iter().all(|t| t.bin != f.bins[step].0));
         }
+        let session = &mut d.app().session;
+        session.execute("project.setRecoveryRetention", json!({"enabled":true,"maxBinBackups":1,"versionsPerBin":1})).unwrap();
+        let mut old = None;
+        for name in ["Review A", "Review B", "Review C"] {
+            session.execute("project.renameBin", json!({"bin":f.bins[2],"name":name})).unwrap();
+            let result = session.execute("project.saveBin", json!({"bin":f.bins[2]})).unwrap();
+            assert!(result["retentionWarning"].is_null(), "{result}");
+            old.get_or_insert_with(|| session.folder_revision().unwrap().to_owned());
+        }
+        filmcraft_format::project_folder::history(f.path.parent().unwrap(), |_, hash| {
+            assert_ne!(Some(hash), old.as_deref());
+            Ok(())
+        })
+        .unwrap();
         println!("transfer acknowledged");
         std::thread::park();
         return;
     }
-    for (case, angle, owner) in [("first", 1, Some("Bin B")), ("second", 2, Some("Bin C")), ("discard", 0, None)] {
+    for (case, angle, owner) in [("first", 1, Some("Bin B")), ("second", 2, Some("Review C")), ("discard", 0, None)] {
         let dir = tempfile::tempdir().unwrap();
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "modular_bin_ui::transfer_playback::kill_after_each_arrival_or_final_discard_observes_the_published_cut", "--nocapture"])

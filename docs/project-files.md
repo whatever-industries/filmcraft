@@ -175,6 +175,21 @@ Move Sequence 1 from Bin A to Bin B and save Bin B on close. The arrival takes t
 
 If you save Bin A first, the removal protects both the last explicit save and the cut as it left Bin A. Discarding Bin B then leaves Sequence 1 outside both bins. Master timelines still use the last explicitly saved cut. Discarding Bin B before saving Bin A leaves Bin A’s removal Unsaved. [Modular project rules and acceptance tests](modular-project-rules.md)
 
+### Bin backup retention
+
+In a local modular project, open **Project Settings → Recovery** to set **Bin backups per project** and **Versions per bin**, or turn off automatic pruning. Both counts default to 2,000. **Preview cleanup** shows how many saved versions the current choices would retire before you apply them. Saving three edited bins together adds three backups. A successful close-prompt Save adds one. Settings-only saves, background checkpoints, failed publications and clean saves add zero.
+
+When a bin save takes the project above its limit, cleanup keeps the newest eligible versions up to 90% of the project limit, rounded up, and applies the per-bin limit. A version saved across several bins stays together. Its newest backup can exceed the project count on its own. Older folder revisions created before the editor recorded bin counts share a separate history allowance with settings-only versions. New saves start the counter for those folders.
+
+The live project, explicitly kept versions, the last saved source of a moved sequence, and its departure cut remain recoverable. The project also retains the manifest chain and records shared with any surviving version. The cleanup catalog is part of the project folder. Interrupted cleanup resumes on a later save with automatic pruning enabled. Crash-recovery drafts and dated auto-saves have their own storage.
+
+| Local editor command | Action |
+| --- | --- |
+| `project.recoveryRetention {}` | Read the current policy. |
+| `project.setRecoveryRetention {"enabled":true,"maxBinBackups":2000,"versionsPerBin":2000}` | Set this folder’s policy. A change takes effect on a subsequent bin save. |
+| `project.previewRecoveryPrune {}` | List the revisions a cleanup would retire or keep and the candidate record count. |
+| `project.keepRecoveryVersion {"revision":"…","keep":true}` | Protect a saved version. Set `keep` to false to return it to normal rotation. |
+
 ### Recover a sequence
 
 Run `project_folder history FOLDER` to list revision numbers and digests, newest first.

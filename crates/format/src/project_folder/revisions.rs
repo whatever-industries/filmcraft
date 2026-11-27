@@ -6,7 +6,11 @@ use craft_fcproj_format::records::ProjectRecords;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::{collections::BTreeMap, io, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io,
+    path::Path,
+};
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -17,20 +21,29 @@ pub(super) struct Revision {
     pub(super) moves: Vec<super::MoveBackup>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     arrivals: BTreeMap<u64, u64>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(super) active_move_bases: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(super) backed_up_bins: BTreeSet<u64>,
+    #[serde(default)]
+    pub(super) total_bin_backups: u64,
     bin_edits: BTreeMap<u64, Edit>,
     item_edits: BTreeMap<u64, Edit>,
 }
 
 #[derive(Default)]
 pub(super) struct Transfers {
+    pub backed_up_bins: BTreeSet<u64>,
     pub backups: Vec<super::MoveBackup>,
     pub arrivals: BTreeMap<u64, u64>,
+    pub active_move_bases: BTreeSet<String>,
 }
 
 impl Revision {
     pub(super) fn validate(&self) -> io::Result<()> {
         if self.number == 0
             || !is_digest(&self.parent)
+            || self.active_move_bases.iter().any(|hash| !is_digest(hash))
             || self.moves.iter().any(|m| m.source == m.destination || !is_digest(&m.snapshot) || !is_digest(&m.saved_source))
         {
             return Err(invalid("invalid project revision metadata"));
@@ -91,11 +104,23 @@ pub fn save_with(folder: &Path, expected: &str, records: ProjectRecords, mut wri
     let _guard = writer(folder)?;
     let (previous_bytes, previous) = read_base(folder, expected)?;
     assemble(folder, &previous, &folder.join(ROOT))?;
+    let bins = records.bins.clone();
+    let mut budget = crate::MAX_PROJECT_BYTES;
+    let old_meta = super::load_payload(folder, &previous.envelope, &mut budget)?;
+    let attached = changed_attachments(&old_meta, &records.envelope);
     let mut next = materialize(folder, records, Some(&previous), |p, b| {
         // All reused bytes are verified by assemble before publishing the candidate.
         if p.try_exists()? { Ok(()) } else { write(p, b) }
     })?;
-    commit(folder, &previous_bytes, &previous, &mut next, Transfers::default(), |candidate| assemble(folder, candidate, &folder.join(ROOT)).map(|_| ()), write)
+    let transfers = Transfers { backed_up_bins: changed_bins(&previous, &next, &bins, attached), ..Default::default() };
+    let saved =
+        commit(folder, &previous_bytes, &previous, &mut next, transfers, |candidate| assemble(folder, candidate, &folder.join(ROOT)).map(|_| ()), write)?;
+    if saved != expected
+        && let Err(error) = super::retention::after_publication(folder, &saved, &next)
+    {
+        log::warn!("project saved; recovery maintenance: {error}");
+    }
+    Ok(saved)
 }
 
 pub(super) fn read_base(folder: &Path, expected: &str) -> io::Result<(Vec<u8>, Manifest)> {
@@ -138,6 +163,9 @@ pub(super) fn commit(
         parent: base.to_owned(),
         moves: transfers.backups,
         arrivals: transfers.arrivals,
+        total_bin_backups: prior.map_or(0, |r| r.total_bin_backups).saturating_add(transfers.backed_up_bins.len() as u64),
+        backed_up_bins: transfers.backed_up_bins,
+        active_move_bases: transfers.active_move_bases,
         bin_edits: edits(&previous.bins, &next.bins, prior.map(|r| &r.bin_edits), edit),
         item_edits: edits(&previous.items, &next.items, prior.map(|r| &r.item_edits), edit),
     });
@@ -158,4 +186,51 @@ pub(super) fn commit(
     File::open(folder)?.sync_all()?;
     write(&folder.join(ROOT), &bytes)?;
     Ok(digest(&bytes))
+}
+
+// Bin membership and the payload digests already exist in memory during a save.
+pub(super) fn changed_bins(previous: &Manifest, next: &Manifest, bins: &BTreeMap<u64, serde_json::Value>, mut items: BTreeSet<u64>) -> BTreeSet<u64> {
+    fn changed(old: &[(u64, String)], new: &[(u64, String)]) -> BTreeSet<u64> {
+        if old == new {
+            return BTreeSet::new();
+        }
+        let old: BTreeMap<_, _> = old.iter().map(|(id, h)| (*id, h)).collect();
+        let new: BTreeMap<_, _> = new.iter().map(|(id, h)| (*id, h)).collect();
+        old.keys().chain(new.keys()).filter(|id| old.get(id) != new.get(id)).copied().collect()
+    }
+    let mut saved = changed(&previous.bins, &next.bins);
+    items.extend(changed(&previous.items, &next.items));
+    if !items.is_empty() {
+        let aliases: BTreeMap<_, _> = next.copies.iter().map(|a| ((a.bin, a.original), a.copy)).collect();
+        for (&bin, record) in bins {
+            if record["children"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry["Item"].as_u64())
+                .any(|id| items.contains(aliases.get(&(bin, id)).unwrap_or(&id)))
+            {
+                saved.insert(bin);
+            }
+        }
+    }
+    saved
+}
+
+pub(super) fn changed_attachments(old: &serde_json::Value, new: &serde_json::Value) -> BTreeSet<u64> {
+    let mut changed = BTreeSet::new();
+    for key in super::recovery::SIDECARS {
+        let old = &old["project"][key];
+        let new = &new["project"][key];
+        if old != new {
+            for id in [old, new].into_iter().filter_map(|v| v.as_object()).flat_map(|m| m.keys()) {
+                if old[id] != new[id]
+                    && let Ok(id) = id.parse()
+                {
+                    changed.insert(id);
+                }
+            }
+        }
+    }
+    changed
 }

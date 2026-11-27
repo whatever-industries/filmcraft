@@ -597,3 +597,52 @@ fn native_editor_records_reopen_and_an_unedited_checkout_does_not_publish() {
     assert_eq!(reopened.project.sequence(ItemId(73)), edited.sequence(ItemId(73)));
     assert_eq!(save(&folder, &saved.revision, &output).unwrap(), saved.revision);
 }
+
+#[test]
+fn pruning_retires_only_unprotected_history_and_retries_interrupted_collection() {
+    use filmcraft_format::project_folder::{RetentionPolicy, configure_retention, keep_version, preview_retention, prune_history};
+    let tmp = tempdir().unwrap();
+    let input = tmp.path().join("cut.fcproj");
+    let folder = tmp.path().join("folder");
+    let mut doc = current();
+    write_doc(&input, &doc);
+    pack(&input, &folder, atomic_write_new).unwrap();
+    let base = checkout(&folder, &tmp.path().join("initial")).unwrap();
+    let policy = RetentionPolicy { enabled: false, max_bin_backups: 1, versions_per_bin: 1 };
+    configure_retention(&folder, &base, policy).unwrap();
+    keep_version(&folder, &base, &base, true).unwrap();
+    let mut head = base.clone();
+    let mut versions = Vec::new();
+    for name in ["First", "Second", "Third", "Today"] {
+        doc["project"]["items"]["73"]["name"] = json!(name);
+        write_doc(&input, &doc);
+        head = save(&folder, &head, &input).unwrap();
+        versions.push(head.clone());
+    }
+    let preview = preview_retention(&folder, &head, policy).unwrap();
+    assert_eq!(preview.retire, [versions[1].clone(), versions[0].clone()]);
+    assert!(!preview.due);
+    let archived: Value = serde_json::from_slice(&fs::read(folder.join(&versions[0])).unwrap()).unwrap();
+    let victim = archived["items"].as_array().unwrap().iter().find(|v| v[0] == 73).unwrap()[1].as_str().unwrap();
+    let victim_path = folder.join(victim);
+    let original = fs::read(&victim_path).unwrap();
+    let foreign = folder.join("a".repeat(64));
+    fs::write(&foreign, b"unmanaged").unwrap();
+    // A damaged record cannot be unlinked. Its pending deletion is retried
+    // from authenticated history after the valid file is put back.
+    fs::write(&victim_path, b"unexpected contents").unwrap();
+    assert!(prune_history(&folder, &head, policy).is_err());
+    assert_eq!(fs::read(&victim_path).unwrap(), b"unexpected contents");
+    fs::write(&victim_path, original).unwrap();
+    prune_history(&folder, &head, policy).unwrap();
+    assert!(!victim_path.exists());
+    assert_eq!(fs::read(foreign).unwrap(), b"unmanaged");
+    assert!(rescue(&folder, &versions[0], 73, &tmp.path().join("retired")).is_err());
+    rescue(&folder, &versions[2], 73, &tmp.path().join("recent")).unwrap();
+    let (copy, _) = restore_copy(&folder, &head, &base, 73).unwrap();
+    let output = tmp.path().join("reopen");
+    unpack(&folder, &output).unwrap();
+    let reopened: Value = serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
+    assert_eq!(reopened["project"]["items"]["73"]["name"], "Today");
+    assert_ne!(reopened["project"]["items"][copy.to_string()]["name"], "Today");
+}

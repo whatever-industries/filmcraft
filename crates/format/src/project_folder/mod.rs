@@ -14,7 +14,9 @@ mod editor;
 mod overlay;
 mod paths;
 mod recovery;
+mod retention;
 mod revisions;
+pub use retention::{RetentionPolicy, RetentionPreview, configure_retention, keep_version, preview_retention, prune_history, retention_policy};
 
 pub use editor::{Departure, DepartureCut, FolderSnapshot, SaveResult, TransferSave, detached_project};
 pub use recovery::{history, move_backups, rescue, restore_copy};

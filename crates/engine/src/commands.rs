@@ -4258,6 +4258,29 @@ fn build() -> Vec<CommandSpec> {
     #[cfg(not(target_arch = "wasm32"))]
     v.extend([
         CommandSpec { enabled: crate::folder_edit::available, ..query!("project.binStatus", "Bin Save Status", "{}", Session::bin_status) },
+        CommandSpec { enabled: crate::folder_edit::available, ..query!("project.recoveryRetention", "Bin Backup Limits", "{}", Session::recovery_retention) },
+        CommandSpec {
+            enabled: crate::folder_edit::available,
+            ..query!("project.previewRecoveryPrune", "Preview Bin Backup Cleanup", r#"{"policy":object?}"#, Session::preview_recovery_prune)
+        },
+        cmd!(
+            "project.setRecoveryRetention",
+            "Set Bin Backup Limits",
+            [],
+            None,
+            r#"{"enabled":bool,"maxBinBackups":int,"versionsPerBin":int}"#,
+            crate::folder_edit::available,
+            Session::configure_retention
+        ),
+        cmd!(
+            "project.keepRecoveryVersion",
+            "Keep Recovery Version",
+            [],
+            None,
+            r#"{"revision":str,"keep":bool}"#,
+            crate::folder_edit::available,
+            Session::keep_recovery_version
+        ),
         cmd!("project.saveBin", "Save Bin", [], None, r#"{"bin":id}"#, crate::folder_edit::available, Session::save_bin),
         cmd!("project.discardBin", "Discard Bin Changes", [], None, r#"{"bin":id}"#, crate::folder_edit::available, Session::discard_bin),
     ]);

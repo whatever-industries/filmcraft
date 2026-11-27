@@ -37,13 +37,13 @@ The bin-close prompt captures the document and bin ID. Sequence moves are suppor
 | Rule | Status | Evidence or acceptance test |
 | --- | --- | --- |
 | A prepared project may keep a shared source outside all bins. Masters can play, export, and recall it. | Verified | In a schema-19 fixture, two masters use Interview, which contains a two-angle edit. A second fixture gives the winning cut and two older cuts distinct IDs across three bins. On fresh opens, both masters matched the saved reference picture, PCM audio, PNG frame export, WAV export and Match Frame ID/time before opening bins and through all six orders. The alternate angle had distinguishable picture and sound. An unrelated save and Restore as Copy preserved both links. |
-| Saving Bin A’s removal and discarding Bin B leaves Sequence 1 outside all bins. Masters keep the last explicitly saved version. | Verified before pruning | Two masters reopen, play, export picture and sound, and Match Frame to Sequence 1 with its camera angles. Version 2, captured at departure, restores independently. Version 3, discarded in Bin B, stays discarded after a forced quit. Repeat after retention is implemented. |
+| Saving Bin A’s removal and discarding Bin B leaves Sequence 1 outside all bins. Masters keep the last explicitly saved version. | Verified in local transfer tests | Two masters reopen, play, export picture and sound, and Match Frame to Sequence 1 with its camera angles. Version 2, captured at departure, restores independently. Version 3, discarded in Bin B, stays discarded after a forced quit. |
 | Restore as Copy preserves today's edits. Changed required sources can be recovered in a separate rescue export. | Verified | The converter restored a historical cut under a fresh ID while preserving current edits and view. A required source with changed RAW settings prevented an in-project restore. Rescue exported the historical context separately. Corrupt required history was rejected. Schema-19 RAW settings also survived convert → reopen → standard save → reopen. |
-| Prune folder recovery versions after a count of successful published saves, with per-bin and project limits. | Implementation gap | The existing rotation limits dated whole-project backups. Folder history has no count-triggered collector. Advance the count with real changes, interleave no-op and failed saves, preview eligible versions, then prune. Reopen the live project and recover from protected history. Protect referenced sources and their dependencies, active recovery, explicitly kept versions, and the backup promised by a move. |
-| Select the pruning interval and retention limits. | Decision needed | Choose these during retention design using measured growth and a usable restore window. No-op saves and failures do not advance the count. |
+| Count each bin whose edits are published. Settings-only, clean and failed saves add zero. | Local implementation | Closing and saving one bin adds one. A global Save of two edited bins adds two. The count survives reopening. |
+| Automatically prune above the configured bin-backup count. | Local implementation | Defaults to 2,000 per project. The project’s Recovery settings expose the switch and limits. Preview lists eligible versions. Cleanup protects current and kept versions, move backups and their source records. Interrupted deletion can be retried. |
 | Drag an item from another editor's locked bin into a writable bin. | Decision needed | Decide whether to create an independent duplicate in the destination or reject the drag. The source must stay intact. The existing write lock serializes folder publication and does not establish per-bin ownership. |
 
-The prepared two-camera control and the live transfer tests use generated media. The transfer tests compare rendered frames, PCM samples, PNG and WAV exports, and Match Frame. Post-prune reopen remains part of the retention stage. [Source lookup and moves](../crates/project/src/lib.rs) · [Historical recovery](../crates/format/src/project_folder/recovery.rs)
+The prepared two-camera control and the live transfer tests use generated media. The transfer tests compare rendered frames, PCM samples, PNG and WAV exports, and Match Frame. The transfer and force-quit cases also run with a one-backup limit. [Source lookup and moves](../crates/project/src/lib.rs) · [Historical recovery](../crates/format/src/project_folder/recovery.rs)
 
 ## Avid comparisons
 
@@ -63,6 +63,19 @@ The global Save recheck for the single-bin engine stage used the same already-lo
 | 48,000 | Project folder | 645.2 ms | 231.6 ms | 3,190,940 | 1,046 / 1,088 MiB |
 
 The folder passed the one-reel save-time gate at both sizes. Open time and peak memory remain higher. The earlier storage runs additionally exercised process interruption around manifest publication and injected StorageFull failures. Actual volume exhaustion, shared-filesystem durability, and physical read/write amplification remain unmeasured.
+
+The one-reel writes above put 5 GB in the range of roughly 1,600 to 3,100 saves in those two fixtures. This informed the starting count of 2,000. Writes include manifest publication, and shared records are stored once. Actual recovery storage varies with bin contents and edit type. The editor uses the published bin count alone to trigger cleanup.
+
+### Save during recovery cleanup
+
+Three runs per size each changed the same reel’s start timecode five times on local fixture copies. A two-backup limit forced cleanup on saves three through five. After each run, the editor reopened the live cut at frame 5 and the restored copy at frame 3. A legacy revision was already present in each fixture. Times are median elapsed milliseconds for editor Save on this machine.
+
+| Timeline clips | Standard .fcproj | Modular Save before cleanup | Modular Save with cleanup |
+| ---: | ---: | ---: | ---: |
+| 24,000 | 217 | 97.5 | 184 |
+| 48,000 | 387 | 178 | 275 |
+
+A separate small-project run used the default settings. It retained all 2,000 backups at the threshold. Save 2,001 reduced that to 1,800 backups plus the live version. The retired cut’s unique record was removed, the recent cut’s record remained, and the live project reopened. Cleanup ran under the project writer lock. The feature-scale timings cover a short history. Feature-scale cleanup latency at the default threshold still needs a long-session run. Revision manifests remain in the project for history and move lookup.
 
 ## Sequence-transfer performance
 
