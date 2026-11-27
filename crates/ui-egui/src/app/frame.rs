@@ -122,6 +122,9 @@ impl FilmcraftApp {
         let text = egui::Rect::from_min_max(egui::pos2(sb.min.x + 10.0, sb.min.y), egui::pos2((right - 10.0).max(sb.min.x + 10.0), sb.max.y));
         let mut row = ui.new_child(egui::UiBuilder::new().max_rect(text).id_salt("status-text").layout(egui::Layout::left_to_right(egui::Align::Center)));
         let shown = row.add(egui::Label::new(egui::RichText::new(&hint).font(Tokens::ui(11.0)).color(t.text_dim)).selectable(true).truncate());
+        if self.session.folder_revision().is_some() && !self.ui.status.is_empty() {
+            ui.ctx().accesskit_node_builder(shown.id, |node| node.set_live(egui::accesskit::Live::Polite));
+        }
         self.auto.add("status.text", shown.rect, &hint);
     }
 

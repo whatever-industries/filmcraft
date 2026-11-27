@@ -1,13 +1,8 @@
 //! Developer-only project-folder conversion. See docs/project-files.md.
-mod converter;
-
-use converter::{
-    pack,
-    recovery::{history, rescue, restore_copy},
-    revisions::{checkout, save},
-    unpack,
+use filmcraft_format::{
+    atomic_write_new,
+    project_folder::{checkout, history, move_backups, pack, rescue, restore_copy, save, unpack},
 };
-use filmcraft_format::atomic_write_new;
 use std::{
     io::{self, Write},
     path::Path,
@@ -36,6 +31,14 @@ fn run() -> io::Result<()> {
         return writeln!(io::stdout().lock(), "{revision}");
     }
     if let [command, folder] = args.as_slice()
+        && command == "move-backups"
+    {
+        let mut out = io::stdout().lock();
+        return move_backups(Path::new(folder), |rev, b| {
+            writeln!(out, "{rev} {} {} {} {} {}", b.source, b.destination, b.sequence, b.saved_source, b.snapshot)
+        });
+    }
+    if let [command, folder] = args.as_slice()
         && command == "history"
     {
         let mut out = io::stdout().lock();
@@ -56,7 +59,7 @@ fn run() -> io::Result<()> {
     }
     Err(io::Error::new(
         io::ErrorKind::InvalidInput,
-        "usage: project_folder pack SOURCE.fcproj NEW_FOLDER | unpack FOLDER NEW_FILE.fcproj | checkout FOLDER NEW_FILE.fcproj | save FOLDER BASE_REVISION EDITED.fcproj | history FOLDER | restore-copy FOLDER BASE_REVISION HISTORICAL_REVISION SEQUENCE_ID | rescue FOLDER REVISION SEQUENCE_ID NEW_FILE.fcproj",
+        "usage: project_folder pack SOURCE.fcproj NEW_FOLDER | unpack FOLDER NEW_FILE.fcproj | checkout FOLDER NEW_FILE.fcproj | save FOLDER BASE_REVISION EDITED.fcproj | history FOLDER | move-backups FOLDER | restore-copy FOLDER BASE_REVISION HISTORICAL_REVISION SEQUENCE_ID | rescue FOLDER REVISION SEQUENCE_ID NEW_FILE.fcproj",
     ))
 }
 

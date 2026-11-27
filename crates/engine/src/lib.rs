@@ -20,6 +20,8 @@ pub mod demo;
 pub mod doc_path;
 pub mod essential_sound;
 pub mod export_tools;
+#[cfg(not(target_arch = "wasm32"))]
+mod folder_edit;
 pub mod graphic_templates;
 pub mod graphics;
 pub mod interchange;
@@ -161,6 +163,8 @@ pub enum EngineError {
     Edit(#[from] filmcraft_edit::EditError),
     #[error("media: {0}")]
     Media(#[from] filmcraft_media::MediaError),
+    #[error("folder revision {revision} was published, recovery cleanup failed: {message}. Retry Save Bin.")]
+    BinPublished { revision: String, message: String },
     #[error("{0}")]
     Other(String),
 }
@@ -550,6 +554,10 @@ pub struct Session {
     /// Schema version of the file at `path` as found on disk (older = upgraded on load; the first
     /// save over it keeps a backup of the original).
     pub loaded_schema: u32,
+    #[cfg(not(target_arch = "wasm32"))]
+    allow_project_folders: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    editing_folder: Option<folder_edit::EditingFolder>,
     /// Render preview files + render-bar segments (shared with the frontend's frame workers).
     pub previews: Arc<previews::PreviewStore>,
     /// Audio Track Mixer automation pass in progress.
@@ -671,6 +679,10 @@ impl Session {
             prefs_path: None,
             persistence: None,
             loaded_schema: filmcraft_format::SCHEMA_VERSION,
+            #[cfg(not(target_arch = "wasm32"))]
+            allow_project_folders: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            editing_folder: None,
             previews: Arc::new(previews::PreviewStore::temp()),
             mixrec: Default::default(),
             mcrec: Default::default(),
@@ -843,6 +855,49 @@ impl Session {
         }
     }
 
+    /// Published revision of an open modular document. Together with the edit
+    /// revision this invalidates bin indicators even after a selective save.
+    pub fn folder_revision(&self) -> Option<&str> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.editing_folder.as_ref().map(|folder| folder.snapshot.revision())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            None
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn dirty_folder_bins(&self) -> std::collections::BTreeSet<filmcraft_project::BinId> {
+        Default::default()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn bin_has_move_removal(&self, _: filmcraft_project::BinId) -> bool {
+        false
+    }
+
+    /// Close timeline views while preserving the order and active state of other tabs.
+    pub fn close_sequence_views(&mut self, ids: &[ItemId]) {
+        self.state.open_sequences.retain(|id| !ids.contains(id));
+        if self.state.active_sequence.is_some_and(|id| ids.contains(&id)) {
+            self.state.active_sequence = self.state.open_sequences.last().copied();
+        }
+    }
+
+    pub fn bin_needs_cleanup(&self, bin: filmcraft_project::BinId) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.editing_folder.as_ref().is_some_and(|f| f.cleanup == Some(bin))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = bin;
+            false
+        }
+    }
+
     pub fn is_dirty(&self) -> bool {
         self.revision != self.saved_revision
     }
@@ -872,7 +927,10 @@ impl Session {
             && spec.journal
             && self.prefs.media_analysis.auto_transcribe
             && self.prefs.media_analysis.auto_transcribe_scope == "sequenceClips"
-            && !matches!(id, "edit.undo" | "edit.redo" | "file.newProject" | "file.openDemoProject" | "file.open" | "file.revert" | "file.recover"))
+            && !matches!(
+                id,
+                "edit.undo" | "edit.redo" | "file.newProject" | "file.openDemoProject" | "file.open" | "file.revert" | "file.recover" | "project.discardBin"
+            ))
         .then(|| self.project.clone());
         let outermost = self.exec_depth == 0;
         if outermost {
@@ -1043,6 +1101,10 @@ impl Session {
         let r = f(&mut p, &mut st)?;
         self.refuse_self_nesting(&p)?;
         self.drop_orphan_transitions(&mut p);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(folder) = &mut self.editing_folder {
+            folder.capture_moves(&self.project, &p);
+        }
         let old = std::mem::replace(&mut self.project, Arc::new(p));
         self.history.undo.push((label.to_string(), old, self.command_origin.clone()));
         if self.history.undo.len() > self.history.limit {
@@ -1082,6 +1144,8 @@ impl Session {
     pub fn edit_group<R>(&mut self, label: &str, f: impl FnOnce(&mut Session) -> Result<R>) -> Result<R> {
         let (project, state, undo, redo, limit) =
             (self.project.clone(), self.state.clone(), self.history.undo.len(), self.history.redo.clone(), self.history.limit);
+        #[cfg(not(target_arch = "wasm32"))]
+        let departures = self.editing_folder.as_ref().map(|f| f.departures.clone());
         // keep every step the group makes, however many, so the first one can be found afterwards
         self.history.limit = usize::MAX;
         // a panic inside the group must not leave the history unlimited: restore, then let it go on
@@ -1092,6 +1156,10 @@ impl Session {
             s.history.undo.truncate(undo);
             s.history.redo = redo.clone();
             s.history.merge_key = None;
+            #[cfg(not(target_arch = "wasm32"))]
+            if let (Some(folder), Some(captures)) = (&mut s.editing_folder, &departures) {
+                folder.departures.clone_from(captures);
+            }
             s.project = project.clone();
             s.state = state.clone();
             s.bump();
@@ -1140,10 +1208,16 @@ impl Session {
             n += 1;
         }
         if let Some(prev) = earliest {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(folder) = &mut self.editing_folder {
+                folder.capture_moves(&self.project, &prev);
+            }
             self.project = prev;
             self.history.merge_key = None;
             self.fix_state();
             self.bump();
+            #[cfg(not(target_arch = "wasm32"))]
+            self.refresh_folder_dirty();
         }
         n
     }
@@ -1190,20 +1264,32 @@ impl Session {
     pub fn undo(&mut self) -> Option<String> {
         let (label, prev, origin) = self.history.undo.pop()?;
         self.history.merge_key = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(folder) = &mut self.editing_folder {
+            folder.capture_moves(&self.project, &prev);
+        }
         let cur = std::mem::replace(&mut self.project, prev);
         self.history.redo.push((label.clone(), cur, origin));
         self.fix_state();
         self.bump();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.refresh_folder_dirty();
         Some(label)
     }
 
     pub fn redo(&mut self) -> Option<String> {
         let (label, next, origin) = self.history.redo.pop()?;
         self.history.merge_key = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(folder) = &mut self.editing_folder {
+            folder.capture_moves(&self.project, &next);
+        }
         let cur = std::mem::replace(&mut self.project, next);
         self.history.undo.push((label.clone(), cur, origin));
         self.fix_state();
         self.bump();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.refresh_folder_dirty();
         Some(label)
     }
 

@@ -167,6 +167,20 @@ pub struct ProjectItem {
 }
 
 impl ProjectItem {
+    /// Visit direct project item dependencies, including nested timelines and camera angles.
+    pub fn visit_source_items(&self, mut visit: impl FnMut(ItemId)) {
+        match &self.kind {
+            ItemKind::Subclip { parent, .. } => visit(*parent),
+            ItemKind::Sequence(seq) => {
+                seq.all_tracks().chain(&seq.submix_tracks).flat_map(|track| &track.items).for_each(|clip| visit(clip.item));
+                seq.multicam.iter().flat_map(|m| &m.cameras).filter_map(|c| c.source).for_each(&mut visit);
+                seq.merged.iter().flat_map(|m| m.video.iter().chain(&m.audio)).copied().for_each(visit);
+            }
+            ItemKind::Script(script) => script.slates.iter().flat_map(|slate| &slate.takes).filter_map(|take| take.source).for_each(visit),
+            ItemKind::Media(_) | ItemKind::Graphic { .. } | ItemKind::AdjustmentLayer { .. } => {}
+        }
+    }
+
     pub fn as_media(&self) -> Option<&MediaClip> {
         match &self.kind {
             ItemKind::Media(m) => Some(m),

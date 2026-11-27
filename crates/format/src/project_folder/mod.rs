@@ -1,6 +1,6 @@
-//! Developer-only project-folder conversion. See docs/project-files.md.
+//! Native, content-addressed project-folder storage. See docs/project-files.md.
+use crate::{MAX_PROJECT_BYTES, SCHEMA_VERSION, atomic_write_new};
 use craft_fcproj_format::records::ProjectRecords;
-use filmcraft_format::{MAX_PROJECT_BYTES, SCHEMA_VERSION, atomic_write_new};
 use filmcraft_media::reader::read_regular_file_bounded;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -10,29 +10,87 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-#[path = "paths.rs"]
+mod editor;
+mod overlay;
 mod paths;
-#[path = "recovery.rs"]
-pub(super) mod recovery;
-#[path = "revisions.rs"]
-pub(super) mod revisions;
+mod recovery;
+mod revisions;
 
-pub(super) const ROOT: &str = "project.fcmod";
+pub use editor::{Departure, DepartureCut, FolderSnapshot, SaveResult, TransferSave, detached_project};
+pub use recovery::{history, move_backups, rescue, restore_copy};
+pub use revisions::{checkout, save, save_with};
+
+pub const ROOT: &str = "project.fcmod";
 const FORMAT: &str = "filmcraft.project-folder";
 const MANIFEST_LIMIT: u64 = 16 << 20;
 const RECORD_LIMIT: usize = 100_000;
 const SHARED_SCHEMA_VERSION: u32 = craft_fcproj_format::SCHEMA_VERSION;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
     format: String,
     layout: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     revision: Option<revisions::Revision>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    copies: Vec<BinCopy>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    identities: BTreeMap<u64, CopyIdentity>,
     envelope: String,
     bins: Vec<(u64, String)>,
     items: Vec<(u64, String)>,
+}
+
+/// A saved source bin keeps its original bytes until its own removal is saved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BinCopy {
+    pub bin: u64,
+    pub original: u64,
+    pub copy: u64,
+}
+
+/// Recoverable sequence at departure. The containing revision orders this move.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MoveBackup {
+    pub source: u64,
+    pub destination: u64,
+    pub sequence: u64,
+    pub snapshot: String,
+    pub saved_source: String,
+}
+
+/// A surviving cut initially shares the old immutable item payload. Its
+/// project identity and display name are materialized on read and first edit.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct CopyIdentity {
+    stored: u64,
+    name: String,
+}
+
+impl CopyIdentity {
+    fn apply(&self, id: u64, data: &mut Value) -> io::Result<()> {
+        if data["id"].as_u64() != Some(self.stored) || !data["kind"]["Sequence"].is_object() {
+            return Err(invalid("invalid sequence copy payload"));
+        }
+        data["id"] = id.into();
+        data["created"] = id.into();
+        data["name"] = self.name.clone().into();
+        Ok(())
+    }
+}
+impl BinCopy {
+    fn replace(&self, bin: &mut Value, reverse: bool) -> io::Result<()> {
+        let (from, to) = if reverse { (self.copy, self.original) } else { (self.original, self.copy) };
+        let entries = bin["children"].as_array_mut().ok_or_else(|| invalid("missing bin entries"))?;
+        let mut matches = entries.iter_mut().filter(|e| e["Item"].as_u64() == Some(from));
+        let first = matches.next().ok_or_else(|| invalid("missing moved sequence in saved bin"))?;
+        if matches.next().is_some() || from == to {
+            return Err(invalid("ambiguous moved sequence in saved bin"));
+        }
+        first["Item"] = to.into();
+        Ok(())
+    }
 }
 
 fn invalid(reason: impl std::fmt::Display) -> io::Error {
@@ -71,10 +129,19 @@ fn load_payload(folder: &Path, hash: &str, remaining: &mut u64) -> io::Result<Va
     Ok(serde_json::from_slice(&bytes)?)
 }
 
-fn load_group(folder: &Path, kind: &str, entries: &[(u64, String)], budget: &mut u64) -> io::Result<BTreeMap<u64, Value>> {
+fn load_group(
+    folder: &Path,
+    kind: &str,
+    entries: &[(u64, String)],
+    identities: Option<&BTreeMap<u64, CopyIdentity>>,
+    budget: &mut u64,
+) -> io::Result<BTreeMap<u64, Value>> {
     let mut group = BTreeMap::new();
     for (id, hash) in entries {
-        let data = load_payload(folder, hash, budget).map_err(|e| invalid(format!("{kind} {id}: {e}")))?;
+        let mut data = load_payload(folder, hash, budget).map_err(|e| invalid(format!("{kind} {id}: {e}")))?;
+        if let Some(identity) = identities.and_then(|ids| ids.get(id)) {
+            identity.apply(*id, &mut data)?;
+        }
         if data.get("id").and_then(Value::as_u64) != Some(*id) || group.insert(*id, data).is_some() {
             return Err(invalid(format!("mismatched or repeated {kind} {id}")));
         }
@@ -99,8 +166,14 @@ fn read_records(folder: &Path, manifest: &Manifest) -> io::Result<ProjectRecords
     check_manifest(manifest)?;
     let mut budget = MAX_PROJECT_BYTES;
     let envelope = load_payload(folder, &manifest.envelope, &mut budget).map_err(|e| invalid(format!("project metadata: {e}")))?;
-    let bins = load_group(folder, "bin", &manifest.bins, &mut budget)?;
-    let items = load_group(folder, "item", &manifest.items, &mut budget)?;
+    let mut bins = load_group(folder, "bin", &manifest.bins, None, &mut budget)?;
+    let items = load_group(folder, "item", &manifest.items, Some(&manifest.identities), &mut budget)?;
+    for alias in &manifest.copies {
+        if !items.contains_key(&alias.copy) {
+            return Err(invalid("missing independent sequence copy"));
+        }
+        alias.replace(bins.get_mut(&alias.bin).ok_or_else(|| invalid("missing saved source bin"))?, false)?;
+    }
     Ok(ProjectRecords { envelope, bins, items })
 }
 
@@ -110,6 +183,12 @@ fn assemble(folder: &Path, manifest: &Manifest, destination: &Path) -> io::Resul
 
 fn encode_at(folder: &Path, mut records: ProjectRecords, destination: &Path) -> io::Result<Vec<u8>> {
     paths::rebase(&mut records, &folder.join(ROOT), destination)?;
+    let bytes = serde_json::to_vec(&join(records)?)?;
+    crate::decode(&bytes).map_err(invalid)?;
+    Ok(bytes)
+}
+
+fn join(mut records: ProjectRecords) -> io::Result<Value> {
     let app_schema = records.envelope.get("schema_version").and_then(Value::as_u64) == Some(u64::from(SCHEMA_VERSION));
     if app_schema {
         // The shared record API checks its own schema. Only the envelope stamp differs.
@@ -119,14 +198,22 @@ fn encode_at(folder: &Path, mut records: ProjectRecords, destination: &Path) -> 
     if app_schema {
         document["schema_version"] = SCHEMA_VERSION.into();
     }
-    let bytes = serde_json::to_vec(&document)?;
-    filmcraft_format::decode(&bytes).map_err(invalid)?;
-    Ok(bytes)
+    Ok(document)
 }
 
-fn write_payload(folder: &Path, value: Value, write_new: &mut impl FnMut(&Path, &[u8]) -> io::Result<()>) -> io::Result<String> {
+fn write_payload(folder: &Path, value: Value, previous: Option<&str>, write_new: &mut impl FnMut(&Path, &[u8]) -> io::Result<()>) -> io::Result<String> {
     let bytes = serde_json::to_vec(&value)?;
     let hash = digest(&bytes);
+    if let Some(previous) = previous
+        && previous != hash
+    {
+        // A native editor record can have a different JSON key order from a split
+        // checkout. Keep the existing record when the JSON values are equal.
+        let mut budget = MAX_PROJECT_BYTES;
+        if load_payload(folder, previous, &mut budget)? == value {
+            return Ok(previous.to_owned());
+        }
+    }
     let path = folder.join(&hash);
     match write_new(&path, &bytes) {
         Ok(()) => (),
@@ -137,10 +224,11 @@ fn write_payload(folder: &Path, value: Value, write_new: &mut impl FnMut(&Path, 
     Ok(hash)
 }
 
-pub(super) fn records_from(source: &Path, folder: &Path) -> io::Result<ProjectRecords> {
+/// Split a standard project for verified publication into an existing folder.
+pub fn records_from(source: &Path, folder: &Path) -> io::Result<ProjectRecords> {
     let mut records = {
         let bytes = read_regular_file_bounded(source, MAX_PROJECT_BYTES)?;
-        let schema = filmcraft_format::decode(&bytes).map_err(invalid)?.schema_version;
+        let schema = crate::decode(&bytes).map_err(invalid)?.schema_version;
         if schema > SHARED_SCHEMA_VERSION {
             // Preserve the original JSON, including Script, RAW, and extension data.
             let mut document: Value = serde_json::from_slice(&bytes)?;
@@ -160,19 +248,34 @@ pub(super) fn records_from(source: &Path, folder: &Path) -> io::Result<ProjectRe
     Ok(records)
 }
 
-fn materialize(folder: &Path, records: ProjectRecords, mut write_new: impl FnMut(&Path, &[u8]) -> io::Result<()>) -> io::Result<Manifest> {
-    let envelope = write_payload(folder, records.envelope, &mut write_new)?;
-    let mut group = |values: BTreeMap<u64, Value>| -> io::Result<Vec<_>> {
-        values.into_iter().map(|(id, value)| Ok((id, write_payload(folder, value, &mut write_new)?))).collect()
+fn materialize(
+    folder: &Path,
+    records: ProjectRecords,
+    previous: Option<&Manifest>,
+    mut write_new: impl FnMut(&Path, &[u8]) -> io::Result<()>,
+) -> io::Result<Manifest> {
+    let envelope = write_payload(folder, records.envelope, previous.map(|m| m.envelope.as_str()), &mut write_new)?;
+    let mut group = |values: BTreeMap<u64, Value>, prior: Option<&[(u64, String)]>| -> io::Result<Vec<_>> {
+        let prior: BTreeMap<_, _> = prior.unwrap_or_default().iter().map(|(id, hash)| (*id, hash.as_str())).collect();
+        values.into_iter().map(|(id, value)| Ok((id, write_payload(folder, value, prior.get(&id).copied(), &mut write_new)?))).collect()
     };
-    Ok(Manifest { format: FORMAT.to_owned(), layout: 1, revision: None, envelope, bins: group(records.bins)?, items: group(records.items)? })
+    Ok(Manifest {
+        format: FORMAT.to_owned(),
+        layout: 1,
+        copies: Vec::new(),
+        identities: BTreeMap::new(),
+        revision: None,
+        envelope,
+        bins: group(records.bins, previous.map(|m| m.bins.as_slice()))?,
+        items: group(records.items, previous.map(|m| m.items.as_slice()))?,
+    })
 }
 
-pub(super) fn pack(source: &Path, folder: &Path, mut write_new: impl FnMut(&Path, &[u8]) -> io::Result<()>) -> io::Result<()> {
+pub fn pack(source: &Path, folder: &Path, mut write_new: impl FnMut(&Path, &[u8]) -> io::Result<()>) -> io::Result<()> {
     let records = records_from(source, folder)?;
     fs::create_dir(folder)?; // Exclusively reserve a fresh destination. Never adopt an existing directory.
     let root = folder.join(ROOT);
-    let manifest = materialize(folder, records, &mut write_new)?;
+    let manifest = materialize(folder, records, None, &mut write_new)?;
     let bytes = serde_json::to_vec(&manifest)?;
     if bytes.len() as u64 > MANIFEST_LIMIT {
         return Err(invalid("manifest exceeds the folder layout's size limit"));
@@ -183,7 +286,7 @@ pub(super) fn pack(source: &Path, folder: &Path, mut write_new: impl FnMut(&Path
     write_new(&root, &bytes)
 }
 
-pub(super) fn unpack(folder: &Path, destination: &Path) -> io::Result<()> {
+pub fn unpack(folder: &Path, destination: &Path) -> io::Result<()> {
     let manifest = serde_json::from_slice(&read_member(&folder.join(ROOT), MANIFEST_LIMIT)?)?;
     atomic_write_new(destination, &assemble(folder, &manifest, destination)?)
 }

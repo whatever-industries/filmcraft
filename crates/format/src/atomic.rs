@@ -114,6 +114,15 @@ pub fn atomic_write_no_follow(_path: &Path, _data: &[u8]) -> io::Result<()> {
 /// A write failure leaves no partial final file; temporary-file cleanup is best effort.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn atomic_write_new(path: &Path, data: &[u8]) -> io::Result<()> {
+    stage_new_file(path, data)?;
+    sync_dir(&parent_dir(path));
+    Ok(())
+}
+
+/// Sync the file contents and publish its name. A transaction that stages several
+/// files must sync their containing directory before publishing its commit record.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn stage_new_file(path: &Path, data: &[u8]) -> io::Result<()> {
     atomic_write_new_with(path, |file| file.write_all(data).and_then(|_| file.sync_all()))
 }
 
@@ -136,7 +145,6 @@ fn atomic_write_new_with(path: &Path, write: impl FnOnce(&mut File) -> io::Resul
     let mut staged = tempfile::NamedTempFile::new_in(&dir)?;
     write(staged.as_file_mut())?;
     let _published = staged.persist_noclobber(path).map_err(|e| e.error)?;
-    sync_dir(&dir);
     Ok(())
 }
 

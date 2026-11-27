@@ -2698,10 +2698,7 @@ fn build() -> Vec<CommandSpec> {
         }),
         cmd!("sequence.close", "Close Sequence", [], None, r#"{"item":id?}"#, has_seq, |s, p| {
             let id = item_p(p, "item").or(s.state.active_sequence).ok_or(EngineError::NoSequence)?;
-            s.state.open_sequences.retain(|x| *x != id);
-            if s.state.active_sequence == Some(id) {
-                s.state.active_sequence = s.state.open_sequences.last().copied();
-            }
+            s.close_sequence_views(&[id]);
             Ok(Value::Null)
         }),
         cmd!("sequence.closeOthers", "Close Other Timeline Panels", [], None, r#"{"item":id?}"#, has_seq, |s, p| {
@@ -4258,6 +4255,12 @@ fn build() -> Vec<CommandSpec> {
             json!({"undo": s.history.undo.iter().map(|h| &h.0).collect::<Vec<_>>(), "redo": s.history.redo.iter().map(|h| &h.0).collect::<Vec<_>>()})
         )),
     ];
+    #[cfg(not(target_arch = "wasm32"))]
+    v.extend([
+        CommandSpec { enabled: crate::folder_edit::available, ..query!("project.binStatus", "Bin Save Status", "{}", Session::bin_status) },
+        cmd!("project.saveBin", "Save Bin", [], None, r#"{"bin":id}"#, crate::folder_edit::available, Session::save_bin),
+        cmd!("project.discardBin", "Discard Bin Changes", [], None, r#"{"bin":id}"#, crate::folder_edit::available, Session::discard_bin),
+    ]);
     crate::sequence_tools::splice(&mut v);
     v.extend(crate::captions::commands());
     v.extend(crate::settings::commands());
@@ -5400,9 +5403,18 @@ fn name_project(p: &mut filmcraft_project::Project, name: String) {
 }
 
 fn write_project(s: &mut Session, path: &str, adopt: bool) -> Result<Value> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if crate::folder_edit::is_manifest(path) {
+        if adopt && s.path.as_deref() == Some(path) {
+            return s.save_folder(path);
+        }
+        return Err(EngineError::Other("open this project folder before saving it".into()));
+    }
     let t0 = web_time::Instant::now();
+    let export = standard_export_from_folder(s, path)?;
     // Save As renames the project after its new file (not an edit: no undo step, not dirty).
     if adopt
+        && export.is_none()
         && let Some(name) = project_name_for(path)
         && s.project.name != name
     {
@@ -5410,7 +5422,12 @@ fn write_project(s: &mut Session, path: &str, adopt: bool) -> Result<Value> {
     }
     // what is open (sequence tabs, how each is shown) goes into the file beside the project
     let view = s.project_view();
-    let bytes = filmcraft_format::encode_with_view(&s.project, Some(&view), false);
+    let mut export = export;
+    if adopt && let (Some(export), Some(name)) = (&mut export, project_name_for(path)) {
+        name_project(export, name);
+    }
+    let project = export.as_ref().unwrap_or(&s.project);
+    let bytes = filmcraft_format::encode_with_view(project, Some(&view), false);
     let mut backup = None;
     if adopt && s.path.as_deref() == Some(path) && s.loaded_schema < filmcraft_format::SCHEMA_VERSION {
         let b = schema_backup_path(path, s.loaded_schema);
@@ -5423,6 +5440,10 @@ fn write_project(s: &mut Session, path: &str, adopt: bool) -> Result<Value> {
     }
     s.services.write_file(path, &bytes).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     if adopt {
+        if let Some(export) = export {
+            install_project(s, export, Some(path.to_owned()), true);
+            s.restore_project_view(view);
+        }
         s.path = Some(path.to_string());
         s.previews_follow_path();
         s.note_recent_project();
@@ -5432,6 +5453,19 @@ fn write_project(s: &mut Session, path: &str, adopt: bool) -> Result<Value> {
     Ok(json!({"path": path, "bytes": bytes.len(), "ms": t0.elapsed().as_secs_f64() * 1000.0, "backup": backup}))
 }
 
+fn standard_export_from_folder(s: &Session, path: &str) -> Result<Option<filmcraft_project::Project>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if s.editing_folder.is_some()
+        && let Some(origin) = &s.path
+    {
+        return filmcraft_format::project_folder::detached_project((*s.project).clone(), std::path::Path::new(origin), Some(std::path::Path::new(path)))
+            .map(Some)
+            .map_err(|e| EngineError::Other(format!("{path}: {e}")));
+    }
+    let _ = (s, path);
+    Ok(None)
+}
+
 fn schema_backup_path(path: &str, schema: u32) -> String {
     let stem = path.strip_suffix(".fcproj").unwrap_or(path);
     format!("{stem} (schema v{schema} backup).fcproj")
@@ -5439,6 +5473,10 @@ fn schema_backup_path(path: &str, schema: u32) -> String {
 
 /// Make `proj` the session's project (fresh history, media pool and editor state).
 pub(crate) fn install_project(s: &mut Session, mut proj: filmcraft_project::Project, path: Option<String>, clean: bool) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        s.editing_folder = None;
+    }
     let proxies = s.media.use_proxies();
     s.media = std::sync::Arc::new(crate::MediaPool::default());
     s.media.set_use_proxies(proxies);
@@ -5471,8 +5509,30 @@ pub(crate) fn install_project(s: &mut Session, mut proj: filmcraft_project::Proj
 }
 
 fn open_project(s: &mut Session, path: &str) -> Result<Value> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if crate::folder_edit::is_manifest(path) {
+        if !s.allow_project_folders {
+            return Err(EngineError::Other("project folders require a local desktop editor".into()));
+        }
+        let (snapshot, loaded) =
+            filmcraft_format::project_folder::FolderSnapshot::open(std::path::Path::new(path)).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+        let mut result = install_loaded_project(s, path, loaded);
+        result["folderRevision"] = json!(snapshot.revision());
+        s.editing_folder = Some(crate::folder_edit::EditingFolder {
+            snapshot,
+            departures: Default::default(),
+            cleanup: None,
+            project: s.project.clone(),
+            view: s.project_view(),
+        });
+        return Ok(result);
+    }
     let bytes = s.services.read_file_bounded(path, filmcraft_format::MAX_PROJECT_BYTES).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     let loaded = filmcraft_format::decode(&bytes).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+    Ok(install_loaded_project(s, path, loaded))
+}
+
+fn install_loaded_project(s: &mut Session, path: &str, loaded: filmcraft_format::Loaded) -> Value {
     let (from, migrated) = (loaded.schema_version, loaded.migrated());
     crate::masks::discard_jobs(s);
     install_project(s, loaded.project, Some(path.to_string()), true);
@@ -5489,7 +5549,7 @@ fn open_project(s: &mut Session, path: &str) -> Result<Value> {
         s.toast(format!("Upgraded project from schema v{from} to v{}; the original is kept as a backup when you save", filmcraft_format::SCHEMA_VERSION));
     }
     let missing = crate::relink::on_open(s);
-    Ok(json!({"path": path, "schemaVersion": from, "migrated": migrated, "missingMedia": missing}))
+    json!({"path": path, "schemaVersion": from, "migrated": migrated, "missingMedia": missing})
 }
 
 /// Load a recovery candidate (newest when `id` is None) as the current, unsaved project.
@@ -5502,7 +5562,17 @@ fn recover(s: &mut Session, id: Option<&str>) -> Result<Value> {
     let c = per.candidates.get(idx).cloned().ok_or_else(|| bad("file.recover", "no recovery session"))?;
     let saved_at = per.local_time(c.meta.saved_unix);
     let loaded = crate::autosave::load_candidate(&c).map_err(EngineError::Other)?;
-    install_project(s, loaded.project, c.meta.project_path.clone(), false);
+    let (project, path) = (loaded.project, c.meta.project_path.clone());
+    #[cfg(not(target_arch = "wasm32"))]
+    let (project, path) = match path {
+        Some(origin) if crate::folder_edit::is_manifest(&origin) => {
+            let project = filmcraft_format::project_folder::detached_project(project, std::path::Path::new(&origin), None)
+                .map_err(|e| EngineError::Other(format!("{origin}: {e}")))?;
+            (project, None)
+        }
+        other => (project, other),
+    };
+    install_project(s, project, path, false);
     if let Some(seq) = s.state.active_sequence {
         s.events.push(crate::Event::OpenSequence(seq));
     }

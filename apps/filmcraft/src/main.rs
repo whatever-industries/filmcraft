@@ -521,7 +521,7 @@ fn app_creator(
                 }
             }),
         );
-        let mut session = Session::default();
+        let mut session = Session::local_folder_editor();
         if let Some(dir) = data_dir.clone().or_else(default_data_dir) {
             let mut cfg = AutosaveConfig::new(dir);
             cfg.local_offset = local_offset;
@@ -666,7 +666,7 @@ fn app_creator(
         }));
         app.hooks.pick_open_project = Some(Box::new(|| {
             rfd::FileDialog::new()
-                .add_filter(filmcraft_ui_egui::i18n::t("FilmCraft Project"), &file_filters::extensions(&["fcproj"]))
+                .add_filter(filmcraft_ui_egui::i18n::t("FilmCraft Project"), &file_filters::extensions(&["fcproj", "fcmod"]))
                 // #1644: where the system MIME database doesn't know `.fcproj`, the project
                 // filter hides every saved project; "All files" keeps them reachable.
                 .add_filter(filmcraft_ui_egui::i18n::t("All files"), &file_filters::all_files())
@@ -835,6 +835,7 @@ fn run_dialog_off_thread(dialog: filmcraft_ui_egui::native_dialogs::FileDialog) 
     let all_files = t("All files");
     let all_files_exts = file_filters::all_files();
     let project_exts = project_patterns();
+    let project_open_exts = file_filters::extensions(&["fcproj", "fcmod"]);
     let dialog = prepare_dialog(dialog);
     let (tx, rx) = std::sync::mpsc::channel();
     let spawned = std::thread::Builder::new().name("file-dialog".into()).spawn(move || {
@@ -847,7 +848,7 @@ fn run_dialog_off_thread(dialog: filmcraft_ui_egui::native_dialogs::FileDialog) 
                 FileDialog::OpenFile { filter, exts } => rfd::FileDialog::new().add_filter(&filter, &exts).pick_file().map(path).into_iter().collect(),
                 FileDialog::Relink { exts, .. } => rfd::FileDialog::new().add_filter(&media, &exts).pick_file().map(path).into_iter().collect(),
                 FileDialog::OpenProject => rfd::FileDialog::new()
-                    .add_filter(&project, &project_exts)
+                    .add_filter(&project, &project_open_exts)
                     // #1644: same "All files" fallback as the synchronous picker, so a
                     // project hidden by an unregistered `.fcproj` MIME type stays openable.
                     .add_filter(&all_files, &all_files_exts)

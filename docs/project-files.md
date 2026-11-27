@@ -147,9 +147,39 @@ The first changed save upgrades the folder to layout version 2, which retains it
 manifests by digest. Each save still reads and validates the complete project. Shared
 filesystem locking requires separate qualification.
 
+### Save from the desktop editor
+
+Open the folder's `project.fcmod` with **File → Open Project**. The usual **Save**
+command publishes only changed bin, item, and project metadata records. Clean records
+keep their existing digests. A stale revision or a failed write leaves the editor's
+changes unsaved. Reopen the folder to load the latest published revision.
+
+The desktop uses the regular crash journal and rotating backups. The preference that
+also overwrites the current project applies to standard `.fcproj` files. Recovered
+folder drafts open as unsaved projects, so they can be saved separately. **Save a
+Copy** exports a standard project while keeping the folder open.
+
+For an open local folder, the engine also accepts three bin commands.
+
+| Command | Result |
+| --- | --- |
+| `project.binStatus {}` | Lists `dirtyBins` by ID and reports `projectSettingsDirty` and `unfiledItemsDirty`. |
+| `project.saveBin {"bin": id}` | Publishes that bin’s name, membership, directly owned items, timelines, and attached metadata. Saving an unchanged bin writes zero project-folder bytes. |
+| `project.discardBin {"bin": id}` | Restores that bin from the published revision. The revision stays the same. Independent edits remain available through Undo and Redo. |
+
+Project settings and notes wait for global Save. Saving a parent preserves edits in its child bins for their own save. If a moved child bin, moved media item, or missing source prevents a bin decision from being applied independently, the command reports the conflict. With crash recovery enabled, the editor confirms the remaining draft before acknowledging the decision. A recovery-cleanup failure after publication identifies the published revision, so retrying Save Bin can complete cleanup.
+
+An open bin appears once per editor session. Moving between bins leaves previous bins open. Closing a bin marked **Unsaved** offers **Save** and **Discard** for that bin. Once the choice succeeds, its directly owned timelines close. Other open sequences can continue playing sources from the closed bin. A bin must have an open view to receive a drop, and a background tab counts.
+
+Move Sequence 1 from Bin A to Bin B and save Bin B on close. The arrival takes the original ID so master timelines follow the saved cut. Bin A keeps its original record until you save its removal. An interrupted session reopens with the older cut as a stable independent copy in Bin A. The copy can initially share an immutable sequence payload. Saving an edit to the copy writes its own record.
+
+If you save Bin A first, the removal protects both the last explicit save and the cut as it left Bin A. Discarding Bin B then leaves Sequence 1 outside both bins. Master timelines still use the last explicitly saved cut. Discarding Bin B before saving Bin A leaves Bin A’s removal Unsaved. [Modular project rules and acceptance tests](modular-project-rules.md)
+
 ### Recover a sequence
 
 Run `project_folder history FOLDER` to list revision numbers and digests, newest first.
+Run `project_folder move-backups FOLDER` to list each recorded publication with its revision number, source bin ID, destination bin ID, sequence ID, last saved source digest, and departure snapshot digest. Use the last digest to recover the exact cut as it left the source bin.
+
 Use `project_folder restore-copy FOLDER BASE_REVISION HISTORICAL_REVISION SEQUENCE_ID`
 to add the old cut alongside the current one. The result prints the new project item ID
 and revision. The copy goes into the current cut's bin, or the root if the original

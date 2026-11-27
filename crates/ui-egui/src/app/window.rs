@@ -147,7 +147,9 @@ impl FilmcraftApp {
         // the list shows the whole tree: open the bins on the way. Icons and freeform show one bin
         // at a time: go into the one that holds the item.
         let list = self.session.prefs.project_panel.view.mode == filmcraft_engine::project_panel::ViewMode::List;
-        self.ui.project_panel.bin = if list || !found { None } else { bins.last().copied() };
+        let target = if list || !found { None } else { bins.last().copied() };
+        self.ui.project_panel.active_tab = None;
+        crate::panels::project::navigate(self, crate::panels::project::Inst::Main, target);
         if list {
             for b in bins {
                 if !self.ui.expanded_bins.contains(&b) {
@@ -155,7 +157,6 @@ impl FilmcraftApp {
                 }
             }
         }
-        self.ui.project_panel.active_tab = None;
         self.ui.project_panel.selected_bin = None;
         // the item's row may be below or above what the panel shows: it scrolls there (#4760)
         self.ui.project_panel.reveal = found.then_some(item.0);

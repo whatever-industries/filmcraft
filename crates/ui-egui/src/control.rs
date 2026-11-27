@@ -379,7 +379,18 @@ fn set_panel_views(app: &mut FilmcraftApp, p: &Value) -> Result<(), String> {
         let mut cur = if which == 0 { serde_json::to_value(&app.ui.project_panel) } else { serde_json::to_value(&app.ui.media_browser) }.unwrap_or_default();
         merge(&mut cur, patch);
         let r = if which == 0 {
-            serde_json::from_value(cur).map(|v| app.ui.project_panel = v)
+            serde_json::from_value(cur).map(|v| {
+                let previous = std::mem::replace(&mut app.ui.project_panel, v);
+                crate::panels::project::bin_views::normalize(app);
+                // Restoring a layout may relocate a bin. Only the close command ends its session.
+                if app.session.folder_revision().is_some() {
+                    for tab in previous.tabs {
+                        if !app.ui.project_panel.tabs.iter().any(|t| t.bin == tab.bin) {
+                            app.ui.project_panel.tabs.push(tab);
+                        }
+                    }
+                }
+            })
         } else {
             serde_json::from_value(cur).map(|v| app.ui.media_browser = v)
         };

@@ -26,6 +26,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
     crate::panels::caption_export::show(app, ctx);
     crate::panels::frame_export::show(app, ctx);
     crate::panels::project_dialogs::show(app, ctx);
+    crate::panels::project::bin_views::dialog(app, ctx);
     crate::panels::media_browser::dialogs(app, ctx);
     crate::panels::misc::history_dialogs(app, ctx);
     let Some(d) = app.dialog else { return };

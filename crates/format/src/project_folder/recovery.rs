@@ -1,9 +1,9 @@
 //! History is reachable from a single snapshot of the root. Rescue reads only the
 //! envelope and the selected sequence's transitive project-item dependencies.
 use super::{MANIFEST_LIMIT, Manifest, ROOT, check_hash, check_manifest, digest, encode_at, invalid, load_payload, read_member, read_records, revisions};
+use crate::{MAX_PROJECT_BYTES, atomic_write_new};
 use craft_fcproj_format::records::ProjectRecords;
-use filmcraft_format::{MAX_PROJECT_BYTES, atomic_write_new};
-use filmcraft_project::{ItemId, ItemKind, Project, ProjectItem};
+use filmcraft_project::{ItemId, Project, ProjectItem};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::{io, path::Path};
@@ -35,7 +35,7 @@ fn walk(folder: &Path, mut visit: impl FnMut(&str, &Manifest) -> io::Result<bool
     }
 }
 
-pub(in super::super) fn history(folder: &Path, mut visit: impl FnMut(u64, &str) -> io::Result<()>) -> io::Result<()> {
+pub fn history(folder: &Path, mut visit: impl FnMut(u64, &str) -> io::Result<()>) -> io::Result<()> {
     walk(folder, |hash, m| {
         visit(m.revision.as_ref().map_or(0, |r| r.number), hash)?;
         Ok(false)
@@ -43,21 +43,36 @@ pub(in super::super) fn history(folder: &Path, mut visit: impl FnMut(u64, &str) 
     Ok(())
 }
 
-fn at(folder: &Path, requested: &str) -> io::Result<Manifest> {
-    check_hash(requested)?;
-    walk(folder, |hash, _| Ok(requested == hash))?.ok_or_else(|| invalid("selected revision is outside the current project history"))
+pub fn move_backups(folder: &Path, mut visit: impl FnMut(u64, &super::MoveBackup) -> io::Result<()>) -> io::Result<()> {
+    walk(folder, |_, manifest| {
+        if let Some(rev) = &manifest.revision {
+            for backup in &rev.moves {
+                visit(rev.number, backup)?;
+            }
+        }
+        Ok(false)
+    })?;
+    Ok(())
 }
 
-fn references(item: &ProjectItem, pending: &mut Vec<u64>) {
-    match &item.kind {
-        ItemKind::Subclip { parent, .. } => pending.push(parent.0),
-        ItemKind::Sequence(seq) => {
-            pending.extend(seq.all_tracks().chain(&seq.submix_tracks).flat_map(|track| &track.items).map(|clip| clip.item.0));
-            pending.extend(seq.multicam.iter().flat_map(|m| &m.cameras).filter_map(|c| c.source).map(|id| id.0));
-            pending.extend(seq.merged.iter().flat_map(|m| m.video.iter().chain(&m.audio)).map(|id| id.0));
+fn at(folder: &Path, requested: &str) -> io::Result<Manifest> {
+    check_hash(requested)?;
+    let mut departure = false;
+    let manifest = walk(folder, |hash, m| {
+        departure = m.revision.as_ref().is_some_and(|r| r.moves.iter().any(|b| b.snapshot == requested));
+        Ok(departure || requested == hash)
+    })?
+    .ok_or_else(|| invalid("selected revision is outside the current project history"))?;
+    if departure {
+        let bytes = read_member(&folder.join(requested), MANIFEST_LIMIT)?;
+        if digest(&bytes) != requested {
+            return Err(invalid("damaged sequence move backup"));
         }
-        ItemKind::Script(script) => pending.extend(script.slates.iter().flat_map(|slate| &slate.takes).filter_map(|take| take.source).map(|id| id.0)),
-        ItemKind::Media(_) | ItemKind::Graphic { .. } | ItemKind::AdjustmentLayer { .. } => {}
+        let saved = serde_json::from_slice(&bytes)?;
+        check_manifest(&saved)?;
+        Ok(saved)
+    } else {
+        Ok(manifest)
     }
 }
 
@@ -83,7 +98,10 @@ fn extract(folder: &Path, manifest: &Manifest, sequence: u64) -> io::Result<Proj
             continue;
         }
         let hash = hashes.get(&id).filter(|_| inventory.contains(&id)).ok_or_else(|| invalid(format!("missing item {id}")))?;
-        let value = load_payload(folder, hash, &mut budget).map_err(|e| invalid(format!("item {id}: {e}")))?;
+        let mut value = load_payload(folder, hash, &mut budget).map_err(|e| invalid(format!("item {id}: {e}")))?;
+        if let Some(identity) = manifest.identities.get(&id) {
+            identity.apply(id, &mut value)?;
+        }
         let item: ProjectItem = serde_json::from_value(value.clone()).map_err(|e| invalid(format!("item {id}: {e}")))?;
         if item.id.0 != id {
             return Err(invalid(format!("mismatched item {id}")));
@@ -91,7 +109,7 @@ fn extract(folder: &Path, manifest: &Manifest, sequence: u64) -> io::Result<Proj
         if id == sequence && item.as_sequence().is_none() {
             return Err(invalid(format!("item {id} is not a sequence")));
         }
-        references(&item, &mut pending);
+        item.visit_source_items(|source| pending.push(source.0));
         items.insert(id, value);
     }
     for key in SIDECARS {
@@ -108,12 +126,17 @@ fn extract(folder: &Path, manifest: &Manifest, sequence: u64) -> io::Result<Proj
     Ok(ProjectRecords { envelope, bins: BTreeMap::from([(root, bin)]), items })
 }
 
-pub(in super::super) fn rescue(folder: &Path, revision: &str, sequence: u64, output: &Path) -> io::Result<()> {
+pub(super) fn verify_cut(folder: &Path, hash: &str, sequence: u64) -> io::Result<()> {
+    let cut = extract(folder, &at(folder, hash)?, sequence)?;
+    encode_at(folder, cut, &folder.join(ROOT)).map(|_| ())
+}
+
+pub fn rescue(folder: &Path, revision: &str, sequence: u64, output: &Path) -> io::Result<()> {
     let records = extract(folder, &at(folder, revision)?, sequence)?;
     atomic_write_new(output, &encode_at(folder, records, output)?)
 }
 
-pub(in super::super) fn restore_copy(folder: &Path, expected: &str, historical: &str, sequence: u64) -> io::Result<(u64, String)> {
+pub fn restore_copy(folder: &Path, expected: &str, historical: &str, sequence: u64) -> io::Result<(u64, String)> {
     let root = folder.join(ROOT);
     let current = read_member(&root, MANIFEST_LIMIT)?;
     if digest(&current) != expected {
@@ -136,7 +159,7 @@ pub(in super::super) fn restore_copy(folder: &Path, expected: &str, historical: 
             return Err(invalid(format!("dependency item {id} changed or is missing; use rescue to export the historical sequence")));
         }
     }
-    let project = filmcraft_format::decode(&super::assemble(folder, &manifest, &root)?).map_err(invalid)?.project;
+    let project = crate::decode(&super::assemble(folder, &manifest, &root)?).map_err(invalid)?.project;
     // The standard reader repairs low next_id values. Include this historical cut's
     // internal IDs too, even if they were deleted from the live project.
     let mut item = recovered.items.remove(&sequence).ok_or_else(|| invalid("missing selected sequence"))?;

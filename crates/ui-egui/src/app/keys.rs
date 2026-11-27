@@ -6,6 +6,9 @@ impl FilmcraftApp {
     pub(super) fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         // A paste image payload belongs to the paste event in this pass only.
         self.pasted_image = None;
+        if self.bin_views.prompt_open() {
+            return;
+        }
         let workspaces = (dock::names(&self.workspaces), self.ui.workspace.clone());
         if self.bindings_rev != self.session.shortcuts.revision || workspaces != self.menu_workspaces {
             self.menu_workspaces = workspaces;
@@ -56,7 +59,8 @@ impl FilmcraftApp {
         }
         // The runtime keeps egui's focus on the framework stop or the hosted canvas a press reached,
         // so egui's own `egui_wants_keyboard_input` would end every shortcut after a click on a panel.
-        if crate::framework::keyboard_taken(ctx) || self.dialog == Some(Dialog::Shortcuts) || self.ui.clip_dialog.is_some() {
+        let bin_button = panels::project::bin_views::owns_button_focus(self, ctx);
+        if (crate::framework::keyboard_taken(ctx) && !bin_button) || self.dialog == Some(Dialog::Shortcuts) || self.ui.clip_dialog.is_some() {
             return;
         }
         // A focused text field takes every unmodified key, including the ones our shortest
@@ -75,12 +79,12 @@ impl FilmcraftApp {
         // A focused dock divider or floating-window grip takes the arrow keys to nudge it, but no
         // other key: Space and the other shortcuts keep working (#1482).
         let divider_focused = crate::dock_ui::divider_focused(ctx);
-        let fire = ctx.input_mut(|i| self.match_shortcuts(i, text_focused, divider_focused, label_selected));
+        let fire = ctx.input_mut(|i| self.match_shortcuts(i, text_focused, divider_focused, label_selected, bin_button));
         self.fire_shortcuts(ctx, fire);
     }
 
     /// The binding ids the key presses in `i` fire, consuming those presses.
-    fn match_shortcuts(&mut self, i: &mut egui::InputState, text_focused: bool, divider_focused: bool, label_selected: bool) -> Vec<String> {
+    fn match_shortcuts(&mut self, i: &mut egui::InputState, text_focused: bool, divider_focused: bool, label_selected: bool, bin_button: bool) -> Vec<String> {
         // Panel shortcuts of the focused panel override application shortcuts on the same chord.
         // A chord fires only with exactly its modifiers held (`menus::chord_held`), except that a
         // punctuation or digit key may carry the Shift or Alt a layout needs to type it, so the
@@ -128,6 +132,12 @@ impl FilmcraftApp {
         let mut candidates: Vec<&menus::KeyBinding> = panel.chain(app_wide).collect();
         candidates.sort_by_key(|b| std::cmp::Reverse(menus::specificity(b.0)));
         for (m, k, id, _) in candidates {
+            // Bin chrome retains ordinary button navigation and activation. The
+            // two document commands still work with actual egui focus on a tab.
+            if bin_button && !matches!(id.as_str(), "file.save" | "projectPanel.closeBinTab") {
+                continue;
+            }
+
             // With a text field focused, an unmodified key belongs to the field (and to the input
             // method composing in it), not to a tool shortcut: `J`, `Z`, `R`, `A`… are the keys
             // Vietnamese Telex combines into diacritics (#243). Chords with a modifier stay:
@@ -399,7 +409,7 @@ mod key_repeat_tests {
         app.ui.focused = crate::dock::PanelKind::Timeline;
         let mut input = egui::InputState::default();
         input.events = events;
-        app.match_shortcuts(&mut input, false, false, false)
+        app.match_shortcuts(&mut input, false, false, false, false)
     }
 
     /// Holding Space sends one press and then OS key repeats: Play/Stop runs once, not once per
@@ -444,7 +454,7 @@ mod exact_modifier_tests {
         let mut input = egui::InputState::default();
         input.modifiers = modifiers;
         input.events = vec![Event::Key { key, physical_key: Some(key), pressed: true, repeat: false, modifiers }];
-        app.match_shortcuts(&mut input, false, false, false)
+        app.match_shortcuts(&mut input, false, false, false, false)
     }
 
     /// The bug: on a Mac, Ctrl+Opt+Cmd+N ran File ▸ New ▸ Project (Cmd+Opt+N) and its "discard

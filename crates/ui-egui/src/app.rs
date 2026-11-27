@@ -30,6 +30,7 @@ impl FilmcraftApp {
         let ime_active_sequence = session.state.active_sequence;
         Self {
             session,
+            bin_views: Default::default(),
             ui: UiState { language, ..UiState::default() },
             tokens: Tokens::for_kind(ThemeKind::Dark),
             frames,
@@ -383,6 +384,7 @@ impl FilmcraftApp {
             // Setup and fresh-input handling happen where `RawInput::events` are available. Pass 1+
             // has no new events and must not re-run a click, shortcut or drop.
             self.auto.begin_frame();
+            panels::project::bin_views::sync(self);
             self.apply_prefs(&ctx);
             self.sync_timeline_view();
             self.ui.script.sync_project(&self.session.project_instance);

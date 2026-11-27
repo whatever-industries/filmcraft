@@ -23,7 +23,7 @@ fn relative_to(target: &Path, base: &Path) -> Option<PathBuf> {
     Some(result)
 }
 
-fn relocated(stored: &str, old: &Path, new: &Path) -> io::Result<Option<String>> {
+pub(super) fn relocated(stored: &str, old: &Path, new: &Path) -> io::Result<Option<String>> {
     let resolve = |s: &str, doc: &Path| craft_docpath::resolve(s, Some(doc));
     let original = resolve(stored, old);
     // An explicit network path already names its target independently of the document.

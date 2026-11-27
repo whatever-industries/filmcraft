@@ -11,6 +11,8 @@
 //! The views are drawn by `project_views`, the dialogs (Metadata Display…, view presets, Freeform
 //! View Options…, Save Arrangement…) by `project_dialogs`.
 
+pub(crate) mod bin_views;
+
 use egui::{Align2, Color32, Rect, Sense, Stroke, pos2, vec2};
 use filmcraft_engine::project_panel::{FontSize, ViewMode};
 use filmcraft_project::{BinId, ItemId, ItemKind};
@@ -192,6 +194,11 @@ pub fn set_mode(app: &mut FilmcraftApp, inst: Inst, mode: ViewMode, actions: &mu
 /// Show a bin in place in a panel instance (None = its top: the root or the tab's bin).
 pub fn navigate(app: &mut FilmcraftApp, inst: Inst, bin: Option<u64>) {
     let root = app.session.project.root.id.0;
+    if bin_views::modular(app) {
+        let _ = bin_views::open(app, inst, bin.unwrap_or(root), "openInPlace", false);
+        app.ui.project_panel.selected_bin = None;
+        return;
+    }
     match inst {
         Inst::Main => app.ui.project_panel.bin = bin.filter(|b| *b != root),
         Inst::Tab(k) => {
@@ -210,6 +217,7 @@ pub fn open_bin(app: &mut FilmcraftApp, inst: Inst, bin: u64, how: Option<&str>,
         return Err(format!("no bin {bin}"));
     }
     let g = &app.session.prefs.general;
+    let explicit = how.is_some() || mods.command || mods.alt;
     let how = how.map(str::to_string).unwrap_or_else(|| {
         if mods.command {
             g.bins_cmd_double_click.clone()
@@ -219,6 +227,9 @@ pub fn open_bin(app: &mut FilmcraftApp, inst: Inst, bin: u64, how: Option<&str>,
             g.bins_double_click.clone()
         }
     });
+    if bin_views::modular(app) {
+        return bin_views::open(app, inst, bin, &how, explicit);
+    }
     let pp = &mut app.ui.project_panel;
     let (view, icon_size) = (app.session.prefs.project_panel.view.mode, app.session.prefs.project_panel.view.icon_size);
     match how.as_str() {
@@ -247,7 +258,7 @@ pub fn open_bin(app: &mut FilmcraftApp, inst: Inst, bin: u64, how: Option<&str>,
 }
 
 /// Close a bin tab or floating bin panel.
-pub fn close_tab(app: &mut FilmcraftApp, k: usize) {
+fn remove_tab(app: &mut FilmcraftApp, k: usize) {
     let pp = &mut app.ui.project_panel;
     if k >= pp.tabs.len() {
         return;
@@ -290,7 +301,17 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let docked: Vec<usize> = app.ui.project_panel.tabs.iter().enumerate().filter(|(_, t)| !t.floating).map(|(k, _)| k).collect();
     if !docked.is_empty() {
         let strip = Rect::from_min_size(rect.min, vec2(rect.width(), 24.0));
-        tab_strip(app, ui, strip, &docked);
+        if bin_views::modular(app) {
+            let mut row = ui.new_child(egui::UiBuilder::new().max_rect(strip));
+            egui::ScrollArea::horizontal().id_salt("modular-bin-tabs").auto_shrink([false, false]).show(&mut row, |ui| {
+                let content = Rect::from_min_size(ui.cursor().min, strip.size());
+                let width = tab_strip(app, ui, content, &docked);
+                ui.set_min_size(vec2(width, strip.height()));
+            });
+        } else {
+            tab_strip(app, ui, strip, &docked);
+        }
+
         rect.min.y = strip.max.y;
     }
     let inst = shown_inst(app);
@@ -299,7 +320,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     run(app, ui.ctx(), actions);
 }
 
-fn tab_strip(app: &mut FilmcraftApp, ui: &mut egui::Ui, strip: Rect, docked: &[usize]) {
+fn tab_strip(app: &mut FilmcraftApp, ui: &mut egui::Ui, strip: Rect, docked: &[usize]) -> f32 {
     let t = app.tokens;
     ui.painter().line_segment([strip.left_bottom(), strip.right_bottom()], Stroke::new(1.0, t.separator));
     let mut x = strip.min.x + 6.0;
@@ -307,6 +328,7 @@ fn tab_strip(app: &mut FilmcraftApp, ui: &mut egui::Ui, strip: Rect, docked: &[u
     let mut entries: Vec<(Option<usize>, String)> = vec![(None, tlf!("Project: {name}", name = app.session.project.name))];
     for k in docked {
         let name = app.session.project.root.find_bin(BinId(app.ui.project_panel.tabs[*k].bin)).map(|b| b.name.clone()).unwrap_or_default();
+        let name = bin_views::label(app, app.ui.project_panel.tabs[*k].bin, &name);
         entries.push((Some(*k), tlf!("Bin: {name}", name)));
     }
     let mut close = None;
@@ -321,18 +343,34 @@ fn tab_strip(app: &mut FilmcraftApp, ui: &mut egui::Ui, strip: Rect, docked: &[u
         };
         let id = k.map_or("project.tab.project".to_string(), |k| format!("project.tab.{k}"));
         let resp = ui.interact(r, egui::Id::unique(&id), Sense::click());
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, is_active, &label));
+        ui.ctx().accesskit_node_builder(resp.id, |node| {
+            node.set_role(egui::accesskit::Role::Tab);
+            node.set_selected(is_active);
+        });
+        let bin = k.map(|k| app.ui.project_panel.tabs[k].bin);
+        if app.bin_views.bring_forward == Some(bin.unwrap_or(app.session.project.root.id.0)) {
+            ui.scroll_to_rect(r, None);
+            resp.request_focus();
+            app.bin_views.bring_forward = None;
+        }
         app.auto.add(&id, r, &label);
         if is_active || resp.hovered() {
             ui.painter().rect_filled(r, 3.0, if is_active { t.pressed } else { t.hover });
         }
         ui.painter().galley(pos2(r.min.x + 8.0, r.center().y - g.size().y / 2.0), g, if is_active { t.tab_text_active } else { t.tab_text });
+        crate::dock::paint_widget_focus(ui.painter(), &resp, &t);
         if resp.clicked() {
+            bin_views::focus(app, bin);
             app.ui.project_panel.active_tab = k;
         }
         if let Some(k) = k {
             let cr = Rect::from_center_size(pos2(r.max.x - 11.0, r.center().y), vec2(12.0, 12.0));
             let cresp = ui.interact(cr, egui::Id::unique(("ptab-close", k)), Sense::click()).on_hover_text(tl!("Close"));
-            app.auto.add(&format!("project.tab.{k}.close"), cr, "Close");
+            let close_name = tlf!("Close {label}", label);
+            cresp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &close_name));
+            crate::dock::paint_widget_focus(ui.painter(), &cresp, &t);
+            app.auto.add(&format!("project.tab.{k}.close"), cr, &close_name);
             icons::paint(ui.painter(), cr.shrink(2.0), Icon::Close, if cresp.hovered() { t.text } else { t.text_dim });
             if cresp.clicked() || resp.middle_clicked() {
                 close = Some(k);
@@ -341,8 +379,9 @@ fn tab_strip(app: &mut FilmcraftApp, ui: &mut egui::Ui, strip: Rect, docked: &[u
         x = r.max.x + 4.0;
     }
     if let Some(k) = close {
-        close_tab(app, k);
+        let _ = bin_views::request_close(app, k);
     }
+    x - strip.min.x
 }
 
 /// Floating bin panels (Open in New Window); drawn every frame by the panel layer.
@@ -361,8 +400,11 @@ pub fn floating(app: &mut FilmcraftApp, ctx: &egui::Context) {
         };
         let mut open = true;
         let root = app.ui.project_panel.tabs[k].bin == app.session.project.root.id.0;
-        egui::Window::new(if root { tlf!("Project: {name}", name = app.session.project.name) } else { tlf!("Bin: {name}", name) })
-            .id(egui::Id::unique(("bin-window", k)))
+        let bin = app.ui.project_panel.tabs[k].bin;
+        let name = bin_views::label(app, bin, &name);
+        let window_id = if bin_views::modular(app) { egui::Id::unique(("folder-bin-window", bin)) } else { egui::Id::unique(("bin-window", k)) };
+        let response = egui::Window::new(if root { tlf!("Project: {name}", name = app.session.project.name) } else { tlf!("Bin: {name}", name) })
+            .id(window_id)
             .open(&mut open)
             .default_size(vec2(520.0, 360.0))
             .min_size(vec2(320.0, 220.0))
@@ -377,12 +419,22 @@ pub fn floating(app: &mut FilmcraftApp, ctx: &egui::Context) {
                 child.set_clip_rect(r);
                 body(app, &mut child, r, &v, &mut actions);
             });
+        if let Some(window) = response {
+            if app.bin_views.bring_forward == Some(bin) {
+                ctx.move_to_top(window.response.layer_id);
+                ctx.memory_mut(|m| m.request_focus(egui::Id::unique((&format!("projectBin.{k}"), "up"))));
+                app.bin_views.bring_forward = None;
+            }
+            if window.response.contains_pointer() && ctx.input(|i| i.pointer.any_pressed()) {
+                bin_views::focus(app, Some(bin));
+            }
+        }
         if !open {
             close = Some(k);
         }
     }
     if let Some(k) = close {
-        close_tab(app, k);
+        let _ = bin_views::request_close(app, k);
     }
     run(app, ctx, actions);
 }
@@ -399,6 +451,9 @@ fn run(app: &mut FilmcraftApp, ctx: &egui::Context, actions: Actions) {
 fn body(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, v: &View, actions: &mut Actions) {
     let t = app.tokens;
     let pre = v.prefix.clone();
+    if bin_views::modular(app) && ui.rect_contains_pointer(rect) && ui.input(|i| i.pointer.any_pressed()) {
+        bin_views::focus(app, Some(v.bin.0));
+    }
     // breadcrumb: up one level, project file and bin path
     let head = Rect::from_min_size(rect.min + vec2(8.0, 2.0), vec2(rect.width() - 16.0, HEADER_H - 2.0));
     let root_id = app.session.project.root.id;
@@ -409,7 +464,13 @@ fn body(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, v: &View, actions
     let up = Rect::from_min_size(pos2(head.min.x, head.center().y - 11.0), vec2(24.0, 22.0));
     let up_resp = ui.interact(up, egui::Id::unique((&pre, "up")), Sense::click()).on_hover_text(tl!("Up one level"));
     app.auto.add(&format!("{pre}.up"), up, "Up one level");
-    let can_up = v.bin != top;
+    if app.bin_views.bring_forward == Some(root_id.0) && v.bin == root_id {
+        up_resp.request_focus();
+        app.bin_views.bring_forward = None;
+    }
+    up_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tl!("Up one level")));
+    crate::dock::paint_widget_focus(ui.painter(), &up_resp, &t);
+    let can_up = v.bin != top || bin_views::modular(app) && v.bin != root_id;
     // a bordered button while there is a level to go up to, so it reads as clickable
     if can_up {
         ui.painter().rect_filled(up, 3.0, if up_resp.hovered() { t.hover } else { t.field_bg });
@@ -913,6 +974,7 @@ pub fn panel_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui) -> bool {
 
 /// Project panel UI commands routed from `projectPanel.*` (see `panels::keyboard`).
 pub fn route(app: &mut FilmcraftApp, ctx: &egui::Context, op: &str, params: &Value) -> Option<Result<Value, String>> {
+    bin_views::sync(app);
     let inst = shown_inst(app);
     Some(match op {
         "markIn" | "markOut" => hover_mark(app, ctx, op == "markIn"),
@@ -940,14 +1002,12 @@ pub fn route(app: &mut FilmcraftApp, ctx: &egui::Context, op: &str, params: &Val
             Ok(json!({"bin": view_of(app, inst).bin.0}))
         }
         "closeBinTab" => {
-            let k = params.get("tab").and_then(Value::as_u64).map(|k| k as usize).or(app.ui.project_panel.active_tab);
-            match k {
-                Some(k) if k < app.ui.project_panel.tabs.len() => {
-                    close_tab(app, k);
-                    Ok(Value::Null)
-                }
-                _ => Err("no such bin tab".into()),
-            }
+            let k = if let Some(bin) = params.get("bin").and_then(Value::as_u64) {
+                app.ui.project_panel.tabs.iter().position(|t| t.bin == bin)
+            } else {
+                params.get("tab").and_then(Value::as_u64).and_then(|k| usize::try_from(k).ok()).or_else(|| bin_views::focused_index(app))
+            };
+            k.ok_or_else(|| "no such bin tab".to_owned()).and_then(|k| bin_views::request_close(app, k))
         }
         "metadataDisplay" => {
             let columns = app.session.prefs.project_panel.view.columns.iter().map(|c| c.name.clone()).collect();
@@ -994,6 +1054,7 @@ pub fn route(app: &mut FilmcraftApp, ctx: &egui::Context, op: &str, params: &Val
             let Some(p) = app.session.path.clone() else { return Some(Err("the project has not been saved".into())) };
             crate::panels::menu_dialogs::open_path(app, ctx, &p, true).map(|_| json!({"path": p}))
         }
+        "newPanel" if bin_views::modular(app) => bin_views::open(app, inst, app.session.project.root.id.0, "openInPlace", false),
         "newPanel" => {
             // a second Project panel: the project's root in a floating panel
             let root = app.session.project.root.id.0;

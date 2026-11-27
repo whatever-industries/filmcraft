@@ -463,6 +463,9 @@ pub fn clear_params(selection: &[filmcraft_project::ItemId], selected_bin: Optio
 /// Drop project items dragged onto a bin: move them (the selection when the dragged item is in it).
 /// A dragged bin nests in it, unless that would put the bin inside itself.
 fn accept_bin_drop(app: &FilmcraftApp, ui: &egui::Ui, r: Rect, bin: u64, actions: &mut Actions) -> bool {
+    if !ui.rect_contains_pointer(r) {
+        return false;
+    }
     let items: Vec<u64> = if let Some(item) = crate::panels::dragged_project_item(ui) {
         let sel = &app.session.state.project_selection;
         if sel.contains(&item) { sel.iter().map(|i| i.0).collect() } else { vec![item.0] }
@@ -475,7 +478,10 @@ fn accept_bin_drop(app: &FilmcraftApp, ui: &egui::Ui, r: Rect, bin: u64, actions
     } else {
         return false;
     };
-    if !ui.rect_contains_pointer(r) {
+    if app.session.folder_revision().is_some() && bin != app.session.project.root.id.0 && !app.ui.project_panel.tabs.iter().any(|t| t.bin == bin) {
+        if ui.input(|i| i.pointer.any_released()) {
+            crate::panels::clear_drag(ui);
+        }
         return false;
     }
     ui.painter().rect_stroke(r, 3.0, Stroke::new(1.5, app.tokens.accent), StrokeKind::Inside);

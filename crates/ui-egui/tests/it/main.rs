@@ -43,6 +43,7 @@ mod media_ui;
 mod menus_ui;
 mod meters_ui;
 mod mixer_ui;
+mod modular_bin_ui;
 mod monitor_geometry;
 mod multicam_ui;
 mod native_dialogs_ui;

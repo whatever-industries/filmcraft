@@ -211,6 +211,7 @@ struct NativeTimelineDrop {
 pub struct FilmcraftApp {
     pub session: Session,
     pub ui: UiState,
+    bin_views: panels::project::bin_views::Runtime,
     pub tokens: Tokens,
     pub frames: Arc<FrameServer>,
     pub playback: Playback,

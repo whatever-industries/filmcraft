@@ -1,0 +1,281 @@
+//! Local project-folder backing for the editor's ordinary open and save commands.
+use crate::{EngineError, Result, Session};
+use filmcraft_format::project_folder::{Departure, DepartureCut, FolderSnapshot, TransferSave};
+use filmcraft_project::{BinId, ItemId, Project, ProjectView};
+use serde_json::{Value, json};
+use std::{path::Path, sync::Arc};
+
+#[derive(Clone)]
+enum CapturedCut {
+    Working(Arc<Project>),
+    Archived(String),
+}
+
+#[derive(Clone)]
+pub(crate) struct CapturedMove {
+    destination: BinId,
+    saved_source: String,
+    cut: CapturedCut,
+}
+
+type Departures = std::collections::BTreeMap<(BinId, ItemId), CapturedMove>;
+
+pub(crate) struct EditingFolder {
+    pub departures: Departures,
+    pub cleanup: Option<BinId>,
+    pub snapshot: FolderSnapshot,
+    pub project: Arc<Project>,
+    pub view: ProjectView,
+}
+
+impl EditingFolder {
+    // Captures share the immutable pre-drag project. Only the moved sequence
+    // and its transitive sources are serialized when a bin is actually saved.
+    pub(crate) fn capture_moves(&mut self, before: &Arc<Project>, after: &Project) {
+        if before.root == after.root {
+            return;
+        }
+        for item in before.sequences() {
+            if let (Some(source), Some(destination)) = (before.root.parent_of(item.id), after.root.parent_of(item.id))
+                && source != destination
+            {
+                // A round trip before either save cancels the removal. Only a
+                // previously published source can have an outstanding removal.
+                self.departures.remove(&(destination, item.id));
+                if self.project.root.parent_of(item.id) == Some(source) {
+                    self.departures.insert(
+                        (source, item.id),
+                        CapturedMove { destination, saved_source: self.snapshot.revision().to_owned(), cut: CapturedCut::Working(before.clone()) },
+                    );
+                } else {
+                    for ((_, seq), capture) in &mut self.departures {
+                        if *seq == item.id && capture.destination == source {
+                            capture.destination = destination;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn transfers<'a>(captures: &'a Departures, working: &Project, bin: Option<BinId>) -> TransferSave<'a> {
+        let departures = captures
+            .iter()
+            .filter_map(|(&(source, sequence), capture)| {
+                let owner = working.root.parent_of(sequence);
+                if owner == Some(source) || bin.is_some_and(|b| b != source && (b != capture.destination || Some(b) != owner)) {
+                    return None;
+                }
+                let cut = match &capture.cut {
+                    CapturedCut::Working(project) => DepartureCut::Working(project),
+                    CapturedCut::Archived(hash) => DepartureCut::Archived(hash),
+                };
+                Some(Departure { sequence, source, destination: capture.destination, saved_source: &capture.saved_source, cut })
+            })
+            .collect();
+        TransferSave { copies: Vec::new(), departures }
+    }
+}
+
+pub(crate) fn is_manifest(path: &str) -> bool {
+    Path::new(path).file_name().is_some_and(|name| name == filmcraft_format::project_folder::ROOT)
+}
+
+impl Session {
+    /// Enable explicit project-folder opens in a trusted local filesystem editor.
+    pub fn local_folder_editor() -> Self {
+        Self { allow_project_folders: true, ..Self::default() }
+    }
+
+    pub(crate) fn save_folder(&mut self, path: &str) -> Result<Value> {
+        let started = web_time::Instant::now();
+        let view = self.project_view();
+        let folder = self.editing_folder.as_mut().ok_or_else(|| EngineError::Other("open this project folder before saving it".into()))?;
+        let moves = EditingFolder::transfers(&folder.departures, &self.project, None);
+        let saved = folder
+            .snapshot
+            .save_transfers(&folder.project, &folder.view, &self.project, &view, moves)
+            .map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+        folder.departures.clear();
+        folder.project = self.project.clone();
+        folder.view = view;
+        self.saved_revision = self.revision;
+        self.previews_follow_path();
+        self.note_recent_project();
+        Ok(json!({"path":path,"bytes":saved.bytes,"ms":started.elapsed().as_secs_f64()*1000.0,"backup":null,"folderRevision":saved.revision}))
+    }
+}
+
+mod scope;
+
+pub(crate) fn available(s: &Session) -> std::result::Result<(), String> {
+    s.editing_folder.as_ref().map(|_| ()).ok_or_else(|| "open a local project folder first".into())
+}
+
+fn bin_id(p: &Value, saved: &Project, working: &Project) -> Result<BinId> {
+    let id = BinId(p.get("bin").and_then(Value::as_u64).ok_or_else(|| EngineError::Other("expected a numeric bin id".into()))?);
+    if saved.root.find_bin(id).is_none() && working.root.find_bin(id).is_none() {
+        return Err(EngineError::Other(format!("unknown bin {}", id.0)));
+    }
+    Ok(id)
+}
+
+fn checkpoint(worker: Option<&crate::autosave::Persistence>, project: Option<Arc<Project>>, revision: u64, path: Option<String>) -> std::io::Result<()> {
+    if let Some(worker) = worker {
+        worker.replace_bin_journal(project, revision, path).map_err(std::io::Error::other)?;
+    }
+    Ok(())
+}
+
+type Entry = (String, Arc<Project>, Option<String>);
+
+fn rebased_history(history: &[Entry], saved: &Project, id: BinId, current: &Arc<Project>) -> Vec<Entry> {
+    let mut result = Vec::new();
+    let mut newer = current.clone();
+    for (label, previous, origin) in history.iter().rev() {
+        // Undo and redo store complete documents. Project each reachable state onto
+        // the retained bin, dropping empty steps and incompatible historical moves.
+        let rebased = if scope::status(previous, saved).bins.contains(&id) {
+            let Ok(project) = scope::project_bin(previous, saved, id) else { continue };
+            Arc::new(project)
+        } else {
+            previous.clone()
+        };
+        if scope::status(&newer, &rebased).dirty() {
+            newer = rebased;
+            result.push((label.clone(), newer.clone(), origin.clone()));
+        }
+    }
+    result.reverse();
+    result
+}
+
+impl Session {
+    fn folder(&self) -> Result<&EditingFolder> {
+        self.editing_folder.as_ref().ok_or_else(|| EngineError::Other("open a local project folder first".into()))
+    }
+
+    pub fn bin_has_move_removal(&self, bin: BinId) -> bool {
+        self.editing_folder.as_ref().is_some_and(|f| f.departures.keys().any(|(source, seq)| *source == bin && self.project.root.parent_of(*seq) != Some(bin)))
+    }
+
+    pub fn dirty_folder_bins(&self) -> std::collections::BTreeSet<BinId> {
+        self.editing_folder.as_ref().map(|f| scope::status(&f.project, &self.project).bins).unwrap_or_default()
+    }
+
+    pub(crate) fn bin_status(&mut self, _: &Value) -> Result<Value> {
+        let status = scope::status(&self.folder()?.project, &self.project);
+        Ok(json!({"dirtyBins":status.bins,"projectSettingsDirty":status.settings,"unfiledItemsDirty":status.unfiled}))
+    }
+
+    pub(crate) fn refresh_folder_dirty(&mut self) {
+        if let Some(folder) = &self.editing_folder {
+            if self.project.next_id < folder.project.next_id {
+                Arc::make_mut(&mut self.project).next_id = folder.project.next_id;
+            }
+            if !scope::status(&folder.project, &self.project).dirty() {
+                self.saved_revision = self.revision;
+            }
+        }
+    }
+
+    pub(crate) fn save_bin(&mut self, p: &Value) -> Result<Value> {
+        let folder = self.folder()?;
+        let id = bin_id(p, &folder.project, &self.project)?;
+        let status = scope::status(&folder.project, &self.project);
+        if !status.bins.contains(&id) {
+            folder
+                .snapshot
+                .while_current(|| checkpoint(self.persistence.as_ref(), status.dirty().then(|| self.project.clone()), self.revision, self.path.clone()))
+                .map_err(|e| EngineError::Other(format!("no new folder revision was published: {e}")))?;
+            if let Some(f) = &mut self.editing_folder {
+                f.cleanup = None;
+            }
+            if !status.dirty() {
+                self.saved_revision = self.revision;
+            }
+            return Ok(json!({"bin":id,"bytes":0,"folderRevision":self.folder()?.snapshot.revision()}));
+        }
+        let mut copies = Vec::new();
+        let partial = Arc::new(scope::project_transfer(&folder.project, &self.project, id, true, &mut copies)?);
+        let remaining = scope::status(&partial, &self.project).dirty();
+        let mut view = folder.view.clone();
+        view.open_sequences.retain(|id| partial.sequence(*id).is_some());
+        view.active_sequence = view.active_sequence.filter(|id| partial.sequence(*id).is_some());
+        view.sequences.retain(|id, _| partial.sequence(*id).is_some());
+        view.playheads.retain(|id, _| partial.sequence(*id).is_some());
+        if remaining && self.persistence.is_some() {
+            folder
+                .snapshot
+                .while_current(|| checkpoint(self.persistence.as_ref(), Some(self.project.clone()), self.revision, self.path.clone()))
+                .map_err(|e| EngineError::Other(format!("bin was not saved: {e}")))?;
+        }
+        let folder = self.editing_folder.as_mut().ok_or_else(|| EngineError::Other("missing project folder".into()))?;
+        let mut moves = EditingFolder::transfers(&folder.departures, &self.project, Some(id));
+        moves.copies = copies;
+        let saved = folder
+            .snapshot
+            .save_transfers(&folder.project, &folder.view, &partial, &view, moves)
+            .map_err(|e| EngineError::Other(format!("bin was not saved: {e}")))?;
+        for backup in &saved.move_backups {
+            if let Some(capture) = folder.departures.get_mut(&(BinId(backup.source), ItemId(backup.sequence))) {
+                capture.cut = CapturedCut::Archived(backup.snapshot.clone());
+            }
+        }
+        folder.departures.retain(|(source, _), _| *source != id);
+        if self.project.next_id < partial.next_id {
+            Arc::make_mut(&mut self.project).next_id = partial.next_id;
+        }
+        folder.project = partial;
+        folder.view = view;
+        self.history.merge_key = None;
+        if !remaining {
+            self.saved_revision = self.revision;
+            folder.cleanup = Some(id);
+            checkpoint(self.persistence.as_ref(), None, self.revision, self.path.clone())
+                .map_err(|e| EngineError::BinPublished { revision: saved.revision.clone(), message: e.to_string() })?;
+        }
+        folder.cleanup = None;
+        Ok(json!({"bin":id,"bytes":saved.bytes,"folderRevision":saved.revision}))
+    }
+
+    pub(crate) fn discard_bin(&mut self, p: &Value) -> Result<Value> {
+        let folder = self.folder()?;
+        let id = bin_id(p, &folder.project, &self.project)?;
+        let status = scope::status(&folder.project, &self.project);
+        if !status.bins.contains(&id) {
+            folder
+                .snapshot
+                .while_current(|| checkpoint(self.persistence.as_ref(), status.dirty().then(|| self.project.clone()), self.revision, self.path.clone()))
+                .map_err(|e| EngineError::Other(e.to_string()))?;
+            return Ok(json!({"bin":id,"discarded":false,"folderRevision":folder.snapshot.revision()}));
+        }
+        let next = Arc::new(scope::project_bin(&self.project, &folder.project, id)?);
+        let remaining = scope::status(&folder.project, &next).dirty();
+        let undo = rebased_history(&self.history.undo, &folder.project, id, &next);
+        let redo = rebased_history(&self.history.redo, &folder.project, id, &next);
+        let rev = folder.snapshot.revision().to_owned();
+        folder
+            .snapshot
+            .while_current(|| checkpoint(self.persistence.as_ref(), remaining.then(|| next.clone()), self.revision + 1, self.path.clone()))
+            .map_err(|e| EngineError::Other(format!("bin was not discarded: {e}")))?;
+        if let Some(folder) = &mut self.editing_folder {
+            // Restoring the source bin cancels that outstanding departure. A
+            // destination that is still open keeps its independently editable cut.
+            folder.departures.retain(|(source, _), _| *source != id);
+        }
+        self.project = next;
+        self.history.undo = undo;
+        self.history.redo = redo;
+        self.history.merge_key = None;
+        self.fix_state();
+        self.bump();
+        if !remaining {
+            self.saved_revision = self.revision;
+        }
+        Ok(json!({"bin":id,"discarded":true,"folderRevision":rev}))
+    }
+}
+
+#[cfg(test)]
+mod tests;

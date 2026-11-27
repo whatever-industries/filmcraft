@@ -142,3 +142,110 @@ fn open_demo_project_clears_saved_path_so_save_does_not_overwrite() {
     );
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn editor_save_publishes_only_changed_records_and_rejects_stale_or_damaged_projects() {
+    use filmcraft_format::project_folder::{ROOT, pack, unpack};
+    use filmcraft_project::BinEntry;
+    use std::fs;
+
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("edit.fcproj");
+    let fixture = include_bytes!("../../format/tests/fixtures/v1-edit.fcproj");
+    let project = filmcraft_format::decode(fixture).unwrap().project;
+    fs::write(&source, filmcraft_format::encode(&project, false)).unwrap();
+    let folder = temp.path().join("folder");
+    pack(&source, &folder, filmcraft_format::atomic_write_new).unwrap();
+    let path = folder.join(ROOT);
+    let manifest = || serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap();
+
+    let mut first = Session::local_folder_editor();
+    let open = first.execute("file.open", json!({"path": path})).unwrap();
+    assert!(Session::default().execute("file.open", json!({"path": path})).is_err());
+    let mut stale = Session::local_folder_editor();
+    stale.execute("file.open", json!({"path": path})).unwrap();
+    let noop = first.execute("file.save", json!({})).unwrap();
+    assert_eq!(noop["folderRevision"], open["folderRevision"]);
+    assert_eq!(noop["bytes"], 0);
+    let before = manifest();
+
+    let bin = first
+        .project
+        .root
+        .children
+        .iter()
+        .find_map(|entry| match entry {
+            BinEntry::Bin(bin) => Some(bin.id),
+            _ => None,
+        })
+        .unwrap();
+    first.execute("project.renameBin", json!({"bin":bin, "name":"Camera originals"})).unwrap();
+    first.execute("file.projectSettings.general", json!({"titleSafe":[15,12]})).unwrap();
+    first.execute("file.save", json!({})).unwrap();
+    let saved = manifest();
+    assert_eq!(saved["items"], before["items"]);
+    let changes = saved["bins"].as_array().unwrap().iter().zip(before["bins"].as_array().unwrap()).filter(|(a, b)| a != b).count();
+    assert_eq!(changes, 1);
+    assert_ne!(saved["envelope"], before["envelope"]);
+
+    stale.execute("project.setNotes", json!({"text":"Unsaved edits in the stale editor"})).unwrap();
+    assert!(stale.execute("file.save", json!({})).unwrap_err().to_string().contains("stale project revision"));
+    assert!(stale.is_dirty());
+    assert_eq!(manifest(), saved);
+
+    first.execute("project.setNotes", json!({"text":"Settings-only save"})).unwrap();
+    first.execute("file.save", json!({})).unwrap();
+    let settings_only = manifest();
+    assert_ne!(settings_only["envelope"], saved["envelope"]);
+    assert_eq!(settings_only["bins"], saved["bins"]);
+    assert_eq!(settings_only["items"], saved["items"]);
+
+    let copy = temp.path().join("reopened.fcproj");
+    unpack(&folder, &copy).unwrap();
+    let loaded = filmcraft_format::decode(&fs::read(copy).unwrap()).unwrap();
+    assert_eq!(loaded.project.settings.title_safe, (15.0, 12.0));
+    assert_eq!(loaded.project.notes, "Settings-only save");
+    assert_eq!(loaded.project.root.find_bin(bin).unwrap().name, "Camera originals");
+
+    let payload = folder.join(settings_only["items"][0][1].as_str().unwrap());
+    fs::write(payload, b"corrupt record").unwrap();
+    first.execute("project.setNotes", json!({"text":"This save must fail"})).unwrap();
+    assert!(first.execute("file.save", json!({})).is_err());
+    assert!(first.is_dirty());
+    assert_eq!(manifest(), settings_only);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn folder_autosave_keeps_the_manifest_and_recovers_a_detached_draft() {
+    use filmcraft_format::project_folder::{ROOT, pack};
+    use std::fs;
+
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("edit.fcproj");
+    fs::write(&source, include_bytes!("../../format/tests/fixtures/v1-edit.fcproj")).unwrap();
+    let folder = temp.path().join("folder");
+    pack(&source, &folder, filmcraft_format::atomic_write_new).unwrap();
+    let path = folder.join(ROOT);
+    let previous = fs::read(&path).unwrap();
+    let profile = temp.path().join("profile");
+    let mut editor = Session::local_folder_editor();
+    editor.start_autosave(autosave::AutosaveConfig::new(&profile)).unwrap();
+    editor.execute("file.open", json!({"path":path})).unwrap();
+    editor.execute("prefs.set", json!({"key":"autoSave.saveCurrentProject","value":true})).unwrap();
+    editor.execute("project.setNotes", json!({"text":"Draft survives a restart"})).unwrap();
+    assert!(editor.execute("file.autoSaveNow", json!({})).unwrap()["path"].is_string());
+    assert_eq!(fs::read(&path).unwrap(), previous);
+    assert!(editor.is_dirty());
+    editor.shutdown();
+
+    let mut recovered = Session::local_folder_editor();
+    recovered.start_autosave(autosave::AutosaveConfig::new(&profile)).unwrap();
+    recovered.execute("file.recover", json!({})).unwrap();
+    assert_eq!(recovered.project.notes, "Draft survives a restart");
+    assert!(recovered.is_dirty());
+    assert!(recovered.path.is_none());
+    assert_eq!(fs::read(&path).unwrap(), previous);
+    recovered.shutdown();
+}

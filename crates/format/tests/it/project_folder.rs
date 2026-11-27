@@ -1,12 +1,4 @@
-#[path = "../../examples/project_folder/converter.rs"]
-mod converter;
-
-use converter::{
-    ROOT, pack, records_from,
-    recovery::{history, rescue, restore_copy},
-    revisions::{checkout, save, save_with},
-    unpack,
-};
+use filmcraft_format::project_folder::{ROOT, checkout, history, pack, records_from, rescue, restore_copy, save, save_with, unpack};
 use filmcraft_format::{SCHEMA_VERSION, atomic_write_new};
 use serde_json::Value;
 use serde_json::json;
@@ -580,4 +572,28 @@ fn a_deleted_sequence_recovers_into_the_root_and_corrupt_history_cannot_be_used(
     let error = restore_copy(&folder, &next, &base, 73).unwrap_err();
     assert!(error.to_string().contains("damaged archived manifest"));
     assert_eq!(fs::read(folder.join(ROOT)).unwrap(), root);
+}
+
+#[test]
+fn native_editor_records_reopen_and_an_unedited_checkout_does_not_publish() {
+    use filmcraft_format::project_folder::FolderSnapshot;
+    use filmcraft_project::ItemId;
+
+    let temp = tempdir().unwrap();
+    let source = temp.path().join("source.fcproj");
+    let folder = temp.path().join("folder");
+    write_doc(&source, &current());
+    pack(&source, &folder, atomic_write_new).unwrap();
+    let (mut snapshot, opened) = FolderSnapshot::open(&folder.join(ROOT)).unwrap();
+    let mut edited = opened.project.clone();
+    let clip = &mut edited.sequence_mut(ItemId(73)).unwrap().video_tracks[0].items[0];
+    clip.duration.0 /= 2;
+    let view = opened.view.unwrap_or_default();
+    let saved = snapshot.save(&opened.project, &view, &edited, &view).unwrap();
+
+    let output = temp.path().join("checkout.fcproj");
+    assert_eq!(checkout(&folder, &output).unwrap(), saved.revision);
+    let reopened = filmcraft_format::decode(&fs::read(&output).unwrap()).unwrap();
+    assert_eq!(reopened.project.sequence(ItemId(73)), edited.sequence(ItemId(73)));
+    assert_eq!(save(&folder, &saved.revision, &output).unwrap(), saved.revision);
 }

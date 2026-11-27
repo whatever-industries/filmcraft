@@ -8,7 +8,7 @@ use filmcraft_geom::Vec2;
 use filmcraft_time::Tick;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ParamValue {
     Float(f64),
     /// A point. A coordinate may be NaN: point parameters use NaN for "auto" (the frame or source
@@ -24,6 +24,25 @@ pub enum ParamValue {
     Curve(Vec<[f32; 2]>),
     /// A mask path (Bézier vertices in clip pixels); interpolates vertex-wise.
     Path(crate::mask::MaskPath),
+}
+
+impl PartialEq for ParamValue {
+    fn eq(&self, other: &Self) -> bool {
+        // "Auto" is a persisted point coordinate. Copies of that setting
+        // compare equal, including when only one axis is automatic.
+        let coordinate = |a: f64, b: f64| a == b || (a.is_nan() && b.is_nan());
+        match (self, other) {
+            (Self::Vec2(a), Self::Vec2(b)) => coordinate(a.x, b.x) && coordinate(a.y, b.y),
+            (Self::Float(a), Self::Float(b)) => a == b,
+            (Self::Color(a), Self::Color(b)) => a == b,
+            (Self::Bool(a), Self::Bool(b)) => a == b,
+            (Self::Choice(a), Self::Choice(b)) => a == b,
+            (Self::Text(a), Self::Text(b)) => a == b,
+            (Self::Curve(a), Self::Curve(b)) => a == b,
+            (Self::Path(a), Self::Path(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 /// Read a point parameter's value, taking a `null` coordinate as NaN ("auto").

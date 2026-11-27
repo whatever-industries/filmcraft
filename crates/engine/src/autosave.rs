@@ -491,6 +491,16 @@ impl Preferences {
     }
 }
 
+fn is_folder_manifest(path: &str) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    return crate::folder_edit::is_manifest(path);
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = path;
+        false
+    }
+}
+
 /// A file with this name next to the executable makes the install portable: its data directory is
 /// `<exe dir>/data` instead of the per-user one (the Windows portable zip ships it).
 pub const PORTABLE_MARKER: &str = "portable.txt";
@@ -672,6 +682,8 @@ struct Snapshot {
 enum Msg {
     /// The project has unsaved changes at this revision.
     Dirty(Snapshot),
+    #[cfg(not(target_arch = "wasm32"))]
+    ReplaceJournal(Option<Snapshot>, Sender<Result<(), String>>),
     /// Nothing unsaved (just saved / opened): drop the journal.
     Clean,
     Prefs(AutoSavePrefs),
@@ -816,6 +828,16 @@ impl Persistence {
 
     pub(crate) fn send_dirty(&self, project: Arc<Project>, revision: u64, path: Option<String>) {
         self.send(Msg::Dirty(Snapshot { project, revision, path }));
+    }
+
+    /// FIFO barrier for an explicit bin decision. Once queued, wait for its actual
+    /// result: a timeout could otherwise let a failed discard take effect later.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn replace_bin_journal(&self, project: Option<Arc<Project>>, revision: u64, path: Option<String>) -> Result<(), String> {
+        let (reply, result) = channel();
+        let snapshot = project.map(|project| Snapshot { project, revision, path });
+        self.tx.send(Msg::ReplaceJournal(snapshot, reply)).map_err(|_| self.stopped_error())?;
+        result.recv().map_err(|_| self.stopped_error())?
     }
 
     pub(crate) fn send_clean(&self) {
@@ -1006,6 +1028,11 @@ impl Worker {
                     self.last_change = now;
                     self.latest = Some(s);
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                Some(Msg::ReplaceJournal(snapshot, reply)) => {
+                    let result = self.replace_bin_journal(snapshot);
+                    let _ = reply.send(result);
+                }
                 Some(Msg::Clean) => {
                     self.latest = None;
                     self.first_pending = None;
@@ -1058,6 +1085,10 @@ impl Worker {
     }
 
     fn write_journal(&mut self) -> Result<u64, String> {
+        self.write_journal_ordered(false)
+    }
+
+    fn write_journal_ordered(&mut self, replace: bool) -> Result<u64, String> {
         let Some(s) = &self.latest else { return Err("no unsaved recovery state to write".into()) };
         let t0 = Instant::now();
         let bytes = filmcraft_format::encode(&s.project, false);
@@ -1070,9 +1101,11 @@ impl Worker {
         meta.project_name = s.project.name.clone();
         meta.project_path = s.path.clone();
         meta.bytes = bytes.len();
-        // Snapshot first, then the meta that makes it a candidate.
-        let r = filmcraft_format::atomic_write(&self.session_dir.join(SNAPSHOT), &bytes)
-            .and_then(|_| filmcraft_format::atomic_write(&self.session_dir.join(META), &serde_json::to_vec_pretty(&meta).unwrap_or_default()));
+        let write_snapshot = || filmcraft_format::atomic_write(&self.session_dir.join(SNAPSHOT), &bytes);
+        let write_meta = || filmcraft_format::atomic_write(&self.session_dir.join(META), &serde_json::to_vec(&meta)?);
+        // For an explicit decision on this same open folder, replace the candidate
+        // payload last. A metadata failure must leave the previous edits recoverable.
+        let r = if replace { write_meta().and_then(|()| write_snapshot()) } else { write_snapshot().and_then(|()| write_meta()) };
         let write_ms = t1.elapsed().as_secs_f64() * 1000.0;
         match r {
             Ok(()) => {
@@ -1090,6 +1123,45 @@ impl Worker {
                 Err(message)
             }
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn replace_bin_journal(&mut self, snapshot: Option<Snapshot>) -> Result<(), String> {
+        let previous = std::mem::replace(&mut self.latest, snapshot);
+        let result = if let Some(snapshot) = &self.latest
+            && self.prefs.recovery_journal
+        {
+            // A clean-bin retry can reuse an acknowledged checkpoint. A revision
+            // is unique within a session and the snapshot is immutable.
+            if snapshot.revision == self.journaled && self.session_dir.join(SNAPSHOT).is_file() && self.session_dir.join(META).is_file() {
+                Ok(())
+            } else {
+                self.write_journal_ordered(true).map(|_| ())
+            }
+        } else {
+            // The snapshot is the candidate marker. Treat a failed removal as a
+            // failure of Discard, even if its companion metadata is missing.
+            let path = self.session_dir.join(SNAPSHOT);
+            match fs::remove_file(&path) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => Err(format!("{}: {e}", path.display())),
+                _ => {
+                    let _ = fs::remove_file(self.session_dir.join(META));
+                    self.journaled = 0;
+                    // Same durability policy as atomic project-file replacement.
+                    #[cfg(unix)]
+                    if let Ok(dir) = fs::File::open(&self.session_dir) {
+                        let _ = dir.sync_all();
+                    }
+                    Ok(())
+                }
+            }
+        };
+        if result.is_err() {
+            self.latest = previous;
+        } else {
+            self.first_pending = None;
+        }
+        result
     }
 
     fn clear_journal(&mut self) {
@@ -1126,6 +1198,7 @@ impl Worker {
                 let _ = self.events.send(WorkerEvent::AutoSaved { path: path.clone(), revision: s.revision, unix, serialize_ms, write_ms, bytes: bytes.len() });
                 if self.prefs.save_current_project
                     && let Some(p) = &s.path
+                    && !is_folder_manifest(p)
                 {
                     match filmcraft_format::atomic_write(Path::new(p), &bytes) {
                         Ok(()) => {
