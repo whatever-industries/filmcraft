@@ -234,6 +234,15 @@ fn folder_autosave_keeps_the_manifest_and_recovers_a_detached_draft() {
     editor.start_autosave(autosave::AutosaveConfig::new(&profile)).unwrap();
     editor.execute("file.open", json!({"path":path})).unwrap();
     editor.execute("prefs.set", json!({"key":"autoSave.saveCurrentProject","value":true})).unwrap();
+    editor
+        .edit("Set offline originals and proxies", |p, _| {
+            let media = p.item_mut(filmcraft_project::ItemId(5)).unwrap().as_media_mut().unwrap();
+            media.media = filmcraft_project::MediaRef::File { path: "camera/original.mov".into() };
+            media.proxy = Some(filmcraft_project::MediaRef::File { path: "proxy/offline.mov".into() });
+            media.interpret.raw = Some(json!({"exposure":0.5}));
+            Ok(())
+        })
+        .unwrap();
     editor.execute("project.setNotes", json!({"text":"Draft survives a restart"})).unwrap();
     assert!(editor.execute("file.autoSaveNow", json!({})).unwrap()["path"].is_string());
     assert_eq!(fs::read(&path).unwrap(), previous);
@@ -242,7 +251,19 @@ fn folder_autosave_keeps_the_manifest_and_recovers_a_detached_draft() {
 
     let mut recovered = Session::local_folder_editor();
     recovered.start_autosave(autosave::AutosaveConfig::new(&profile)).unwrap();
+    let candidate = recovered.recovery_candidates()[0].clone();
+    assert!(candidate.meta.checkpoint.is_some() && candidate.meta.clean_exit);
+    let correction = recovered.persistence.as_ref().unwrap().session_dir.join("snapshot.fcproj");
+    fs::create_dir(&correction).unwrap();
+    assert!(recovered.execute("file.recover", json!({})).is_err());
+    assert!(candidate.dir.join("session.json").is_file());
+    fs::remove_dir(correction).unwrap();
     recovered.execute("file.recover", json!({})).unwrap();
+    let media = recovered.project.item(filmcraft_project::ItemId(5)).unwrap().as_media().unwrap();
+    assert_eq!(media.media, filmcraft_project::MediaRef::File { path: folder.join("camera/original.mov").to_str().unwrap().into() });
+    assert_eq!(media.proxy, Some(filmcraft_project::MediaRef::File { path: folder.join("proxy/offline.mov").to_str().unwrap().into() }));
+    assert_eq!(media.interpret.raw, Some(json!({"exposure":0.5})));
+    assert!(!candidate.dir.exists());
     assert_eq!(recovered.project.notes, "Draft survives a restart");
     assert!(recovered.is_dirty());
     assert!(recovered.path.is_none());

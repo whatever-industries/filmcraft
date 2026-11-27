@@ -646,3 +646,115 @@ fn pruning_retires_only_unprotected_history_and_retries_interrupted_collection()
     assert_eq!(reopened["project"]["items"]["73"]["name"], "Today");
     assert_ne!(reopened["project"]["items"][copy.to_string()]["name"], "Today");
 }
+
+#[test]
+fn killing_a_checkpoint_writer_on_either_side_of_publication_keeps_a_complete_draft() {
+    use filmcraft_format::project_folder::{CheckpointStore, load_checkpoint};
+    use std::{
+        io::{BufRead, BufReader},
+        process::{Command, Stdio},
+        sync::Arc,
+    };
+    const CHILD: &str = "FILMCRAFT_TEST_CHECKPOINT_KILL";
+    let edited = |name: &str| {
+        let mut doc = current();
+        doc["project"]["items"]["73"]["name"] = json!(name);
+        doc["project"]["items"]["5"]["kind"]["Media"]["interpret"]["raw"] = json!({"exposure":-0.75});
+        Arc::new(filmcraft_format::decode(&serde_json::to_vec(&doc).unwrap()).unwrap().project)
+    };
+    if let Some(dir) = std::env::var_os(CHILD) {
+        let dir = Path::new(&dir);
+        let marker = dir.join("marker");
+        let mut store = CheckpointStore::default();
+        for name in ["Early checkpoint", "Later checkpoint", "First checkpoint"] {
+            store
+                .publish(dir, &edited(name), |root, _| {
+                    filmcraft_format::atomic_write(&marker, root.as_bytes())?;
+                    Ok(root.len())
+                })
+                .unwrap();
+        }
+        let stop = || {
+            println!("at publication boundary");
+            std::thread::park();
+        };
+        store
+            .publish(dir, &edited("Second checkpoint"), |root, _| {
+                if std::env::var("FILMCRAFT_TEST_CHECKPOINT_SIDE").unwrap() == "before" {
+                    stop();
+                }
+                filmcraft_format::atomic_write(&marker, root.as_bytes())?;
+                stop();
+                Ok(root.len())
+            })
+            .unwrap();
+        return;
+    }
+    for (side, name) in [("before", "First checkpoint"), ("after", "Second checkpoint")] {
+        let dir = tempdir().unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "project_folder::killing_a_checkpoint_writer_on_either_side_of_publication_keeps_a_complete_draft", "--nocapture"])
+            .env(CHILD, dir.path())
+            .env("FILMCRAFT_TEST_CHECKPOINT_SIDE", side)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let reached = BufReader::new(child.stdout.take().unwrap()).lines().map_while(Result::ok).any(|s| s.contains("at publication boundary"));
+        if reached {
+            child.kill().unwrap();
+        }
+        child.wait().unwrap();
+        assert!(reached);
+        let root = fs::read_to_string(dir.path().join("marker")).unwrap();
+        let loaded = load_checkpoint(dir.path(), &root).unwrap();
+        assert_eq!(&loaded.project, edited(name).as_ref());
+    }
+}
+
+#[test]
+fn a_trim_replaces_only_its_item_and_manifest_and_storage_full_can_retry() {
+    use filmcraft_format::project_folder::{CheckpointStore, load_checkpoint};
+    use filmcraft_project::ItemId;
+    use std::sync::Arc;
+    let dir = tempdir().unwrap();
+    let marker = dir.path().join("marker");
+    let publish = |root: &str, _: usize| {
+        filmcraft_format::atomic_write(&marker, root.as_bytes())?;
+        Ok(root.len())
+    };
+    let folder = dir.path().join("checkpoint-records");
+    let records = |root: &str| serde_json::from_slice::<Value>(&fs::read(folder.join(root)).unwrap()).unwrap()["records"].clone();
+    let mut project = Arc::new(filmcraft_format::decode(&serde_json::to_vec(&current()).unwrap()).unwrap().project);
+    let mut store = CheckpointStore::default();
+    let first = store.publish(dir.path(), &project, publish).unwrap();
+    let old = fs::read_to_string(&marker).unwrap();
+    let initial = records(&old);
+    Arc::make_mut(&mut project).sequence_mut(ItemId(73)).unwrap().start_timecode = 42;
+    assert_eq!(store.publish(dir.path(), &project, |_, _| Err(io::ErrorKind::StorageFull.into())).err().unwrap().kind(), io::ErrorKind::StorageFull);
+    assert_eq!(fs::read_to_string(&marker).unwrap(), old);
+    assert_ne!(load_checkpoint(dir.path(), &old).unwrap().project.sequence(ItemId(73)).unwrap().start_timecode, 42);
+    // Advance the edit before retry so staged, unpublished payloads become garbage as well.
+    Arc::make_mut(&mut project).sequence_mut(ItemId(73)).unwrap().start_timecode = 43;
+    let retry = store.publish(dir.path(), &project, publish).unwrap();
+    assert!(retry.cleanup_error.is_none() && retry.bytes < first.bytes);
+    let new = fs::read_to_string(&marker).unwrap();
+    let changed = records(&new);
+    assert_eq!(initial["envelope"], changed["envelope"]);
+    assert_eq!(initial["bins"], changed["bins"]);
+    let changed_items: Vec<_> = initial["items"].as_array().unwrap().iter().zip(changed["items"].as_array().unwrap()).filter(|(a, b)| a != b).collect();
+    assert_eq!(changed_items.len(), 1);
+    assert_eq!(changed_items[0].1[0], 73);
+    let encoded = serde_json::to_vec(project.item(ItemId(73)).unwrap()).unwrap();
+    assert_eq!(retry.bytes, encoded.len() + fs::read(folder.join(&new)).unwrap().len() + new.len());
+    assert!(!folder.join(old).exists());
+    assert_eq!(load_checkpoint(dir.path(), &new).unwrap().project, *project);
+    let mut sizes = Vec::new();
+    for timecode in 50..70 {
+        Arc::make_mut(&mut project).sequence_mut(ItemId(73)).unwrap().start_timecode = timecode;
+        store.publish(dir.path(), &project, publish).unwrap();
+        sizes.push(fs::metadata(folder.join("records.bin")).unwrap().len());
+    }
+    assert_eq!(sizes.iter().take(4).max(), sizes.iter().max(), "repeated trims reuse retired space");
+    let new = fs::read_to_string(&marker).unwrap();
+    assert_eq!(load_checkpoint(dir.path(), &new).unwrap().project, *project);
+}

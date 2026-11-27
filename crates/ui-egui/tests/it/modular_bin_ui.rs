@@ -167,7 +167,7 @@ fn failed_save_keeps_bin_open_and_a_published_save_retries_cleanup_only() {
     assert!(d.app().session.is_dirty());
     assert_eq!(d.app().ui.project_panel.tabs.len(), 1);
     fs::remove_dir(archive).unwrap();
-    let snapshot = d.app().session.persistence.as_ref().unwrap().session_dir.join("snapshot.fcproj");
+    let snapshot = d.app().session.persistence.as_ref().unwrap().session_dir.join("session.json");
     d.app().session.persistence.as_ref().unwrap().flush().unwrap();
     fs::rename(&snapshot, snapshot.with_extension("previous")).unwrap();
     fs::create_dir(&snapshot).unwrap();

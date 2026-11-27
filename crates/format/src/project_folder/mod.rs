@@ -18,6 +18,7 @@ mod retention;
 mod revisions;
 pub use retention::{RetentionPolicy, RetentionPreview, configure_retention, keep_version, preview_retention, prune_history, retention_policy};
 
+pub use editor::checkpoint::{CheckpointStore, CheckpointWrite, load_checkpoint, remove_checkpoint_records};
 pub use editor::{Departure, DepartureCut, FolderSnapshot, SaveResult, TransferSave, detached_project};
 pub use recovery::{history, move_backups, rescue, restore_copy};
 pub use revisions::{checkout, save, save_with};
@@ -124,6 +125,10 @@ fn check_hash(hash: &str) -> io::Result<()> {
 fn load_payload(folder: &Path, hash: &str, remaining: &mut u64) -> io::Result<Value> {
     check_hash(hash)?;
     let bytes = read_member(&folder.join(hash), *remaining)?;
+    decode_payload(hash, bytes, remaining)
+}
+
+fn decode_payload(hash: &str, bytes: Vec<u8>, remaining: &mut u64) -> io::Result<Value> {
     if digest(&bytes) != hash {
         return Err(invalid("SHA-256 mismatch"));
     }
@@ -132,7 +137,7 @@ fn load_payload(folder: &Path, hash: &str, remaining: &mut u64) -> io::Result<Va
 }
 
 fn load_group(
-    folder: &Path,
+    load: &mut impl FnMut(&str, &mut u64) -> io::Result<Value>,
     kind: &str,
     entries: &[(u64, String)],
     identities: Option<&BTreeMap<u64, CopyIdentity>>,
@@ -140,7 +145,7 @@ fn load_group(
 ) -> io::Result<BTreeMap<u64, Value>> {
     let mut group = BTreeMap::new();
     for (id, hash) in entries {
-        let mut data = load_payload(folder, hash, budget).map_err(|e| invalid(format!("{kind} {id}: {e}")))?;
+        let mut data = load(hash, budget).map_err(|e| invalid(format!("{kind} {id}: {e}")))?;
         if let Some(identity) = identities.and_then(|ids| ids.get(id)) {
             identity.apply(*id, &mut data)?;
         }
@@ -165,11 +170,15 @@ fn check_manifest(manifest: &Manifest) -> io::Result<()> {
 }
 
 fn read_records(folder: &Path, manifest: &Manifest) -> io::Result<ProjectRecords> {
+    read_records_with(manifest, |hash, budget| load_payload(folder, hash, budget))
+}
+
+fn read_records_with(manifest: &Manifest, mut load: impl FnMut(&str, &mut u64) -> io::Result<Value>) -> io::Result<ProjectRecords> {
     check_manifest(manifest)?;
     let mut budget = MAX_PROJECT_BYTES;
-    let envelope = load_payload(folder, &manifest.envelope, &mut budget).map_err(|e| invalid(format!("project metadata: {e}")))?;
-    let mut bins = load_group(folder, "bin", &manifest.bins, None, &mut budget)?;
-    let items = load_group(folder, "item", &manifest.items, Some(&manifest.identities), &mut budget)?;
+    let envelope = load(&manifest.envelope, &mut budget).map_err(|e| invalid(format!("project metadata: {e}")))?;
+    let mut bins = load_group(&mut load, "bin", &manifest.bins, None, &mut budget)?;
+    let items = load_group(&mut load, "item", &manifest.items, Some(&manifest.identities), &mut budget)?;
     for alias in &manifest.copies {
         if !items.contains_key(&alias.copy) {
             return Err(invalid("missing independent sequence copy"));

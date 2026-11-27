@@ -154,7 +154,7 @@ command publishes only changed bin, item, and project metadata records. Clean re
 keep their existing digests. A stale revision or a failed write leaves the editor's
 changes unsaved. Reopen the folder to load the latest published revision.
 
-The desktop uses the regular crash journal and rotating backups. The preference that
+The desktop checkpoints unsaved modular edits into a session-owned recovery store. Dated auto-saves remain standalone project files. The preference that
 also overwrites the current project applies to standard `.fcproj` files. Recovered
 folder drafts open as unsaved projects, so they can be saved separately. **Save a
 Copy** exports a standard project while keeping the folder open.
@@ -278,10 +278,8 @@ Preferences are stored in `<data dir>/preferences.json`. The `prefs.*` commands 
 
 Premiere's auto-save can lose up to one interval of work. FilmCraft also keeps a **recovery journal**:
 
-- Whenever the project has unsaved changes, a snapshot is written to
-  `<data dir>/Recovery/<started>-<pid>[-<n>]/snapshot.fcproj`, plus `session.json` (time, revision, project
-  name and path). It is written about 1 s after the last edit, or after at most
-  `recoveryIntervalSeconds` while edits keep coming. Saving the project deletes the snapshot.
+- While edits are unsaved, the worker schedules a checkpoint about one second after the last edit, or at the configured recovery interval during continuous editing. Standard projects write `snapshot.fcproj` and `session.json` in their recovery session directory.
+- A modular draft stores bin, item and settings records in a private data file. The first checkpoint captures the full working project. Later checkpoints write changed records into free space, sync the data and index, then atomically replace `session.json` with the checkpoint digest, revision, time and original project path. Only after publication can the next edit reuse the previous cut’s space. A clean interval writes nothing. Checkpoints leave bins Unsaved and add zero to the bin-backup count.
 - Each running FilmCraft holds an OS file lock on `<session>/lock`. When the process dies (crash,
   `kill -9`, power loss) the OS releases the lock.
 - At startup, every other session directory whose lock can be taken and that has a snapshot is a
@@ -295,8 +293,7 @@ Premiere's auto-save can lose up to one interval of work. FilmCraft also keeps a
   panel and an error notification; `file.autoSaveStatus` reports `running: false`. Edits remain in
   the open project. Use **File ▸ Save** or **Save As** to save them; the worker is not restarted
   automatically. Ordinary write errors are reported without treating a live worker as stopped.
-- Recovering loads the snapshot as an **unsaved** project with its original path, so Save writes
-  over the original file. The recovered state goes into the new session's own journal before the old
+- Standard recovery opens an **unsaved** project at its original path. A modular draft opens detached and can be saved separately. Its media and proxy links are resolved against the original project location, even when the project folder is offline. The recovered state goes into the new session's own journal before the old
   journal is deleted. Both the replacement snapshot and its metadata must be successfully written
   for that recovered revision. If journaling is disabled, writing fails, or the worker cannot
   confirm the write, recovery reports an error and retains the original candidate. The recovered

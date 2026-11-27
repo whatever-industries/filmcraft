@@ -6,11 +6,12 @@
 //! Optionally the project file itself is saved too.
 //!
 //! **Recovery journal** (FilmCraft addition): while the project has unsaved changes, a snapshot is
-//! written to `<data dir>/Recovery/<session>/snapshot.fcproj` shortly after each change (debounced,
+//! written under `<data dir>/Recovery/<session>` shortly after each change (debounced,
 //! and at least every *N* seconds while edits keep coming). Each running app holds an OS lock on
 //! `<session>/lock`; when the process dies (crash, `kill -9`, power cut) the lock is released, so on
 //! the next launch any session directory whose lock can be taken and that holds a snapshot is a
-//! recovery candidate ("Recover unsaved changes from <time>?").
+//! recovery candidate ("Recover unsaved changes from <time>?"). Standard projects use a standalone
+//! snapshot. Modular drafts publish an index of session-owned records in their journal metadata.
 //!
 //! **Threading.** The UI thread only hands the worker an `Arc<Project>` (the immutable snapshot the
 //! engine already keeps for undo) — a pointer copy and a channel send. Serialization and all file
@@ -563,7 +564,7 @@ pub fn unix_now() -> i64 {
 
 // ------------------------------------------------------------------ recovery candidates
 
-/// Snapshot meta written next to `snapshot.fcproj`.
+/// Session metadata. For modular drafts this is also the atomic publication marker.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct JournalMeta {
@@ -575,6 +576,9 @@ pub struct JournalMeta {
     pub project_path: Option<String>,
     pub generator: String,
     pub bytes: usize,
+    /// Digest of the immutable record manifest for a modular recovery draft.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<String>,
     /// True when the app was closed normally while changes were unsaved (no crash).
     pub clean_exit: bool,
 }
@@ -611,6 +615,22 @@ fn lock_is_stale(dir: &Path) -> bool {
     }
 }
 
+fn read_meta(dir: &Path) -> io::Result<JournalMeta> {
+    let path = dir.join(META);
+    if !fs::symlink_metadata(&path)?.is_file() {
+        return Err(io::Error::other("expected regular recovery metadata"));
+    }
+    let bytes = filmcraft_media::reader::read_regular_file_bounded(&path, filmcraft_format::MAX_PROJECT_BYTES)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn remove_if_present(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
 /// Find snapshots of sessions that are no longer running. Stale session directories without a
 /// snapshot (nothing unsaved) are removed. `skip` is the caller's own session directory.
 pub fn scan_candidates(data_dir: &Path, skip: Option<&Path>) -> Vec<RecoveryCandidate> {
@@ -621,15 +641,17 @@ pub fn scan_candidates(data_dir: &Path, skip: Option<&Path>) -> Vec<RecoveryCand
         if !dir.is_dir() || Some(dir.as_path()) == skip || !lock_is_stale(&dir) {
             continue;
         }
-        let snap = dir.join(SNAPSHOT);
-        if !snap.is_file() {
-            // Empty leftover dirs (clean exit, or a crash before the first snapshot).
+        let meta = read_meta(&dir);
+        let empty = match &meta {
+            Ok(m) => m.checkpoint.is_none(),
+            Err(e) => e.kind() == io::ErrorKind::NotFound,
+        };
+        // Keep an unreadable marker available for diagnosis or retry.
+        if empty && !dir.join(SNAPSHOT).is_file() {
             let _ = fs::remove_dir_all(&dir);
             continue;
         }
-        // Keep the snapshot even when session.json is missing or unreadable: the project
-        // is still recoverable. Meta fields fall back to defaults.
-        let meta = fs::read(dir.join(META)).ok().and_then(|b| serde_json::from_slice::<JournalMeta>(&b).ok()).unwrap_or_default();
+        let meta = meta.unwrap_or_default();
         out.push(RecoveryCandidate { id: e.file_name().to_string_lossy().into_owned(), dir, meta });
     }
     out.sort_by(|a, b| b.meta.saved_unix.cmp(&a.meta.saved_unix).then(b.id.cmp(&a.id)));
@@ -638,6 +660,13 @@ pub fn scan_candidates(data_dir: &Path, skip: Option<&Path>) -> Vec<RecoveryCand
 
 /// Load a candidate's snapshot.
 pub fn load_candidate(c: &RecoveryCandidate) -> Result<filmcraft_format::Loaded, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(root) = &c.meta.checkpoint {
+        if !c.meta.project_path.as_deref().is_some_and(is_folder_manifest) {
+            return Err("missing modular recovery origin".into());
+        }
+        return filmcraft_format::project_folder::load_checkpoint(&c.dir, root).map_err(|e| format!("{}: {e}", c.dir.display()));
+    }
     let b = filmcraft_media::reader::read_regular_file_bounded(&c.dir.join(SNAPSHOT), filmcraft_format::MAX_PROJECT_BYTES)
         .map_err(|e| format!("{}: {e}", c.dir.display()))?;
     filmcraft_format::decode(&b).map_err(|e| e.to_string())
@@ -674,6 +703,7 @@ pub(crate) struct Sent {
 }
 
 struct Snapshot {
+    modular: bool,
     project: Arc<Project>,
     revision: u64,
     path: Option<String>,
@@ -796,6 +826,8 @@ impl Persistence {
             debounce: cfg.journal_debounce,
             prefs,
             events: etx,
+            #[cfg(not(target_arch = "wasm32"))]
+            checkpoints: Default::default(),
             latest: None,
             journaled: 0,
             autosaved: 0,
@@ -826,8 +858,8 @@ impl Persistence {
         })
     }
 
-    pub(crate) fn send_dirty(&self, project: Arc<Project>, revision: u64, path: Option<String>) {
-        self.send(Msg::Dirty(Snapshot { project, revision, path }));
+    pub(crate) fn send_dirty(&self, project: Arc<Project>, revision: u64, path: Option<String>, modular: bool) {
+        self.send(Msg::Dirty(Snapshot { project, revision, path, modular }));
     }
 
     /// FIFO barrier for an explicit bin decision. Once queued, wait for its actual
@@ -835,7 +867,7 @@ impl Persistence {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn replace_bin_journal(&self, project: Option<Arc<Project>>, revision: u64, path: Option<String>) -> Result<(), String> {
         let (reply, result) = channel();
-        let snapshot = project.map(|project| Snapshot { project, revision, path });
+        let snapshot = project.map(|project| Snapshot { project, revision, path, modular: true });
         self.tx.send(Msg::ReplaceJournal(snapshot, reply)).map_err(|_| self.stopped_error())?;
         result.recv().map_err(|_| self.stopped_error())?
     }
@@ -921,16 +953,20 @@ impl Persistence {
             log::warn!("auto-save at shutdown: {e}");
         }
         self.stop_worker();
-        let snap = self.session_dir.join(SNAPSHOT);
-        self.lock.take();
-        if snap.is_file() {
-            if let Some(mut m) = fs::read(self.session_dir.join(META)).ok().and_then(|b| serde_json::from_slice::<JournalMeta>(&b).ok()) {
+        match read_meta(&self.session_dir) {
+            Ok(mut m) if m.checkpoint.is_some() || self.session_dir.join(SNAPSHOT).is_file() => {
                 m.clean_exit = true;
-                let _ = filmcraft_format::atomic_write(&self.session_dir.join(META), &serde_json::to_vec_pretty(&m).unwrap_or_default());
+                if let Ok(bytes) = serde_json::to_vec(&m) {
+                    let _ = filmcraft_format::atomic_write_no_follow(&self.session_dir.join(META), &bytes);
+                }
             }
-        } else {
-            let _ = fs::remove_dir_all(&self.session_dir);
+            Err(e) if e.kind() != io::ErrorKind::NotFound => log::warn!("could not read recovery metadata at shutdown: {e}"),
+            _ if !self.session_dir.join(SNAPSHOT).is_file() => {
+                let _ = fs::remove_dir_all(&self.session_dir);
+            }
+            _ => {}
         }
+        self.lock.take();
     }
 
     /// Stop the worker and release the lock *without* cleaning up — what a crash leaves behind.
@@ -982,6 +1018,8 @@ struct Worker {
     debounce: Duration,
     prefs: AutoSavePrefs,
     events: Sender<WorkerEvent>,
+    #[cfg(not(target_arch = "wasm32"))]
+    checkpoints: filmcraft_format::project_folder::CheckpointStore,
     /// Newest unsaved state (None = clean).
     latest: Option<Snapshot>,
     /// Revision currently in the journal (0 = none) / last auto-saved revision.
@@ -1085,33 +1123,51 @@ impl Worker {
     }
 
     fn write_journal(&mut self) -> Result<u64, String> {
-        self.write_journal_ordered(false)
-    }
-
-    fn write_journal_ordered(&mut self, replace: bool) -> Result<u64, String> {
         let Some(s) = &self.latest else { return Err("no unsaved recovery state to write".into()) };
-        let t0 = Instant::now();
-        let bytes = filmcraft_format::encode(&s.project, false);
-        let serialize_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        let t1 = Instant::now();
         let unix = unix_now();
         let mut meta = self.meta.clone();
         meta.saved_unix = unix;
         meta.revision = s.revision;
         meta.project_name = s.project.name.clone();
         meta.project_path = s.path.clone();
-        meta.bytes = bytes.len();
-        let write_snapshot = || filmcraft_format::atomic_write(&self.session_dir.join(SNAPSHOT), &bytes);
-        let write_meta = || filmcraft_format::atomic_write(&self.session_dir.join(META), &serde_json::to_vec(&meta)?);
-        // For an explicit decision on this same open folder, replace the candidate
-        // payload last. A metadata failure must leave the previous edits recoverable.
-        let r = if replace { write_meta().and_then(|()| write_snapshot()) } else { write_snapshot().and_then(|()| write_meta()) };
-        let write_ms = t1.elapsed().as_secs_f64() * 1000.0;
-        match r {
-            Ok(()) => {
+        let result = (|| -> io::Result<(usize, f64, f64)> {
+            #[cfg(not(target_arch = "wasm32"))]
+            if s.modular {
+                let path = s.path.as_deref().filter(|p| is_folder_manifest(p)).ok_or_else(|| io::Error::other("missing modular recovery origin"))?;
+                meta.project_path = Some(std::path::absolute(path)?.to_str().ok_or_else(|| io::Error::other("non-UTF-8 recovery origin"))?.to_owned());
+                let written = self.checkpoints.publish(&self.session_dir, &s.project, |root, bytes| {
+                    meta.checkpoint = Some(root.to_owned());
+                    meta.bytes = bytes;
+                    let marker = serde_json::to_vec(&meta)?;
+                    filmcraft_format::atomic_write_no_follow(&self.session_dir.join(META), &marker)?;
+                    Ok(marker.len())
+                })?;
+                if let Some(error) = written.cleanup_error.or_else(|| remove_if_present(&self.session_dir.join(SNAPSHOT)).err()) {
+                    let _ = self.events.send(WorkerEvent::Error(format!("checkpoint saved; recovery cleanup: {error}")));
+                }
+                return Ok((written.bytes, written.serialize.as_secs_f64() * 1000.0, written.write.as_secs_f64() * 1000.0));
+            }
+            let t0 = Instant::now();
+            let bytes = filmcraft_format::encode(&s.project, false);
+            let serialize_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            let t1 = Instant::now();
+            meta.bytes = bytes.len();
+            filmcraft_format::atomic_write(&self.session_dir.join(SNAPSHOT), &bytes)?;
+            filmcraft_format::atomic_write_no_follow(&self.session_dir.join(META), &serde_json::to_vec(&meta)?)?;
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.checkpoints = Default::default();
+                if let Err(error) = filmcraft_format::project_folder::remove_checkpoint_records(&self.session_dir) {
+                    let _ = self.events.send(WorkerEvent::Error(format!("snapshot saved; recovery cleanup: {error}")));
+                }
+            }
+            Ok((bytes.len(), serialize_ms, t1.elapsed().as_secs_f64() * 1000.0))
+        })();
+        match result {
+            Ok((bytes, serialize_ms, write_ms)) => {
                 self.journaled = s.revision;
                 self.first_pending = None;
-                let _ = self.events.send(WorkerEvent::Journaled { revision: s.revision, unix, serialize_ms, write_ms, bytes: bytes.len() });
+                let _ = self.events.send(WorkerEvent::Journaled { revision: s.revision, unix, serialize_ms, write_ms, bytes });
                 Ok(s.revision)
             }
             Err(e) => {
@@ -1133,28 +1189,17 @@ impl Worker {
         {
             // A clean-bin retry can reuse an acknowledged checkpoint. A revision
             // is unique within a session and the snapshot is immutable.
-            if snapshot.revision == self.journaled && self.session_dir.join(SNAPSHOT).is_file() && self.session_dir.join(META).is_file() {
+            if snapshot.revision == self.journaled
+                && read_meta(&self.session_dir).is_ok_and(|m| {
+                    m.revision == snapshot.revision && m.checkpoint.as_ref().is_some_and(|root| self.checkpoints.confirmed(&self.session_dir, root))
+                })
+            {
                 Ok(())
             } else {
-                self.write_journal_ordered(true).map(|_| ())
+                self.write_journal().map(|_| ())
             }
         } else {
-            // The snapshot is the candidate marker. Treat a failed removal as a
-            // failure of Discard, even if its companion metadata is missing.
-            let path = self.session_dir.join(SNAPSHOT);
-            match fs::remove_file(&path) {
-                Err(e) if e.kind() != io::ErrorKind::NotFound => Err(format!("{}: {e}", path.display())),
-                _ => {
-                    let _ = fs::remove_file(self.session_dir.join(META));
-                    self.journaled = 0;
-                    // Same durability policy as atomic project-file replacement.
-                    #[cfg(unix)]
-                    if let Ok(dir) = fs::File::open(&self.session_dir) {
-                        let _ = dir.sync_all();
-                    }
-                    Ok(())
-                }
-            }
+            self.remove_journal().map_err(|e| e.to_string())
         };
         if result.is_err() {
             self.latest = previous;
@@ -1164,10 +1209,31 @@ impl Worker {
         result
     }
 
-    fn clear_journal(&mut self) {
-        let _ = fs::remove_file(self.session_dir.join(META));
-        let _ = fs::remove_file(self.session_dir.join(SNAPSHOT));
+    fn remove_journal(&mut self) -> io::Result<()> {
+        remove_if_present(&self.session_dir.join(SNAPSHOT))?;
+        remove_if_present(&self.session_dir.join(META))?;
         self.journaled = 0;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.checkpoints = Default::default();
+            // Marker removal commits the decision. A cleanup failure can leave
+            // surplus records, but must not undo an acknowledged bin decision.
+            let cleanup = (|| {
+                #[cfg(unix)]
+                File::open(&self.session_dir)?.sync_all()?;
+                filmcraft_format::project_folder::remove_checkpoint_records(&self.session_dir)
+            })();
+            if let Err(e) = cleanup {
+                self.error(format!("recovery journal cleared; record cleanup: {e}"));
+            }
+        }
+        Ok(())
+    }
+
+    fn clear_journal(&mut self) {
+        if let Err(e) = self.remove_journal() {
+            self.error(format!("clearing recovery journal: {e}"));
+        }
     }
 
     fn auto_save(&mut self) -> Result<PathBuf, String> {
@@ -1198,6 +1264,7 @@ impl Worker {
                 let _ = self.events.send(WorkerEvent::AutoSaved { path: path.clone(), revision: s.revision, unix, serialize_ms, write_ms, bytes: bytes.len() });
                 if self.prefs.save_current_project
                     && let Some(p) = &s.path
+                    && !s.modular
                     && !is_folder_manifest(p)
                 {
                     match filmcraft_format::atomic_write(Path::new(p), &bytes) {

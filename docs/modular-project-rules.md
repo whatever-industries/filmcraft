@@ -75,7 +75,22 @@ Three runs per size each changed the same reel’s start timecode five times on 
 | 24,000 | 217 | 97.5 | 184 |
 | 48,000 | 387 | 178 | 275 |
 
-A separate small-project run used the default settings. It retained all 2,000 backups at the threshold. Save 2,001 reduced that to 1,800 backups plus the live version. The retired cut’s unique record was removed, the recent cut’s record remained, and the live project reopened. Cleanup ran under the project writer lock. The feature-scale timings cover a short history. Feature-scale cleanup latency at the default threshold still needs a long-session run. Revision manifests remain in the project for history and move lookup.
+A separate small-project run used the default settings. It retained all 2,000 backups at the threshold. Save 2,001 reduced that to 1,800 backups plus the live version. The retired cut’s unique record was removed, the recent cut’s record remained, and the live project reopened. Cleanup ran under the project writer lock. The feature-scale timings cover a short history. A separate 24,000-clip run subsequently exercised the default threshold. Revision manifests remain in the project for history and move lookup.
+
+On a local APFS volume, a 24,000-clip project received 2,001 explicit one-reel saves with background journaling inactive. The project folder grew from 18.2 MB initially to 3.03 GB at save 2,000. That save took 133 ms. Save 2,001 took **17.65 seconds** with cleanup under the writer lock and left 2.75 GB. Reopening preserved cut 2,001 and restored cut 1,999 as an independent copy. Moving expensive cleanup off the interactive Save path is outstanding before broader rollout.
+
+### Incremental crash checkpoints
+
+Each comparison opened the same modular fixture and passed its working model to the native recovery worker. Three fresh sessions per writer each made six linked one-reel trims. Elapsed time and bytes are medians. The full-snapshot byte counter measures the project payload. The modular counter includes the changed records, index and publication marker. Peak RSS is the largest whole-process resident set sampled during a checkpoint. The first checkpoint includes the full working project. On each subsequent trim the modular writer wrote one timeline record, the index and the marker.
+
+| Timeline clips | Recovery writer | First time | Repeat time | First / repeat bytes | First / repeat peak RSS |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 24,000 | Full snapshot | 261 ms | 238 ms | 18.05 / 18.05 MB | 564 / 658 MiB |
+| 24,000 | Modular checkpoint | 434 ms | 82 ms | 18.15 / 1.52 MB | 564 / 574 MiB |
+| 48,000 | Full snapshot | 404 ms | 395 ms | 36.11 / 36.11 MB | 1,118 / 1,310 MiB |
+| 48,000 | Modular checkpoint | 531 ms | 104 ms | 36.32 / 3.04 MB | 1,119 / 1,137 MiB |
+
+The modular writer flushes changed records together and recycles retired byte ranges after publication. Forced process termination on either side of marker publication recovers the corresponding complete draft. The editor tests cover Save Cuts, Discard Selects, an outstanding project setting, original-folder relocation, and a failed handoff to a new recovery session. A storage-full retry with a newer edit and repeated trims checks reclamation. Physical power loss and network filesystems remain unqualified.
 
 ## Sequence-transfer performance
 

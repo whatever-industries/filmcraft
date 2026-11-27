@@ -153,7 +153,9 @@ fn journal_failure_leaves_history_work_and_disk_intact_and_permits_retry() {
     s.sync_persistence();
     s.persistence.as_ref().unwrap().flush().unwrap();
     let journal = s.persistence.as_ref().unwrap().session_dir.clone();
-    let bytes = fs::read(journal.join("snapshot.fcproj")).unwrap();
+    let marker: Value = serde_json::from_slice(&fs::read(journal.join("session.json")).unwrap()).unwrap();
+    let manifest_path = journal.join("checkpoint-records").join(marker["checkpoint"].as_str().unwrap());
+    let bytes = fs::read(&manifest_path).unwrap();
     let meta = journal.join("session.json");
     fs::rename(&meta, journal.join("old-meta")).unwrap();
     fs::create_dir(&meta).unwrap();
@@ -165,7 +167,7 @@ fn journal_failure_leaves_history_work_and_disk_intact_and_permits_retry() {
         assert_eq!(s.project, work);
         assert_eq!(s.history.undo.len(), history);
         assert_eq!(manifest(&f), initial);
-        assert_eq!(fs::read(journal.join("snapshot.fcproj")).unwrap(), bytes);
+        assert_eq!(fs::read(&manifest_path).unwrap(), bytes);
     }
     fs::remove_dir(&meta).unwrap();
     s.execute("project.saveBin", json!({"bin":f.selects})).unwrap();
@@ -225,12 +227,23 @@ fn crash_after_bin_decision_recovers_only_the_remaining_work() {
         s.sync_persistence();
         s.persistence.as_ref().unwrap().flush().unwrap();
         let cmd = std::env::var("FILMCRAFT_TEST_BIN_DECISION").unwrap();
-        s.execute(&cmd, json!({"bin":f.selects})).unwrap();
+        if cmd == "both" || cmd == "cuts" {
+            s.execute("project.saveBin", json!({"bin":f.cuts})).unwrap();
+        }
+        match cmd.as_str() {
+            "both" => {
+                s.execute("project.discardBin", json!({"bin":f.selects})).unwrap();
+            }
+            "cuts" | "checkpoint" => {}
+            _ => {
+                s.execute(&cmd, json!({"bin":f.selects})).unwrap();
+            }
+        }
         println!("decision acknowledged");
         thread::park();
         return;
     }
-    for cmd in ["project.discardBin", "project.saveBin"] {
+    for cmd in ["checkpoint", "cuts", "both", "project.discardBin", "project.saveBin"] {
         let dir = tempfile::tempdir().unwrap();
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "folder_edit::tests::crash_after_bin_decision_recovers_only_the_remaining_work", "--nocapture"])
@@ -251,13 +264,13 @@ fn crash_after_bin_decision_recovers_only_the_remaining_work() {
         let live = FolderSnapshot::open(&dir.path().join("Feature/project.fcmod")).unwrap().1.project;
         let cut = live.sequences().find(|i| i.name == "Cut").unwrap().id;
         let select = live.sequences().find(|i| i.name == "Select").unwrap().id;
+        fs::rename(dir.path().join("Feature"), dir.path().join("relocated")).unwrap();
         s.execute("file.recover", json!({})).unwrap();
         assert!(s.path.is_none() && s.is_dirty());
         assert_eq!(frame(&s.project, cut), 12);
-        assert_eq!(frame(&live, cut), 0);
-        let expected = if cmd == "project.saveBin" { 24 } else { 0 };
-        assert_eq!(frame(&s.project, select), expected);
-        assert_eq!(frame(&live, select), expected);
+        assert_eq!(frame(&live, cut), if matches!(cmd, "cuts" | "both") { 12 } else { 0 });
+        assert_eq!(frame(&s.project, select), if matches!(cmd, "both" | "project.discardBin") { 0 } else { 24 });
+        assert_eq!(frame(&live, select), if cmd == "project.saveBin" { 24 } else { 0 });
         assert_ne!(live.settings.audio_display_samples, s.project.settings.audio_display_samples);
         s.shutdown();
     }
@@ -306,7 +319,7 @@ fn blocked_publication_and_failed_postpublication_cleanup_are_distinguishable() 
     assert_eq!(status(&mut s)["dirtyBins"], json!([f.selects]));
     fs::remove_dir(archive).unwrap();
     // A non-file at the candidate path makes even clearing the journal fail.
-    let snapshot = s.persistence.as_ref().unwrap().session_dir.join("snapshot.fcproj");
+    let snapshot = s.persistence.as_ref().unwrap().session_dir.join("session.json");
     fs::create_dir(&snapshot).unwrap();
     let error = s.execute("project.saveBin", json!({"bin":f.selects})).unwrap_err().to_string();
     assert!(error.contains("was published") && error.contains("cleanup failed"), "{error}");
@@ -330,7 +343,7 @@ fn disabled_recovery_respects_bin_decisions_without_a_candidate() {
     s.execute("project.saveBin", json!({"bin":f.cuts})).unwrap();
     s.execute("project.discardBin", json!({"bin":f.selects})).unwrap();
     assert_eq!(status(&mut s)["projectSettingsDirty"], true);
-    let path = s.persistence.as_ref().unwrap().session_dir.join("snapshot.fcproj");
+    let path = s.persistence.as_ref().unwrap().session_dir.join("session.json");
     assert!(!path.exists());
     s.shutdown();
     assert!(crate::autosave::scan_candidates(dir.path(), None).is_empty());
@@ -346,7 +359,7 @@ fn discarding_the_only_dirty_bin_removes_the_old_checkpoint() {
     let created = s.edit("Create sequence in Selects", |p, _| Ok(p.new_sequence("Alternate", Default::default(), 1, 1, Some(f.selects)))).unwrap();
     s.sync_persistence();
     s.persistence.as_ref().unwrap().flush().unwrap();
-    let journal = s.persistence.as_ref().unwrap().session_dir.join("snapshot.fcproj");
+    let journal = s.persistence.as_ref().unwrap().session_dir.join("session.json");
     assert!(journal.is_file());
     s.execute("project.discardBin", json!({"bin":f.selects})).unwrap();
     assert!(!journal.exists());
@@ -473,7 +486,7 @@ fn corrupt_departure_backup_blocks_source_removal_and_retry_keeps_the_original_d
     s.sync_persistence();
     let persistence = s.persistence.as_ref().unwrap();
     persistence.flush().unwrap();
-    let file = persistence.session_dir.join("snapshot.fcproj");
+    let file = persistence.session_dir.join("session.json");
     fs::rename(&file, file.with_extension("previous")).unwrap();
     fs::create_dir(&file).unwrap();
     let err = s.execute("project.saveBin", json!({"bin":f.cuts})).unwrap_err();

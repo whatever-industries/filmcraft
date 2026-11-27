@@ -1,4 +1,5 @@
 //! Incremental saves from a verified editor snapshot.
+pub(super) mod checkpoint;
 use super::{
     BinCopy, MANIFEST_LIMIT, Manifest, MoveBackup, ROOT, check_hash, check_manifest, digest, invalid, join, load_payload, overlay, paths, read_member,
     read_records, revisions,
@@ -36,6 +37,10 @@ impl FileStamp {
         if !metadata.is_file() {
             return Err(invalid(format!("expected a regular file at {}", path.display())));
         }
+        Self::from_metadata(&metadata)
+    }
+
+    fn from_metadata(metadata: &fs::Metadata) -> io::Result<Self> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
         Ok(Self {
