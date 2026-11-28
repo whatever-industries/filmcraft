@@ -4,6 +4,12 @@ This audit covers the local schema-19 folder editor for #1049. **Cuts** and **Se
 
 **Verified** means a check exercised the stated behavior. **Implementation gap** identifies an observed mismatch or a missing operation, followed by the test that should pass when it is fixed. **Decision needed** identifies a product choice. A check of a prepared project establishes what the reader can do with that project. Creating the same state through Save, Discard, or crash recovery requires its own check.
 
+## What completes #1049
+
+Single-editor production readiness is the finish line for #1049 and the first of two phases toward a robust multi-editor system. The acceptance run follows one editor through the upstream workflow on a feature-scale project. Convert a standard project, edit more than one bin, save changed bins and settings, recover an older cut as a copy after an interruption, and reopen a standard `.fcproj` export with today’s edits intact.
+
+The second phase builds shared editing on the same bin identities, independent saves and recoverable revisions. Qualify bin ownership, read-only access and handoff on two machines, including competing writes, a writer disconnecting during Save, and a stale writer reconnecting. That phase has its own release decision.
+
 ## Saving and leaving the editor
 
 | Rule | Status | Evidence or acceptance test |
