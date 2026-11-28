@@ -897,6 +897,7 @@ impl Persistence {
             #[cfg(not(target_arch = "wasm32"))]
             draft: None,
             journaled: 0,
+            space_retry: Default::default(),
             autosaved: 0,
             first_pending: None,
             last_change: Instant::now(),
@@ -1120,6 +1121,28 @@ impl Drop for Persistence {
     }
 }
 
+/// Backs off background writes while the recovery destination remains full.
+#[derive(Default)]
+struct FullVolumeRetry {
+    deadline: Option<Instant>,
+    delay: Duration,
+}
+
+impl FullVolumeRetry {
+    /// True when the worker should also send this error to the editor.
+    fn report_failure(&mut self, kind: io::ErrorKind, now: Instant) -> bool {
+        if kind != io::ErrorKind::StorageFull {
+            *self = Self::default();
+            return true;
+        }
+        let first = self.deadline.is_none();
+        self.delay = if first { Duration::from_secs(2) } else { (self.delay * 2).min(Duration::from_secs(60)) };
+        self.deadline = Some(now + self.delay);
+        log::debug!(target: "filmcraft_engine::autosave::disk_full", "Recovery volume full; retry in {:?}", self.delay);
+        first
+    }
+}
+
 struct Worker {
     data_dir: PathBuf,
     session_dir: PathBuf,
@@ -1136,6 +1159,7 @@ struct Worker {
     /// Revision currently in the journal (0 = none) / last auto-saved revision.
     journaled: u64,
     autosaved: u64,
+    space_retry: FullVolumeRetry,
     first_pending: Option<Instant>,
     last_change: Instant,
     next_autosave: Instant,
@@ -1170,7 +1194,8 @@ impl Worker {
             return None;
         }
         let max = self.first_pending.unwrap_or(self.last_change) + Duration::from_secs(self.prefs.recovery_interval_seconds as u64);
-        Some((self.last_change + self.debounce).min(max))
+        let due = (self.last_change + self.debounce).min(max);
+        Some(self.space_retry.deadline.map_or(due, |retry| due.max(retry)))
     }
 
     fn run(mut self, rx: Receiver<Msg>) {
@@ -1358,17 +1383,20 @@ impl Worker {
     fn finish_journal(&mut self, revision: u64, unix: i64, result: io::Result<(usize, f64, f64)>) -> Result<u64, String> {
         match result {
             Ok((bytes, serialize_ms, write_ms)) => {
+                self.space_retry = FullVolumeRetry::default();
                 self.journaled = revision;
                 self.first_pending = None;
                 let _ = self.events.send(WorkerEvent::Journaled { revision, unix, serialize_ms, write_ms, bytes });
                 Ok(revision)
             }
             Err(e) => {
-                // Try again at the next interval rather than spinning.
-                self.first_pending = Some(Instant::now());
-                self.last_change = Instant::now();
+                let now = Instant::now();
+                self.first_pending = Some(now);
+                self.last_change = now;
                 let message = format!("recovery journal: {e}");
-                self.error(message.clone());
+                if self.space_retry.report_failure(e.kind(), now) {
+                    self.error(message.clone());
+                }
                 Err(message)
             }
         }
@@ -1410,6 +1438,7 @@ impl Worker {
         remove_if_present(&self.session_dir.join(SNAPSHOT))?;
         remove_if_present(&self.session_dir.join(META))?;
         self.journaled = 0;
+        self.space_retry = FullVolumeRetry::default();
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.checkpoints = Default::default();
@@ -1551,6 +1580,25 @@ impl Worker {
 #[cfg(test)]
 mod durability_tests {
     use super::*;
+
+    #[test]
+    fn full_volume_retry_limits_background_work_and_reports_distinct_failures() {
+        let mut retry = FullVolumeRetry::default();
+        let mut now = Instant::now();
+        assert!(retry.report_failure(io::ErrorKind::StorageFull, now));
+        let first = retry.delay;
+        for _ in 0..10 {
+            now = retry.deadline.unwrap();
+            assert!(!retry.report_failure(io::ErrorKind::StorageFull, now));
+            assert!(retry.deadline.unwrap() > now);
+            assert!(retry.deadline.unwrap() <= now + Duration::from_secs(60));
+        }
+        assert!(retry.delay > first);
+        assert!(retry.report_failure(io::ErrorKind::PermissionDenied, now));
+        assert!(retry.deadline.is_none());
+        assert!(retry.report_failure(io::ErrorKind::StorageFull, now));
+        assert_eq!(retry.delay, first);
+    }
 
     #[test]
     fn recovery_keeps_original_when_worker_has_stopped() {
