@@ -101,12 +101,22 @@ impl Session {
             | "project.discardBin"
             | "edit.undo"
             | "edit.redo" => Ok(()),
-            "timeline.select" | "playhead.set" | "playhead.step" => Ok(()),
+            "timeline.select"
+            | "playhead.set"
+            | "playhead.step"
+            | "trim.selectEditPoint"
+            | "trim.selectNearest"
+            | "trim.edit"
+            | "trim.clear"
+            | "trim.toggleType"
+            | "trim.monitor" => Ok(()),
+            // Each selected edge dispatches its own timeline.trim or timeline.roll below.
+            "trim.nudge" | "trim.backward" | "trim.forward" | "trim.backwardMany" | "trim.forwardMany" | "trim.extendToPlayhead" => Ok(()),
             "sequence.open" => {
                 let ids = p["item"].as_u64().map(ItemId).filter(|id| self.project.item(*id).is_none()).into_iter().collect();
                 self.hydrate_visible(ids)
             }
-            "timeline.trim" if p["mode"] != "ripple" => self.prepare_warm_trim(),
+            "timeline.trim" => self.prepare_warm_trim(),
             "project.select"
                 if p["items"].as_array().is_some_and(|ids| {
                     ids.iter().filter_map(Value::as_u64).all(|id| !w.index.labels.contains_key(&ItemId(id)) || self.project.item(ItemId(id)).is_some())

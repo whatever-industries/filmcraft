@@ -43,8 +43,9 @@ fn fixture(root: &Path) -> PathBuf {
             let mut a = p.make_track_item(matte, TrackKind::Audio, Tick::ZERO, range, rate).unwrap();
             v.link = Some(link);
             a.link = Some(link);
+            let later = p.make_track_item(matte, TrackKind::Video, range.end(), range, rate).unwrap();
             let q = p.sequence_mut(reel).unwrap();
-            q.video_tracks[0].items.push(v);
+            q.video_tracks[0].items.extend([v, later]);
             q.audio_tracks[0].items.push(a);
             Ok((reel, next))
         })
@@ -103,12 +104,17 @@ impl Run {
         assert!(self.deferred.iter().all(|id| self.warm.project.item(*id).is_none()));
     }
 
+    fn use_ripple_extension(&mut self) {
+        self.args["mode"] = json!("ripple");
+        self.args["deltaFrames"] = json!(12);
+    }
+
     fn trim(&mut self) {
         for s in [&mut self.reference, &mut self.warm] {
             s.execute("playhead.set", json!({"frame":2})).unwrap();
             s.execute("timeline.select", json!({"clips":[self.args["clip"]]})).unwrap();
             let delta = s.execute("timeline.trim", self.args.clone()).unwrap();
-            assert_eq!(delta["delta"], json!(s.sequence_rate().tick_of(-12)));
+            assert_eq!(delta["delta"], json!(s.sequence_rate().tick_of(self.args["deltaFrames"].as_i64().unwrap())));
         }
         assert_eq!(self.warm.project.sequence(self.reel), self.reference.project.sequence(self.reel));
         assert_eq!(self.warm.dirty_folder_bins(), [self.bin].into());
@@ -122,12 +128,27 @@ fn manifest(path: &Path) -> Value {
 
 #[test]
 fn save_and_discard_keep_other_reels_unloaded() {
+    check_save_and_discard("regular");
+}
+
+#[test]
+fn ripple_save_and_discard_keep_other_reels_unloaded() {
+    check_save_and_discard("ripple");
+}
+
+fn check_save_and_discard(mode: &str) {
     for save in [false, true] {
         let tmp = tempfile::tempdir().unwrap();
         let mut r = Run::new(tmp.path());
         let prior = manifest(&r.folder);
         let before = r.reference.project.clone();
+        if mode == "ripple" {
+            r.use_ripple_extension();
+        }
         r.trim();
+        let start = |project: &filmcraft_project::Project| project.sequence(r.reel).unwrap().video_tracks[0].items[1].start;
+        let shift = if mode == "ripple" { r.warm.sequence_rate().tick_of(12) } else { Tick::ZERO };
+        assert_eq!(start(&r.warm.project), start(&before) + shift);
         r.warm.execute("edit.undo", json!({})).unwrap();
         assert_eq!(r.warm.project.sequence(r.reel), before.sequence(r.reel));
         assert!(!r.warm.is_dirty());
@@ -164,6 +185,9 @@ fn child(root: &Path, action: &str) -> Command {
 
 fn checkpoint(root: &Path, action: &str) {
     let mut r = Run::new(root);
+    if action == "ripple" {
+        r.use_ripple_extension();
+    }
     let disk = fs::read(&r.folder).unwrap();
     r.warm.start_autosave(AutosaveConfig::new(root.join("data"))).unwrap();
     r.trim();
@@ -225,7 +249,7 @@ fn crash_recovery() {
         }
         return;
     }
-    for action in ["checkpoint", "interrupt", "discard"] {
+    for action in ["checkpoint", "ripple", "interrupt", "discard"] {
         let tmp = tempfile::tempdir().unwrap();
         let mut writer = child(tmp.path(), action).stdout(Stdio::piped()).spawn().unwrap();
         let ready = BufReader::new(writer.stdout.take().unwrap()).lines().map_while(Result::ok).any(|l| l.contains("confirmed trim boundary"));
@@ -275,11 +299,24 @@ fn closing_the_edited_bin_loads_only_the_next_tab() {
 
 #[test]
 fn dragging_a_linked_clip_edge_keeps_unrelated_reels_unloaded() {
+    check_edge_drag(false);
+}
+
+#[test]
+fn dragging_a_ripple_edge_keeps_unrelated_reels_unloaded() {
+    check_edge_drag(true);
+}
+
+fn check_edge_drag(ripple: bool) {
     let tmp = tempfile::tempdir().unwrap();
     let r = Run::new(tmp.path());
     let clip = r.args["clip"].as_u64().unwrap();
     let prior = r.reference.project.sequence(r.reel).unwrap().video_tracks[0].items[0].duration;
     let mut d = Driver::open(r.warm, support::with_shots(support::builder()));
+    if ripple {
+        d.exec("tool.ripple", json!({}));
+    }
+    let later = r.reference.project.sequence(r.reel).unwrap().video_tracks[0].items[1].start;
     let edges = ["in", "out"].map(|edge| d.ok("ui.timeline.locate", json!({"clip":clip,"edge":edge}))["x"].as_f64().unwrap() as f32);
     let [_, top, _, _] = d.expect_rect(&format!("timeline.clip.{clip}"));
     let y = top as f32 + 8.0;
@@ -290,6 +327,7 @@ fn dragging_a_linked_clip_edge_keeps_unrelated_reels_unloaded() {
     let q = d.app().session.project.sequence(r.reel).unwrap();
     let duration = q.video_tracks[0].items[0].duration;
     assert!(duration < prior);
+    assert_eq!(q.video_tracks[0].items[1].start, if ripple { later + (duration - prior) } else { later });
     assert_eq!(q.audio_tracks[0].items[0].duration, duration);
     assert!(r.deferred.iter().all(|id| d.app().session.project.item(*id).is_none()));
     d.exec("file.save", json!({}));
@@ -308,4 +346,17 @@ fn a_full_project_command_preserves_the_trim_on_redo() {
     r.warm.execute("edit.redo", json!({})).unwrap();
     assert_eq!(r.warm.project, r.reference.project);
     assert_eq!(r.warm.dirty_folder_bins(), [r.bin].into());
+}
+
+#[test]
+fn nudging_a_selected_ripple_edge_keeps_unrelated_reels_unloaded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut r = Run::new(tmp.path());
+    r.args["mode"] = json!("ripple");
+    r.reference.execute("timeline.trim", r.args.clone()).unwrap();
+    r.warm.execute("trim.selectEditPoint", json!({"clip":r.args["clip"],"edge":"out","kind":"ripple"})).unwrap();
+    r.warm.execute("trim.nudge", json!({"frames":-12})).unwrap();
+    assert_eq!(r.warm.project.sequence(r.reel), r.reference.project.sequence(r.reel));
+    assert_eq!(r.warm.dirty_folder_bins(), [r.bin].into());
+    r.unloaded();
 }
