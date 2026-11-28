@@ -10,6 +10,35 @@ Single-editor production readiness is the finish line for #1049 and the first of
 
 The second phase builds shared editing on the same bin identities, independent saves and recoverable revisions. Qualify bin ownership, read-only access and handoff on two machines, including competing writes, a writer disconnecting during Save, and a stale writer reconnecting. That phase has its own release decision.
 
+### Branch implementation and validation
+
+Check an item when the modular branch demonstrates the behavior. “Local only” identifies work that has yet to reach the fork. [Working branch](https://github.com/whatever-industries/filmcraft/tree/codex/project-sequence-recovery) · [Rules and acceptance tests](https://github.com/whatever-industries/filmcraft/blob/codex/project-sequence-recovery/docs/modular-project-rules.md)
+
+- [x] **Reversible conversion.** Six project fixtures round-tripped. Interrupting a 1,002-item conversion left the original available for a successful retry.
+- [x] **Independent saves and historical recovery.** Save changed records, reject stale revisions, restore an old cut as a copy, and rescue it when unrelated records are damaged. Both prototypes merged into the fork. [Independent saves](https://github.com/whatever-industries/filmcraft/pull/1) · [Sequence recovery](https://github.com/whatever-industries/filmcraft/pull/2)
+- [x] **Editor Save, Discard, and bin backups.** Global Save writes dirty bins and changed settings. Closing a bin saves or discards its edits. Count-based pruning protects kept versions and the cut as it left its bin.
+- [x] **Feature-scale measurements.** At 24,000 and 48,000 clips, saving a move’s destination took 110 ms and 185 ms. The corresponding standard-project saves took 204 ms and 357 ms. Folder open took longer and used more memory in that trial. [Measurements](https://github.com/whatever-industries/filmcraft/blob/codex/project-sequence-recovery/docs/modular-project-rules.md#sequence-transfer-performance)
+- [x] **Opt-in editing with other reels unloaded.** The branch supports project-wide source relink and crash recovery. Qualified one-reel trims and splits kept 11 unrelated reels unloaded at both project sizes. [Relink and recovery](https://github.com/whatever-industries/filmcraft/blob/codex/project-sequence-recovery/docs/modular-project-rules.md#crash-recovery-after-a-partial-relink) · [One-reel trials](https://github.com/whatever-industries/filmcraft/blob/codex/project-sequence-recovery/docs/modular-project-rules.md#editing-one-reel-with-unrelated-timelines-unloaded)
+- [x] **Published-history backup · local only.** After two intermediate saves were pruned and the source volume ejected, the 107-frame current cut and the protected 119-frame cut both reopened.
+- [ ] **Next · check media after restore.** Inspect originals and proxies for one retained save. Repeat the detached-drive trial with only a proxy available, the original returning, and different footage at the same relative path. Inspection must preserve both cuts and write zero project bytes.
+- [ ] **Review replacements in the editor.** Check identity again before applying a relink. Save the bin offline and verify the remembered path and review requirement on reopen.
+- [ ] **Qualify the production workflow end to end.** Extend validation beyond the qualified one-reel edits, exercise a physically full volume, and run the single-editor acceptance workflow in “What completes #1049” on a feature-scale project.
+
+### Upstream merges
+
+Check an item when it lands on the relevant upstream `main`. Later entries describe merge milestones and can span several PRs.
+
+- [x] **Shared bin and item records** merged into craft-libs. [craft-libs #3517](https://github.com/storytold/craft-libs/pull/3517)
+- [x] **Shared schema 19 dependency** merged into FilmCraft. [FilmCraft #5319](https://github.com/storytold/filmcraft/pull/5319)
+- [ ] **Reversible converter · submitted.** The review changes are in the PR and maintainer approval is pending. [FilmCraft #5252](https://github.com/storytold/filmcraft/pull/5252)
+- [ ] **Independent saves · prepared on the fork.** Submit after #5252 is approved. [Prepared change](https://github.com/whatever-industries/filmcraft/commit/9603debbb4d44a1e684cf393f88a2b3c1d0c0f5c)
+- [ ] **Schema 19 sequence recovery · prepared on the fork.** Submit after independent saves. [Prepared change](https://github.com/whatever-industries/filmcraft/commit/7a12ad1494c957b12eb145d9d9bfe4de5472df47)
+- [ ] **Editor saves and recovery.** Land bin Save and Discard, sequence-move recovery, crash checkpoints, and retention after the storage changes.
+- [ ] **On-demand editing.** Land the qualified project-wide search, relink, and one-reel editing paths.
+- [ ] **Published-history backup and restore review.** Land the backup port and the media checks as each passes branch validation.
+
+**Close #1049** when the merged single-editor workflow passes the production acceptance run. Multi-editor collaboration follows as phase two.
+
 ## Saving and leaving the editor
 
 | Rule | Status | Evidence or acceptance test |
