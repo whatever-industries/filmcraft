@@ -132,6 +132,52 @@ impl Default for Project {
     }
 }
 
+impl ProjectItem {
+    /// Highest project-wide ID owned or referenced by this record, including timeline placements.
+    pub fn max_id(&self) -> u64 {
+        let mut max = self.id.0;
+        let mut see = |id: u64| max = max.max(id);
+        fn mixer(m: &MixerStrip) -> impl Iterator<Item = u64> + '_ {
+            m.sends.iter().map(|s| s.target.0).chain(m.output.map(|t| t.0))
+        }
+        match &self.kind {
+            ItemKind::Media(m) => m.markers.iter().for_each(|mk| see(mk.id.0)),
+            ItemKind::Subclip { parent, .. } => see(parent.0),
+            ItemKind::Sequence(s) => {
+                s.markers.iter().for_each(|mk| see(mk.id.0));
+                mixer(&s.master_mixer).for_each(&mut see);
+                for t in s.all_tracks().chain(&s.submix_tracks) {
+                    see(t.id.0);
+                    mixer(&t.mixer).for_each(&mut see);
+                    for c in &t.items {
+                        see(c.id.0);
+                        see(c.item.0);
+                        c.link.into_iter().chain(c.group).for_each(&mut see);
+                        c.markers.iter().for_each(|mk| see(mk.id.0));
+                    }
+                    for tr in &t.transitions {
+                        see(tr.id.0);
+                        tr.from.into_iter().chain(tr.to).for_each(|c| see(c.0));
+                    }
+                }
+                for t in &s.caption_tracks {
+                    see(t.id.0);
+                    t.captions.iter().for_each(|c| see(c.id.0));
+                }
+                for cam in s.multicam.iter().flat_map(|m| &m.cameras) {
+                    cam.video_track.iter().chain(&cam.audio_tracks).for_each(|t| see(t.0));
+                    cam.source.iter().for_each(|i| see(i.0));
+                }
+                if let Some(m) = &s.merged {
+                    m.video.iter().chain(&m.audio).for_each(|i| see(i.0));
+                }
+            }
+            _ => {}
+        }
+        max
+    }
+}
+
 impl Project {
     /// The highest `next_id` a loaded project may carry. Ids are handed out one at a time, so no
     /// amount of editing gets near it; a file past it is damaged, and refusing it keeps
@@ -184,46 +230,9 @@ impl Project {
         self.transcripts.keys().chain(self.source_graphics.keys()).chain(self.narrations.keys()).for_each(|i| see(i.0));
         // `lut.import` names LUTs `lut<id>`
         self.luts.iter().filter_map(|l| l.id.strip_prefix("lut")?.parse().ok()).for_each(&mut see);
-        fn mixer(m: &MixerStrip) -> impl Iterator<Item = u64> + '_ {
-            m.sends.iter().map(|s| s.target.0).chain(m.output.map(|t| t.0))
-        }
         for (id, item) in &self.items {
             see(id.0);
-            see(item.id.0);
-            match &item.kind {
-                ItemKind::Media(m) => m.markers.iter().for_each(|mk| see(mk.id.0)),
-                ItemKind::Subclip { parent, .. } => see(parent.0),
-                ItemKind::Sequence(s) => {
-                    s.markers.iter().for_each(|mk| see(mk.id.0));
-                    mixer(&s.master_mixer).for_each(&mut see);
-                    for t in s.all_tracks().chain(&s.submix_tracks) {
-                        see(t.id.0);
-                        mixer(&t.mixer).for_each(&mut see);
-                        for c in &t.items {
-                            see(c.id.0);
-                            see(c.item.0);
-                            c.link.into_iter().chain(c.group).for_each(&mut see);
-                            c.markers.iter().for_each(|mk| see(mk.id.0));
-                        }
-                        for tr in &t.transitions {
-                            see(tr.id.0);
-                            tr.from.into_iter().chain(tr.to).for_each(|c| see(c.0));
-                        }
-                    }
-                    for t in &s.caption_tracks {
-                        see(t.id.0);
-                        t.captions.iter().for_each(|c| see(c.id.0));
-                    }
-                    for cam in s.multicam.iter().flat_map(|m| &m.cameras) {
-                        cam.video_track.iter().chain(&cam.audio_tracks).for_each(|t| see(t.0));
-                        cam.source.iter().for_each(|i| see(i.0));
-                    }
-                    if let Some(m) = &s.merged {
-                        m.video.iter().chain(&m.audio).for_each(|i| see(i.0));
-                    }
-                }
-                _ => {}
-            }
+            see(item.max_id());
         }
         max
     }

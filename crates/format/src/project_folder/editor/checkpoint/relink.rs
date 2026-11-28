@@ -45,7 +45,7 @@ impl CheckpointStore {
         if identity(saved).is_none() || identity(saved) != identity(working) {
             return Err(invalid("source differs from reviewed relink"));
         }
-        self.publish_edited_item(session, path, expected, saved, working, publish_marker)
+        self.publish_edited_item(session, path, expected, (saved, working), None, publish_marker)
     }
 
     pub fn publish_trim(
@@ -53,14 +53,15 @@ impl CheckpointStore {
         session: &Path,
         path: &Path,
         expected: &str,
-        saved: &ProjectItem,
-        working: &ProjectItem,
+        items: (&ProjectItem, &ProjectItem),
+        next_id: Option<u64>,
         publish_marker: impl FnOnce(&str, usize, &str) -> io::Result<usize>,
     ) -> io::Result<CheckpointWrite> {
+        let (saved, working) = items;
         if saved.as_sequence().is_none() || working.as_sequence().is_none() {
             return Err(invalid("expected a sequence checkpoint"));
         }
-        self.publish_edited_item(session, path, expected, saved, working, publish_marker)
+        self.publish_edited_item(session, path, expected, items, next_id, publish_marker)
     }
 
     fn publish_edited_item(
@@ -68,10 +69,11 @@ impl CheckpointStore {
         session: &Path,
         path: &Path,
         expected: &str,
-        saved: &ProjectItem,
-        working: &ProjectItem,
+        items: (&ProjectItem, &ProjectItem),
+        next_id: Option<u64>,
         publish_marker: impl FnOnce(&str, usize, &str) -> io::Result<usize>,
     ) -> io::Result<CheckpointWrite> {
+        let (saved, working) = items;
         let start = Instant::now();
         let folder = path.parent().ok_or_else(|| invalid("missing project directory"))?;
         let (_, mut records) = revisions::read_base(folder, expected)?;
@@ -80,6 +82,7 @@ impl CheckpointStore {
             return Err(invalid("stale relink checkpoint base"));
         }
         let mut envelope = directory.envelope.take();
+        crate::project_folder::relinked_source::set_trim_counter(&mut envelope, next_id, Some(working))?;
         if let Some(fields) = envelope.as_object_mut() {
             fields.remove("view");
         }

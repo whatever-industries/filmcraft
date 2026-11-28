@@ -39,12 +39,7 @@ pub(super) fn open_with<T>(
 ) -> Result<(T, CacheCost)> {
     let path = std::path::absolute(path)?;
     let dir = cache_directory(&path, data_root)?;
-    let lock = fs::File::options().create(true).truncate(false).read(true).write(true).open(dir.join("index.lock"))?;
-    match lock.try_lock() {
-        Ok(()) => {}
-        Err(fs::TryLockError::WouldBlock) => return Err("another preview is refreshing this cache; reopen when it finishes".into()),
-        Err(fs::TryLockError::Error(e)) => return Err(e.into()),
-    }
+    let _lock = filmcraft_format::project_folder::index::lock_cache(&dir)?;
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
         if entry.file_name().as_encoded_bytes().starts_with(STAGE_PREFIX.as_bytes()) && entry.file_type()?.is_file() {
@@ -70,7 +65,7 @@ pub(super) fn open_with<T>(
             let (index, stage) = match old {
                 Some(index)
                     if index.manifest == revision
-                        && index.labels.values().all(|l| l.class.is_some() && l.impact.is_some())
+                        && index.labels.values().all(|l| l.class.is_some() && l.impact.is_some() && l.max_id.is_some())
                         && reader.inventory().eq(index.labels.keys().copied()) =>
                 {
                     (index, None)

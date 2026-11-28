@@ -27,6 +27,8 @@ pub(crate) struct WarmFolder {
     manifest: PathBuf,
     pub revision: String,
     pub view: ProjectView,
+    // Older verified indexes support edge trims but cannot qualify an allocating edit.
+    saved_next_id: Option<u64>,
     pub edited_item: Option<(BinId, ProjectItem)>,
     pub cleanup: Option<BinId>,
 }
@@ -45,12 +47,19 @@ impl WarmFolder {
         let first = index.labels.iter().find_map(|(&id, label)| label.sequence.then_some(id));
         let playheads = reader.view.playheads.keys().copied().collect::<Vec<_>>();
         reader.load(index.labels.iter().filter_map(|(&id, label)| (!label.sequence).then_some(id)).chain(first).chain(playheads).collect()).map_err(error)?;
-        let loaded = reader.take_loaded().map_err(error)?;
+        let mut loaded = reader.take_loaded().map_err(error)?;
         if loaded.project.items.len() == index.labels.len() {
             return Err(error("all records are resident"));
         }
+        let saved_next_id = index.labels.values().try_fold(loaded.project.next_id, |next, label| Some(next.max(label.max_id?.saturating_add(1))));
+        if let Some(next) = saved_next_id {
+            if next > Project::MAX_NEXT_ID {
+                return Err(error("project ID space exhausted"));
+            }
+            loaded.project.next_id = next;
+        }
         let view = reader.view.clone();
-        Ok((Self { reader, index, manifest, revision, view, edited_item: None, cleanup: None }, loaded))
+        Ok((Self { reader, index, manifest, revision, view, saved_next_id, edited_item: None, cleanup: None }, loaded))
     }
 
     pub fn sequence_name(&self, id: ItemId) -> Option<&str> {
@@ -65,6 +74,7 @@ impl WarmFolder {
             base_revision: self.revision.clone(),
             saved: saved.clone(),
             working: working.clone(),
+            next_id: self.saved_next_id.map(|_| project.next_id),
             revision,
         })
     }
@@ -116,7 +126,7 @@ impl Session {
                 let ids = p["item"].as_u64().map(ItemId).filter(|id| self.project.item(*id).is_none()).into_iter().collect();
                 self.hydrate_visible(ids)
             }
-            "timeline.trim" => self.prepare_warm_trim(),
+            "timeline.trim" | "trim.ripplePrevious" | "trim.rippleNext" => Ok(()),
             "project.select"
                 if p["items"].as_array().is_some_and(|ids| {
                     ids.iter().filter_map(Value::as_u64).all(|id| !w.index.labels.contains_key(&ItemId(id)) || self.project.item(ItemId(id)).is_some())
@@ -135,11 +145,14 @@ impl Session {
         }
     }
 
-    fn prepare_warm_trim(&mut self) -> Result<()> {
+    pub(crate) fn prepare_warm_trim(&mut self, allocating: bool) -> Result<()> {
         let Some(id) = self.state.active_sequence else { return Ok(()) };
         let Some(w) = &mut self.warm_folder else { return Ok(()) };
         let Some(item) = self.project.item(id) else { return self.promote_warm_folder() };
-        if w.edited_item.as_ref().is_some_and(|(_, saved)| saved.id != id) || w.reader.directory.is_sequence_copy(id) {
+        if (allocating && w.saved_next_id.is_none())
+            || w.edited_item.as_ref().is_some_and(|(_, saved)| saved.id != id)
+            || w.reader.directory.is_sequence_copy(id)
+        {
             return self.promote_warm_folder();
         }
         let Some(owner) = crate::relink::review::owning_bin(&self.project, id) else { return self.promote_warm_folder() };
@@ -267,6 +280,9 @@ impl Session {
             if working != saved {
                 Arc::make_mut(&mut result).items.insert(saved.id, working.clone());
             }
+            if w.saved_next_id.is_some() && partial.next_id != result.next_id {
+                Arc::make_mut(&mut result).next_id = partial.next_id;
+            }
             Ok(result)
         };
         let current = merge(&self.project)?;
@@ -297,6 +313,7 @@ impl Session {
         if bin.is_some_and(|id| self.project.root.find_bin(id).is_none()) {
             return Err(error("unknown bin"));
         }
+        let prior_revision = w.revision.clone();
         let mut bytes = 0;
         let mut warning = None;
         let mut resolved = true;
@@ -307,7 +324,7 @@ impl Session {
         {
             if bin.is_none_or(|id| id == *owner) {
                 let saved_change = if saved.as_sequence().is_some() {
-                    save_trimmed_sequence(&w.manifest, &w.revision, Some((*owner, saved, working)), view)
+                    save_trimmed_sequence(&w.manifest, &w.revision, Some((*owner, saved, working)), view, w.saved_next_id.map(|_| self.project.next_id))
                 } else {
                     save_relinked_source(&w.manifest, &w.revision, *owner, saved, working)
                 }
@@ -316,6 +333,7 @@ impl Session {
                 bytes = saved_change.bytes_written;
                 warning = saved_change.maintenance_warning;
                 *saved = working.clone();
+                w.saved_next_id = w.saved_next_id.map(|_| self.project.next_id);
                 w.cleanup = Some(*owner);
             } else {
                 resolved = false;
@@ -323,12 +341,19 @@ impl Session {
         }
         if let Some(view) = view {
             if bytes == 0 {
-                let change = save_trimmed_sequence(&w.manifest, &w.revision, None, Some(view)).map_err(error)?;
+                let change = save_trimmed_sequence(&w.manifest, &w.revision, None, Some(view), None).map_err(error)?;
                 w.revision = change.revision;
                 bytes = change.bytes_written;
                 warning = change.maintenance_warning;
             }
             w.view = current_view;
+        }
+        if bytes > 0
+            && w.edited_item.as_ref().is_some_and(|(_, item)| item.as_sequence().is_some())
+            && let Some(cache) = &self.warm_cache
+            && let Err(e) = filmcraft_format::project_folder::index::refresh_saved_trim(&w.manifest, cache, &prior_revision, &w.revision)
+        {
+            log::warn!("could not refresh the saved timeline index: {e}");
         }
         let _guard = if bytes == 0 { Some(w.lock()?) } else { None };
         if resolved {
@@ -365,7 +390,11 @@ impl Session {
                 p.clear_relink_checkpoint().map_err(error)?;
             }
             let old = self.project.clone();
-            Arc::make_mut(&mut self.project).items.insert(saved.id, saved.clone());
+            let project = Arc::make_mut(&mut self.project);
+            project.items.insert(saved.id, saved.clone());
+            if let Some(next) = w.saved_next_id {
+                project.next_id = next;
+            }
             self.history.clear();
             self.refresh_restored_media(&old);
             self.bump();

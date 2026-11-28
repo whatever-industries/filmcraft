@@ -722,6 +722,7 @@ pub struct ItemDraft {
     pub base_revision: String,
     pub saved: filmcraft_project::ProjectItem,
     pub working: filmcraft_project::ProjectItem,
+    pub next_id: Option<u64>,
     pub revision: u64,
 }
 
@@ -733,7 +734,7 @@ impl ItemDraft {
     fn snapshot(self) -> io::Result<Snapshot> {
         use filmcraft_format::project_folder::FolderSnapshot;
         use filmcraft_project::MediaRef;
-        let Self { manifest, base_revision, saved, working, revision } = self;
+        let Self { manifest, base_revision, saved, working, next_id, revision } = self;
         // The records are immutable. Reading a pinned snapshot leaves the writer lock
         // available when a rotating Auto Save precedes the first recovery checkpoint.
         let (snapshot, mut loaded) = FolderSnapshot::open(&manifest)?;
@@ -750,6 +751,9 @@ impl ItemDraft {
             return Err(io::Error::other("item differs from saved edit"));
         }
         *item = working;
+        if sequence_edit && let Some(next) = next_id {
+            loaded.project.next_id = next;
+        }
         let path = manifest.to_str().ok_or_else(|| io::Error::other("non-UTF-8 recovery origin"))?.to_owned();
         Ok(Snapshot { project: Arc::new(loaded.project), path: Some(path), revision, modular: true, reviewed_source: (!sequence_edit).then_some(id) })
     }
@@ -1308,7 +1312,7 @@ impl Worker {
                 publish_checkpoint_meta(&self.session_dir, &mut meta, root, bytes)
             };
             let written = if draft.saved.as_sequence().is_some() {
-                self.checkpoints.publish_trim(&self.session_dir, &draft.manifest, &draft.base_revision, &draft.saved, &draft.working, marker)
+                self.checkpoints.publish_trim(&self.session_dir, &draft.manifest, &draft.base_revision, (&draft.saved, &draft.working), draft.next_id, marker)
             } else {
                 self.checkpoints.publish_relink(&self.session_dir, &draft.manifest, &draft.base_revision, &draft.saved, &draft.working, marker)
             }?;

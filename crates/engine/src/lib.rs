@@ -1312,6 +1312,24 @@ impl Session {
         self.edit_sequence_with(label, merge, false, f)
     }
 
+    fn edit_one_reel_trim<R>(
+        &mut self,
+        label: &str,
+        allocating: bool,
+        f: impl FnOnce(&mut Sequence, &mut EditCtx, &mut EditorState) -> Result<R>,
+    ) -> Result<R> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.prepare_warm_trim(allocating)?;
+            if self.warm_folder.is_some() {
+                return self.edit_sequence_with(label, None, true, f);
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = allocating;
+        self.edit_sequence(label, f)
+    }
+
     fn edit_sequence_with<R>(
         &mut self,
         label: &str,
@@ -1333,6 +1351,9 @@ impl Session {
                 let mut ctx = EditCtx { next_id: &mut next, media_duration: &durations, media_start: &starts, min_duration: min };
                 f(seq, &mut ctx, st)?
             };
+            if next > Project::MAX_NEXT_ID {
+                return Err(EngineError::Other("project ID space exhausted".into()));
+            }
             p.next_id = next;
             if let Some(s) = p.sequence(seq_id) {
                 s.check().map_err(EngineError::Other)?;

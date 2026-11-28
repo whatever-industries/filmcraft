@@ -12,7 +12,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-fn fixture(root: &Path) -> PathBuf {
+fn fixture(root: &Path, playhead: bool) -> PathBuf {
     let origin = root.join("origin");
     fs::create_dir_all(&origin).unwrap();
     let folder = origin.join("Feature");
@@ -32,9 +32,10 @@ fn fixture(root: &Path) -> PathBuf {
         .edit("Prepare linked reel", |p, _| {
             let archive = p.add_bin("Archive", None);
             let next = p.new_sequence("Next tab", Default::default(), 1, 0, Some(archive));
-            p.new_sequence("Unrelated reel", Default::default(), 1, 0, Some(archive));
+            let hidden = p.new_sequence("Unrelated reel", Default::default(), 1, 0, Some(archive));
             let reel_bin = p.add_bin("Current cuts", None);
-            let reel = p.new_sequence("Reel 3", Default::default(), 1, 1, Some(reel_bin));
+            let tracks = if playhead { 2 } else { 1 };
+            let reel = p.new_sequence("Reel 3", Default::default(), tracks, tracks, Some(reel_bin));
             let matte = p.sequence(f.sequence).unwrap().video_tracks[0].items[0].item;
             let rate = p.sequence(reel).unwrap().settings.frame_rate;
             let range = TimeRange::new(Tick::ZERO, rate.tick_of(36));
@@ -47,6 +48,19 @@ fn fixture(root: &Path) -> PathBuf {
             let q = p.sequence_mut(reel).unwrap();
             q.video_tracks[0].items.extend([v, later]);
             q.audio_tracks[0].items.push(a);
+            if playhead {
+                // W extracts from the middle of the sync-locked bed. The locked picture stays fixed.
+                let long = TimeRange::new(Tick::ZERO, rate.tick_of(72));
+                let bed = p.make_track_item(matte, TrackKind::Audio, Tick::ZERO, long, rate).unwrap();
+                let locked = p.make_track_item(matte, TrackKind::Video, Tick::ZERO, long, rate).unwrap();
+                let q = p.sequence_mut(reel).unwrap();
+                q.audio_tracks[1].sync_lock = true;
+                q.audio_tracks[1].items.push(bed);
+                q.video_tracks[1].locked = true;
+                q.video_tracks[1].items.push(locked);
+                let last = p.make_track_item(matte, TrackKind::Video, Tick::ZERO, range, rate).unwrap();
+                p.sequence_mut(hidden).unwrap().video_tracks[0].items.push(last);
+            }
             Ok((reel, next))
         })
         .unwrap();
@@ -76,7 +90,10 @@ struct Run {
 
 impl Run {
     fn new(root: &Path) -> Self {
-        let folder = fixture(root);
+        Self::from_folder(root, fixture(root, false))
+    }
+
+    fn from_folder(root: &Path, folder: PathBuf) -> Self {
         let data = root.join("data");
         let directory = FolderDirectory::open(&folder).unwrap();
         let (index, ..) = Index::build(&directory, None).unwrap();
@@ -102,6 +119,28 @@ impl Run {
 
     fn unloaded(&self) {
         assert!(self.deferred.iter().all(|id| self.warm.project.item(*id).is_none()));
+    }
+
+    fn trim_to_playhead(&mut self, command: &str) {
+        let before = self.reference.project.clone();
+        for s in [&mut self.reference, &mut self.warm] {
+            playhead_trim(s, command, 12);
+        }
+        let cut = self.warm.project.sequence(self.reel).unwrap();
+        assert_eq!(Some(cut), self.reference.project.sequence(self.reel));
+        assert_eq!(self.warm.project.next_id, self.reference.project.next_id);
+        assert!(self.warm.project.next_id > before.next_id);
+        let prior = before.sequence(self.reel).unwrap();
+        assert!(cut.video_tracks[0].items[1].start < prior.video_tracks[0].items[1].start);
+        assert_eq!(cut.video_tracks[0].items[0].link, cut.audio_tracks[0].items[0].link);
+        if prior.video_tracks[1].locked {
+            assert_eq!(cut.video_tracks[1], prior.video_tracks[1]);
+            if command == "trim.rippleNext" {
+                assert!(cut.audio_tracks[1].items.len() > prior.audio_tracks[1].items.len());
+            }
+        }
+        assert_eq!(self.warm.dirty_folder_bins(), [self.bin].into());
+        self.unloaded();
     }
 
     fn use_ripple_extension(&mut self) {
@@ -174,6 +213,120 @@ fn check_save_and_discard(mode: &str) {
     }
 }
 
+fn playhead_trim(s: &mut Session, command: &str, frame: i64) {
+    let clip = s.active_sequence().unwrap().video_tracks[0].items[0].id;
+    s.execute("timeline.select", json!({"clips":[clip]})).unwrap();
+    s.execute("playhead.set", json!({"frame":frame})).unwrap();
+    s.execute(command, json!({})).unwrap();
+}
+
+fn another_split(s: &mut Session, next: u64) {
+    assert_eq!(s.project.next_id, next);
+    playhead_trim(s, "trim.ripplePrevious", 1);
+    let id = s.active_sequence().unwrap().video_tracks[0].items[0].id.0;
+    assert!(id >= next && id < s.project.next_id);
+}
+
+#[test]
+fn playhead_trims_save_discard_and_reopen() {
+    for command in ["trim.ripplePrevious", "trim.rippleNext"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut r = Run::from_folder(tmp.path(), fixture(tmp.path(), true));
+        let prior = manifest(&r.folder);
+        let before = r.reference.project.clone();
+        r.trim_to_playhead(command);
+        r.warm.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(r.warm.project.next_id, before.next_id);
+        assert_eq!(r.warm.project.sequence(r.reel), before.sequence(r.reel));
+        r.unloaded();
+        r.warm.execute("edit.redo", json!({})).unwrap();
+        assert_eq!(r.warm.project.sequence(r.reel), r.reference.project.sequence(r.reel));
+        assert_eq!(r.warm.project.next_id, r.reference.project.next_id);
+        r.unloaded();
+        r.warm.execute("project.discardBin", json!({"bin":r.bin})).unwrap();
+        assert_eq!(r.warm.project.next_id, before.next_id);
+        assert_eq!(r.warm.project.sequence(r.reel), before.sequence(r.reel));
+        assert!(!r.warm.is_dirty());
+        assert_eq!(manifest(&r.folder), prior);
+        r.unloaded();
+        playhead_trim(&mut r.warm, command, 12);
+        if command == "trim.ripplePrevious" {
+            r.warm.execute("project.saveBin", json!({"bin":r.bin})).unwrap();
+        } else {
+            r.warm.execute("file.save", json!({})).unwrap();
+        }
+        let next = manifest(&r.folder);
+        assert_eq!(next["bins"], prior["bins"]);
+        let changed: Vec<_> =
+            next["items"].as_array().unwrap().iter().zip(prior["items"].as_array().unwrap()).filter(|(a, b)| a != b).map(|(a, _)| &a[0]).collect();
+        assert_eq!(changed, [&json!(r.reel)]);
+        let envelope = manifest(&r.folder.with_file_name(next["envelope"].as_str().unwrap()));
+        assert_eq!(envelope["project"]["next_id"], r.reference.project.next_id);
+        assert_eq!(open(&r.folder).project, r.reference.project);
+        assert!(!r.warm.is_dirty());
+        r.unloaded();
+        r.warm = Session::local_folder_editor();
+        r.warm.enable_experimental_modular_relink(tmp.path().join("data"));
+        r.warm.execute("file.open", json!({"path":r.folder})).unwrap();
+        another_split(&mut r.warm, r.reference.project.next_id);
+        playhead_trim(&mut r.reference, "trim.ripplePrevious", 1);
+        assert_eq!(r.warm.project.sequence(r.reel), r.reference.project.sequence(r.reel));
+        r.unloaded();
+    }
+}
+
+#[test]
+fn timeline_q_and_w_trim_only_the_active_reel() {
+    for (key, command) in [("Q", "trim.ripplePrevious"), ("W", "trim.rippleNext")] {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut r = Run::from_folder(tmp.path(), fixture(tmp.path(), true));
+        playhead_trim(&mut r.reference, command, 12);
+        let mut d = Driver::open(r.warm, support::with_shots(support::builder()));
+        d.exec("timeline.select", json!({"clips":[r.args["clip"]]}));
+        d.exec("playhead.set", json!({"frame":12}));
+        d.ok("ui.set", json!({"focused":"Timeline"}));
+        d.ok("ui.key", json!({"key":key}));
+        d.frames(4);
+        let s = &d.app().session;
+        assert_eq!(s.project.sequence(r.reel), r.reference.project.sequence(r.reel));
+        assert_eq!(s.dirty_folder_bins(), [r.bin].into());
+        assert!(r.deferred.iter().all(|id| s.project.item(*id).is_none()));
+    }
+}
+
+#[test]
+fn split_uses_ids_above_a_deferred_reel_when_the_stored_counter_lags() {
+    use sha2::{Digest, Sha256};
+    let tmp = tempfile::tempdir().unwrap();
+    let folder = fixture(tmp.path(), true);
+    let mut head = manifest(&folder);
+    let mut envelope = manifest(&folder.with_file_name(head["envelope"].as_str().unwrap()));
+    envelope["project"]["next_id"] = json!(1);
+    let bytes = serde_json::to_vec(&envelope).unwrap();
+    let key = format!("{:x}", Sha256::digest(&bytes));
+    fs::write(folder.with_file_name(&key), bytes).unwrap();
+    head["envelope"] = json!(key);
+    fs::write(&folder, serde_json::to_vec(&head).unwrap()).unwrap();
+    let mut r = Run::from_folder(tmp.path(), folder);
+    let max = r.reference.project.max_id();
+    assert!(r.deferred.iter().any(|id| r.reference.project.item(*id).unwrap().max_id() == max));
+    r.trim_to_playhead("trim.ripplePrevious");
+    assert!(r.warm.project.sequence(r.reel).unwrap().video_tracks[0].items[0].id.0 > max);
+}
+
+#[test]
+fn promoting_after_split_undo_preserves_ids_for_redo() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut r = Run::from_folder(tmp.path(), fixture(tmp.path(), true));
+    r.trim_to_playhead("trim.rippleNext");
+    r.warm.execute("edit.undo", json!({})).unwrap();
+    r.unloaded();
+    r.warm.execute("file.projectSettings.general", json!({})).unwrap();
+    r.warm.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(r.warm.project, r.reference.project);
+    another_split(&mut r.warm, r.reference.project.next_id);
+}
+
 const ACTION: &str = "FILMCRAFT_TEST_TRIM_ACTION";
 const ROOT: &str = "FILMCRAFT_TEST_TRIM_ROOT";
 
@@ -184,17 +337,24 @@ fn child(root: &Path, action: &str) -> Command {
 }
 
 fn checkpoint(root: &Path, action: &str) {
-    let mut r = Run::new(root);
+    let playhead = matches!(action, "trim.ripplePrevious" | "trim.rippleNext");
+    let mut r = Run::from_folder(root, fixture(root, playhead));
     if action == "ripple" {
         r.use_ripple_extension();
     }
     let disk = fs::read(&r.folder).unwrap();
     r.warm.start_autosave(AutosaveConfig::new(root.join("data"))).unwrap();
-    r.trim();
+    if playhead {
+        r.trim_to_playhead(action);
+        fs::write(root.join("edited-reel"), serde_json::to_vec(&r.reel).unwrap()).unwrap();
+    } else {
+        r.trim();
+    }
     assert_eq!(r.warm.persistence.as_ref().unwrap().flush().unwrap(), Some(r.warm.revision));
     r.unloaded();
     assert!(r.warm.is_dirty());
     let (_, mut expected) = FolderSnapshot::open(&r.folder).unwrap();
+    expected.project.next_id = r.reference.project.next_id;
     expected.project.items.insert(r.reel, r.reference.project.item(r.reel).unwrap().clone());
     fs::write(root.join("expected.fcproj"), filmcraft_format::encode(&expected.project, false)).unwrap();
     if action == "discard" {
@@ -244,12 +404,18 @@ fn crash_recovery() {
         assert_eq!(s.project.settings, detached.settings);
         let saved = root.join("Recovered.fcproj");
         s.execute("file.saveAs", json!({"path":saved})).unwrap();
-        for cut in open(&saved).project.sequences() {
+        let mut reopened = open(&saved);
+        for cut in reopened.project.sequences() {
             assert_eq!(detached.item(cut.id), Some(cut));
+        }
+        if root.join("edited-reel").exists() {
+            let reel: ItemId = serde_json::from_slice(&fs::read(root.join("edited-reel")).unwrap()).unwrap();
+            reopened.execute("sequence.open", json!({"item":reel})).unwrap();
+            another_split(&mut reopened, detached.next_id);
         }
         return;
     }
-    for action in ["checkpoint", "ripple", "interrupt", "discard"] {
+    for action in ["trim.ripplePrevious", "trim.rippleNext", "checkpoint", "ripple", "interrupt", "discard"] {
         let tmp = tempfile::tempdir().unwrap();
         let mut writer = child(tmp.path(), action).stdout(Stdio::piped()).spawn().unwrap();
         let ready = BufReader::new(writer.stdout.take().unwrap()).lines().map_while(Result::ok).any(|l| l.contains("confirmed trim boundary"));

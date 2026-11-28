@@ -331,7 +331,7 @@ pub fn to_playhead(s: &mut Session, p: &Value) -> Result<Value> {
         (true, false) => "Trim Next Edit to Playhead",
         (false, false) => "Trim Previous Edit to Playhead",
     };
-    s.edit_sequence(label, |q, ctx, _| {
+    s.edit_one_reel_trim(label, true, |q, ctx, _| {
         if ripple {
             filmcraft_edit::extract(q, &tracks, range, ctx);
         } else {

@@ -19,6 +19,8 @@ pub struct Label {
     pub class: Option<RecordClass>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impact: Option<ImpactRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_id: Option<u64>,
 }
 #[derive(Serialize, Deserialize)]
 pub enum ImpactRecord {
@@ -50,7 +52,7 @@ impl From<&ProjectItem> for Label {
             }
             _ => ImpactRecord::Other,
         };
-        Self { impact: Some(impact), name: item.name.clone(), sequence: item.as_sequence().is_some(), class: Some(class) }
+        Self { max_id: Some(item.max_id()), impact: Some(impact), name: item.name.clone(), sequence: item.as_sequence().is_some(), class: Some(class) }
     }
 }
 
@@ -94,7 +96,7 @@ impl Index {
                 .as_mut()
                 .filter(|index| index.keys.get(&id).is_some_and(|k| k == key))
                 .and_then(|index| index.labels.remove(&id))
-                .filter(|label| label.class.is_some() && label.impact.is_some());
+                .filter(|label| label.class.is_some() && label.impact.is_some() && label.max_id.is_some());
             let label = match reused {
                 Some(label) => label,
                 None => {
@@ -205,6 +207,34 @@ fn cache_path(path: &Path, root: &Path, create: bool) -> Result<PathBuf> {
         }
     }
     Ok(dir)
+}
+
+/// Serialize publishers of the derived index, including a preview already refreshing it.
+pub fn lock_cache(dir: &Path) -> Result<fs::File> {
+    let lock = fs::File::options().create(true).truncate(false).read(true).write(true).open(dir.join("index.lock"))?;
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => return Err("another preview is refreshing this cache; reopen when it finishes".into()),
+        Err(fs::TryLockError::Error(e)) => return Err(e.into()),
+    }
+    Ok(lock)
+}
+
+/// Carry a verified cache across a local trim Save. Only the edited item key can change.
+/// A missing or stale cache is left for ordinary discovery to rebuild.
+pub fn refresh_saved_trim(path: &Path, root: &Path, before: &str, after: &str) -> Result<()> {
+    let dir = cache_path(path, root, false)?;
+    let _cache = lock_cache(&dir)?;
+    let _project = super::lock_source_revision(path, after)?;
+    let dest = dir.join("index.json");
+    let old = Index::read(&dest)?;
+    if old.manifest != before || old.checksum.is_none() || !old.labels.values().all(|l| l.max_id.is_some()) {
+        return Ok(());
+    }
+    let directory = FolderDirectory::open(path)?;
+    let (next, ..) = Index::build(&directory, Some(old))?;
+    crate::atomic_write_no_follow(&dest, &next.bytes()?)?;
+    Ok(())
 }
 
 // Apply may consume a published warm index but may never rebuild one to qualify an edit.

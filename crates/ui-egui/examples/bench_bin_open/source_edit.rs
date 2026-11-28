@@ -103,6 +103,7 @@ impl SourceEdit {
             base_revision: self.revision.clone(),
             saved: self.saved.clone().ok_or("missing source before-image")?,
             working: self.source()?.clone(),
+            next_id: None,
             revision: self.view.session.revision,
         };
         if self.journal.is_none() {

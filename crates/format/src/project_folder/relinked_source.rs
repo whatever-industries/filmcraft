@@ -1,7 +1,7 @@
 //! Publish an edit to one verified resident item without serializing a partial project.
 use super::{FolderDirectory, ROOT, digest, invalid, overlay, retention, revisions, verified_bytes};
 use crate::{MAX_PROJECT_BYTES, SCHEMA_VERSION};
-use filmcraft_project::{BinId, MediaRef, ProjectItem, ProjectView};
+use filmcraft_project::{BinId, MediaRef, Project, ProjectItem, ProjectView};
 use std::{collections::BTreeSet, fs::File, io, path::Path};
 
 fn folder(path: &Path) -> io::Result<&Path> {
@@ -40,7 +40,7 @@ pub fn save_relinked_source(path: &Path, expected: &str, owner: BinId, before: &
     if &allowed != after {
         return Err(invalid("relink changed unrelated source fields"));
     }
-    save_resident_records(path, expected, Some((owner, before, after)), None)
+    save_resident_records(path, expected, Some((owner, before, after)), None, None)
 }
 
 /// Publish the active timeline record and/or the current global view in one revision.
@@ -49,6 +49,7 @@ pub fn save_trimmed_sequence(
     expected: &str,
     edit: Option<(BinId, &ProjectItem, &ProjectItem)>,
     view: Option<&ProjectView>,
+    next_id: Option<u64>,
 ) -> io::Result<RelinkSave> {
     if let Some((_, before, after)) = edit {
         let mut allowed = before.clone();
@@ -58,7 +59,21 @@ pub fn save_trimmed_sequence(
         }
         after.as_sequence().ok_or_else(|| invalid("missing sequence"))?.check_bounds().map_err(invalid)?;
     }
-    save_resident_records(path, expected, edit, view)
+    save_resident_records(path, expected, edit, view, next_id)
+}
+
+/// Splits can consume IDs even for segments removed by the extract. Preserve the
+/// actual counter together with the cut in both the saved and recovery revisions.
+pub(super) fn set_trim_counter(envelope: &mut serde_json::Value, next: Option<u64>, edited: Option<&ProjectItem>) -> io::Result<bool> {
+    let Some(next) = next else { return Ok(false) };
+    let item = edited.filter(|item| item.as_sequence().is_some()).ok_or_else(|| invalid("missing trimmed sequence"))?;
+    if next > Project::MAX_NEXT_ID || next <= item.max_id() {
+        return Err(invalid("invalid ID counter for trimmed sequence"));
+    }
+    let field = &mut envelope["project"]["next_id"];
+    let changed = field.as_u64() != Some(next);
+    *field = next.into();
+    Ok(changed)
 }
 
 fn stage(folder: &Path, hash: &str, data: &[u8], written: &mut u64, read: &mut u64) -> io::Result<()> {
@@ -74,7 +89,13 @@ fn stage(folder: &Path, hash: &str, data: &[u8], written: &mut u64, read: &mut u
     Ok(())
 }
 
-fn save_resident_records(path: &Path, expected: &str, edit: Option<(BinId, &ProjectItem, &ProjectItem)>, view: Option<&ProjectView>) -> io::Result<RelinkSave> {
+fn save_resident_records(
+    path: &Path,
+    expected: &str,
+    edit: Option<(BinId, &ProjectItem, &ProjectItem)>,
+    view: Option<&ProjectView>,
+    next_id: Option<u64>,
+) -> io::Result<RelinkSave> {
     let folder = folder(path)?;
     let _guard = revisions::writer(folder)?;
     let (base, prior) = revisions::read_base(folder, expected)?;
@@ -120,13 +141,16 @@ fn save_resident_records(path: &Path, expected: &str, edit: Option<(BinId, &Proj
             }
         }
     }
-    if let Some(view) = view {
+    let mut envelope = directory.envelope;
+    let counter_changed = set_trim_counter(&mut envelope, next_id, edit.map(|(_, _, after)| after))?;
+    if view.is_some() || counter_changed {
         let mut budget = MAX_PROJECT_BYTES;
         let old = verified_bytes(folder, &prior.envelope, &mut budget)?;
         bytes_read += old.len() as u64;
-        let mut envelope = directory.envelope;
-        let saved: ProjectView = serde_json::from_value(envelope["view"].clone())?;
-        envelope["view"] = overlay::record(&envelope["view"], &serde_json::to_value(saved)?, &serde_json::to_value(view)?, "project view")?;
+        if let Some(view) = view {
+            let saved: ProjectView = serde_json::from_value(envelope["view"].clone())?;
+            envelope["view"] = overlay::record(&envelope["view"], &serde_json::to_value(saved)?, &serde_json::to_value(view)?, "project view")?;
+        }
         let data = serde_json::to_vec(&envelope)?;
         delta += data.len() as i64 - old.len() as i64;
         next.envelope = digest(&data);

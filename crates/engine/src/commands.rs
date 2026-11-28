@@ -3456,11 +3456,7 @@ fn build() -> Vec<CommandSpec> {
                 if mode == TrimMode::Ripple {
                     s.command_origin = Some(crate::trim::RIPPLE_TRIM_ORIGIN.to_string());
                 }
-                #[cfg(not(target_arch = "wasm32"))]
-                let resident = s.warm_folder.is_some();
-                #[cfg(target_arch = "wasm32")]
-                let resident = false;
-                let applied = s.edit_sequence_with(if mode == TrimMode::Ripple { "Ripple Trim" } else { "Trim" }, None, resident, |q, ctx, st| {
+                let applied = s.edit_one_reel_trim(if mode == TrimMode::Ripple { "Ripple Trim" } else { "Trim" }, false, |q, ctx, st| {
                     if q.find_item(c).is_some_and(|(t, _)| q.track(t).is_some_and(|tr| tr.locked)) {
                         return Err(edit::EditError::Locked.into());
                     }
