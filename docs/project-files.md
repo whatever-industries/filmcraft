@@ -613,3 +613,9 @@ Markers may store an optional `url` independently of their name and notes. Older
 load with an empty URL. Schema v17 prevents older builds from silently dropping links
 on save. Changing marker type retains the address. Project loading never opens it; the
 Edit Marker dialog offers explicit HTTP(S) browser opening for Web Link markers.
+
+### Back up published history
+
+Use `project_folder backup FOLDER NEW_FOLDER` to copy published project history to a fresh directory on a backup drive. It prints the captured revision after verifying the copy. The backup preserves the current project, protected and otherwise available saves, sequence move backups, and the folder’s retention policy. Pruned saves stay retired. Open the backup’s `project.fcmod` for the current cut or use `rescue` for an older cut.
+
+This metadata backup keeps the stored original and proxy paths. Relative paths resolve from the backup’s location. Store footage separately and review its location when restoring to a different directory. Unsaved editor checkpoints use the editor’s separate recovery store.

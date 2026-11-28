@@ -648,6 +648,118 @@ fn pruning_retires_only_unprotected_history_and_retries_interrupted_collection()
 }
 
 #[test]
+fn published_backup_reopens_retained_cuts_after_pruning_and_source_removal() {
+    use filmcraft_format::project_folder::{FolderSnapshot, RetentionPolicy, backup_history, keep_version, prune_history};
+    use filmcraft_project::ItemId;
+    let tmp = tempdir().unwrap();
+    let input = tmp.path().join("edit.fcproj");
+    let source = tmp.path().join("original");
+    let backup = tmp.path().join("backup");
+    let mut doc = current();
+    write_doc(&input, &doc);
+    pack(&input, &source, atomic_write_new).unwrap();
+    let (snapshot, original) = FolderSnapshot::open(&source.join(ROOT)).unwrap();
+    let protected = snapshot.revision().to_owned();
+    keep_version(&source, &protected, &protected, true).unwrap();
+    let mut head = protected.clone();
+    let mut edits = Vec::new();
+    for _ in 0..4 {
+        let duration = &mut doc["project"]["items"]["73"]["kind"]["Sequence"]["video_tracks"][0]["items"][0]["duration"];
+        *duration = json!(duration.as_i64().unwrap() - filmcraft_time::TICKS_PER_SECOND / 24);
+        write_doc(&input, &doc);
+        head = save(&source, &head, &input).unwrap();
+        edits.push(head.clone());
+    }
+    let policy = RetentionPolicy { enabled: true, max_bin_backups: 1, versions_per_bin: 1 };
+    let pruned = prune_history(&source, &head, policy).unwrap();
+    assert!(pruned.retire.contains(&edits[0]));
+    let (_, current) = FolderSnapshot::open(&source.join(ROOT)).unwrap();
+    let cut = ItemId(73);
+    assert_ne!(original.project.sequence(cut), current.project.sequence(cut));
+
+    assert_eq!(backup_history(&source, &backup).unwrap(), head);
+    assert!(backup_history(&source, &backup).is_err());
+    fs::remove_dir_all(&source).unwrap();
+    let (snapshot, reopened) = FolderSnapshot::open(&backup.join(ROOT)).unwrap();
+    assert_eq!(snapshot.revision(), head);
+    assert_eq!(reopened.project.sequence(cut), current.project.sequence(cut));
+    let out = tmp.path().join("protected.fcproj");
+    assert!(rescue(&backup, &edits[0], cut.0, &out).is_err());
+    // Prune the independent backup again to exercise the copied pin as well as visibility.
+    prune_history(&backup, &head, policy).unwrap();
+    rescue(&backup, &protected, cut.0, &out).unwrap();
+    let restored = filmcraft_format::decode(&fs::read(out).unwrap()).unwrap();
+    assert_eq!(restored.project.sequence(cut), original.project.sequence(cut));
+    assert_eq!(restored.project.sequence(ItemId(21)), original.project.sequence(ItemId(21)));
+}
+
+#[test]
+fn published_backup_preserves_the_cut_as_it_left_its_bin() {
+    use filmcraft_format::project_folder::{Departure, DepartureCut, FolderSnapshot, TransferSave, backup_history};
+    use filmcraft_project::{BinEntry, BinId, ItemId};
+    let tmp = tempdir().unwrap();
+    let input = tmp.path().join("edit.fcproj");
+    let source = tmp.path().join("source");
+    let backup = tmp.path().join("backup");
+    write_doc(&input, &current());
+    pack(&input, &source, atomic_write_new).unwrap();
+    let (mut snapshot, loaded) = FolderSnapshot::open(&source.join(ROOT)).unwrap();
+    let base = snapshot.revision().to_owned();
+    let cut = ItemId(73);
+    let mut departure = loaded.project.clone();
+    departure.sequence_mut(cut).unwrap().video_tracks[0].items[0].duration.0 /= 2;
+    let mut moved = departure.clone();
+    assert!(moved.root.remove_item(cut));
+    moved.root.children.push(BinEntry::Item(cut));
+    moved.sequence_mut(cut).unwrap().video_tracks[0].items[0].duration.0 /= 2;
+    let moves = TransferSave {
+        departures: vec![Departure {
+            sequence: cut,
+            source: BinId(88),
+            destination: moved.root.id,
+            saved_source: &base,
+            cut: DepartureCut::Working(&departure),
+        }],
+        ..Default::default()
+    };
+    let view = loaded.view.unwrap_or_default();
+    let saved = snapshot.save_transfers(&loaded.project, &view, &moved, &view, moves).unwrap();
+    let at_move = &saved.move_backups[0].snapshot;
+    assert_ne!(at_move, &base);
+    backup_history(&source, &backup).unwrap();
+    fs::remove_dir_all(source).unwrap();
+    let out = tmp.path().join("departure.fcproj");
+    rescue(&backup, at_move, cut.0, &out).unwrap();
+    let restored = filmcraft_format::decode(&fs::read(out).unwrap()).unwrap();
+    assert_eq!(restored.project.sequence(cut), departure.sequence(cut));
+}
+
+#[test]
+fn damaged_retained_history_cannot_publish_a_backup() {
+    use filmcraft_format::project_folder::backup_history;
+    let tmp = tempdir().unwrap();
+    let input = tmp.path().join("edit.fcproj");
+    let source = tmp.path().join("original");
+    let backup = tmp.path().join("backup");
+    let mut doc = current();
+    write_doc(&input, &doc);
+    pack(&input, &source, atomic_write_new).unwrap();
+    let base = checkout(&source, &tmp.path().join("first.fcproj")).unwrap();
+    doc["project"]["items"]["73"]["name"] = json!("Today");
+    write_doc(&input, &doc);
+    let head = save(&source, &base, &input).unwrap();
+    let old: Value = serde_json::from_slice(&fs::read(source.join(&base)).unwrap()).unwrap();
+    let hash = old["items"].as_array().unwrap().iter().find(|v| v[0] == 73).unwrap()[1].as_str().unwrap();
+    let record = source.join(hash);
+    let bytes = fs::read(&record).unwrap();
+    fs::write(&record, b"damaged older cut").unwrap();
+    assert!(backup_history(&source, &backup).is_err());
+    assert!(!backup.join(ROOT).exists());
+    fs::write(record, bytes).unwrap();
+    assert_eq!(backup_history(&source, &backup).unwrap(), head);
+}
+
+#[test]
 fn killing_a_checkpoint_writer_on_either_side_of_publication_keeps_a_complete_draft() {
     use filmcraft_format::project_folder::{CheckpointStore, load_checkpoint};
     use std::{

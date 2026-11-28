@@ -1,7 +1,7 @@
 //! Developer-only project-folder conversion. See docs/project-files.md.
 use filmcraft_format::{
     atomic_write_new,
-    project_folder::{checkout, history, move_backups, pack, rescue, restore_copy, save, unpack},
+    project_folder::{backup_history, checkout, history, move_backups, pack, rescue, restore_copy, save, unpack},
 };
 use std::{
     io::{self, Write},
@@ -12,6 +12,10 @@ fn run() -> io::Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if let [command, source, destination] = args.as_slice() {
         let (src, dest) = (Path::new(source), Path::new(destination));
+        if command == "backup" {
+            let revision = backup_history(src, dest)?;
+            return writeln!(io::stdout().lock(), "{revision}");
+        }
         if command == "pack" {
             return pack(src, dest, atomic_write_new);
         }
@@ -59,7 +63,7 @@ fn run() -> io::Result<()> {
     }
     Err(io::Error::new(
         io::ErrorKind::InvalidInput,
-        "usage: project_folder pack SOURCE.fcproj NEW_FOLDER | unpack FOLDER NEW_FILE.fcproj | checkout FOLDER NEW_FILE.fcproj | save FOLDER BASE_REVISION EDITED.fcproj | history FOLDER | move-backups FOLDER | restore-copy FOLDER BASE_REVISION HISTORICAL_REVISION SEQUENCE_ID | rescue FOLDER REVISION SEQUENCE_ID NEW_FILE.fcproj",
+        "usage: project_folder pack SOURCE.fcproj NEW_FOLDER | backup FOLDER NEW_FOLDER | unpack FOLDER NEW_FILE.fcproj | checkout FOLDER NEW_FILE.fcproj | save FOLDER BASE_REVISION EDITED.fcproj | history FOLDER | move-backups FOLDER | restore-copy FOLDER BASE_REVISION HISTORICAL_REVISION SEQUENCE_ID | rescue FOLDER REVISION SEQUENCE_ID NEW_FILE.fcproj",
     ))
 }
 

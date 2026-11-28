@@ -10,6 +10,8 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+mod backup;
+pub use backup::backup_history;
 mod directory;
 pub mod index;
 mod reader;

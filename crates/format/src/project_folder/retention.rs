@@ -12,7 +12,7 @@ use std::{
 
 pub(super) mod background;
 
-const INDEX: &str = "recovery-retention.json";
+pub(super) const INDEX: &str = "recovery-retention.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -58,6 +58,19 @@ impl Catalog {
             Err(e) => Err(e),
         }
     }
+    pub(super) fn for_backup(mut self, chain: &BTreeMap<String, u64>, required: &BTreeSet<String>) -> io::Result<Self> {
+        self.policy.validate()?;
+        if self.anchor.as_ref().is_some_and(|h| chain.get(h) != Some(&self.through))
+            || self.retained.iter().any(|h| !chain.contains_key(h))
+            || self.pins.iter().chain(required).any(|h| !chain.get(h).is_some_and(|n| self.available(*n, h)))
+        {
+            return Err(invalid("backup retention catalog does not match project history"));
+        }
+        // The backup contains only live records. Interrupted deletions belong to the source.
+        self.pending.clear();
+        Ok(self)
+    }
+
     fn outstanding(&self, total: u64) -> u64 {
         self.ordinary_backups.saturating_add(total.saturating_sub(self.processed_backups))
     }
@@ -91,11 +104,11 @@ pub struct RetentionPreview {
     pub records: usize,
 }
 
-fn payloads(m: &Manifest) -> impl Iterator<Item = &String> {
+pub(super) fn payloads(m: &Manifest) -> impl Iterator<Item = &String> {
     std::iter::once(&m.envelope).chain(m.bins.iter().chain(&m.items).map(|(_, h)| h))
 }
 
-fn backup_manifest(folder: &Path, hash: &str) -> io::Result<Manifest> {
+pub(super) fn backup_manifest(folder: &Path, hash: &str) -> io::Result<Manifest> {
     check_hash(hash)?;
     let bytes = read_member(&folder.join(hash), MANIFEST_LIMIT)?;
     if digest(&bytes) != hash {

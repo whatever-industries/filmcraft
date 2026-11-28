@@ -45,6 +45,8 @@ The bin-close prompt captures the document and bin ID. Sequence moves are suppor
 
 The prepared two-camera control and the live transfer tests use generated media. The transfer tests compare rendered frames, PCM samples, PNG and WAV exports, and Match Frame. The transfer and force-quit cases also run with a one-backup limit. [Source lookup and moves](../crates/project/src/lib.rs) · [Historical recovery](../crates/format/src/project_folder/recovery.rs)
 
+A local APFS backup trial protected a 119-frame cut, saved four successive three-frame trims, then pruned with a one-backup limit. Two intermediate saves and their exclusive records were retired. After copying published history to a second volume and ejecting the source disk image, the 107-frame current cut reopened from the backup and the 119-frame protected cut reopened from a separate rescue export. Both full sequence records matched their saved versions, and the retired cut remained unavailable. [Published-history backup command](project-files.md#back-up-published-history)
+
 ## Avid comparisons
 
 - **Save and backups.** Media Composer documents active-bin and all-bin saves, automatic saves, and limits on backup copies. FilmCraft chose global Save from any focus and checkpoints that keep the bin Unsaved. FilmCraft's closed-bin drop rule also differs from Avid's documented drag-to-open behavior. [Media Composer Editing Guide, Saving Bins](https://resources.avid.com/SupportFiles/attach/Media_Composer/Media_Composer_v2025.x_Editing_Guide.pdf#page=298) · [Bin Settings](https://resources.avid.com/SupportFiles/attach/Media_Composer/Media_Composer_v2025.x_Editing_Guide.pdf#page=1152)
