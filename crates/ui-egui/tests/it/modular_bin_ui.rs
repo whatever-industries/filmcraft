@@ -469,6 +469,7 @@ fn restoring_a_saved_sequence_is_undoable_and_export_preserves_a_changed_nested_
 }
 mod verified_relink;
 
+mod multi_bin;
 mod one_reel;
 
 #[test]
