@@ -270,7 +270,9 @@ pub(crate) fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
 /// A call that only reports, so it is not journaled although its command edits: `sequence.settings`
 /// with nothing to change (`null` or `{}`) answers the settings, as `sequence.inspect` does (#1540).
 pub(crate) fn reports_only(id: &str, p: &Value) -> bool {
-    (id == "sequence.settings" && (p.is_null() || p.as_object().is_some_and(|m| m.is_empty()))) || (id == "media.relink" && p["reviewOnly"] == true)
+    matches!(id, "project.directory" | "project.inspectBinMedia")
+        || (id == "sequence.settings" && (p.is_null() || p.as_object().is_some_and(|m| m.is_empty())))
+        || (id == "media.relink" && p["reviewOnly"] == true)
 }
 /// A marker accepts either an unchanged preset label or an exact six-digit sRGB hex color.
 pub(crate) fn marker_color_p(p: &Value, cmd: &str) -> Result<Option<(Label, Option<filmcraft_project::HexColor>)>> {
@@ -1120,6 +1122,13 @@ fn import_source(
 /// The optional `bin` of a `file.new…` command: the bin the new item lands in (the project's root
 /// when absent or null). A bin that does not exist is an error, not a silent fall back to the root.
 fn bin_p(s: &Session, p: &Value, cmd: &str) -> Result<Option<filmcraft_project::BinId>> {
+    if s.folder_revision().is_some() && matches!(cmd, "file.import" | "file.newSequence") {
+        let bin = u64_p(p, "bin").map(filmcraft_project::BinId).ok_or_else(|| bad(cmd, "choose an editorial bin"))?;
+        if s.project.directory().parent(filmcraft_project::DirectoryEntry::Bin(bin)).is_none() {
+            return Err(bad(cmd, "choose an editorial bin"));
+        }
+        return Ok(Some(bin));
+    }
     let Some(v) = p.get("bin").filter(|v| !v.is_null()) else { return Ok(None) };
     let id = v.as_u64().map(filmcraft_project::BinId).ok_or_else(|| bad(cmd, "`bin` must be a bin id"))?;
     if s.project.root.find_bin(id).is_none() {
@@ -1747,10 +1756,68 @@ fn build() -> Vec<CommandSpec> {
                 Ok(json!({"sequence": id.0}))
             })
         ),
+        #[cfg(not(target_arch = "wasm32"))]
+        cmd!("project.inspectBinMedia", "Check Saved Bin Media", [], None, r#"{"bin":binId,"revision":str?}"#, always, |s, p| s.inspect_bin_media(p)),
+        cmd!("project.directory", "Project Folders", [], None, "{}", always, |s, _| {
+            let dir = s.project.directory();
+            let mut result = json!(&*dir);
+            let bins = dir
+                .folders
+                .values()
+                .flat_map(|folder| &folder.children)
+                .filter_map(|entry| {
+                    if let filmcraft_project::DirectoryEntry::Bin(id) = entry {
+                        s.project.root.find_bin(*id).map(|bin| (id.0, bin.name.as_str()))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<std::collections::BTreeMap<_, _>>();
+            result["bins"] = json!(bins);
+            Ok(result)
+        }),
+        cmd!("file.newFolder", "New Folder", [], None, r#"{"name":str,"parent":folderId?}"#, always, |s, p| {
+            if s.folder_revision().is_none() {
+                return Err(bad("file.newFolder", "open a modular project"));
+            }
+            let parent = u64_p(p, "parent").map(filmcraft_project::BinId).unwrap_or(s.project.root.id);
+            let name = str_p(p, "name").unwrap_or("New Folder");
+            let id = s.edit_resident("New Folder", |pr, _| pr.create_project_folder(parent, name).map_err(EngineError::Other))?;
+            Ok(json!({"folder":id}))
+        }),
+        cmd!("project.renameFolder", "Rename Folder", [], None, r#"{"folder":folderId,"name":str}"#, always, |s, p| {
+            if s.folder_revision().is_none() {
+                return Err(bad("project.renameFolder", "open a modular project"));
+            }
+            let id = u64_p(p, "folder").map(filmcraft_project::BinId).ok_or_else(|| bad("project.renameFolder", "choose a folder"))?;
+            let name = str_p(p, "name").ok_or_else(|| bad("project.renameFolder", "enter a name"))?;
+            if s.project.directory().folders.get(&id).is_some_and(|f| f.name == name) {
+                return Ok(json!({"folder":id}));
+            }
+            s.edit_resident("Rename Folder", |pr, _| {
+                pr.directory_mut().folders.get_mut(&id).ok_or_else(|| bad("project.renameFolder", "unknown folder"))?.name = name.to_owned();
+                Ok(())
+            })?;
+            Ok(json!({"folder":id}))
+        }),
+        cmd!("project.moveToFolder", "Move to Folder", [], None, r#"{"folder":folderId,"entry":{"Bin":id}|{"Folder":id}}"#, always, |s, p| {
+            if s.folder_revision().is_none() {
+                return Err(bad("project.moveToFolder", "open a modular project"));
+            }
+            let to = u64_p(p, "folder").map(filmcraft_project::BinId).ok_or_else(|| bad("project.moveToFolder", "choose a folder"))?;
+            let entry = serde_json::from_value(p["entry"].clone()).map_err(|_| bad("project.moveToFolder", "choose a bin or folder"))?;
+            if s.project.directory().parent(entry) != Some(to) {
+                s.edit_resident("Move to Folder", |pr, _| pr.directory_mut().move_entry(entry, to).map_err(EngineError::Other))?;
+            }
+            Ok(json!({"folder":to}))
+        }),
         cmd!("file.newBin", "Bin", ["File", "New"], Some("Cmd+B"), r#"{"name":str,"parent":binId?}"#, always, |s, p| {
             let n = str_p(p, "name").unwrap_or("New Bin").to_string();
             let parent = u64_p(p, "parent").map(filmcraft_project::BinId);
-            let id = s.edit("New Bin", |pr, _| Ok(pr.add_bin(&n, parent)))?;
+            let modular = s.folder_revision().is_some();
+            let id = s.edit("New Bin", |pr, _| {
+                if modular { pr.create_editorial_bin(parent.unwrap_or(pr.root.id), &n).map_err(EngineError::Other) } else { Ok(pr.add_bin(&n, parent)) }
+            })?;
             Ok(json!({"bin": id.0}))
         }),
         cmd!("file.newAdjustmentLayer", "Adjustment Layer…", ["File", "New"], None, r#"{"seconds":f64=5,"bin":binId?}"#, always, |s, p| {
@@ -1825,7 +1892,7 @@ fn build() -> Vec<CommandSpec> {
             }
         ),
         cmd!("file.import", "Import…", ["File"], Some("Cmd+I"), r#"{"paths":[str],"bin":binId?,"imageSequence":bool?,"replace":bool?}"#, always, |s, p| {
-            let bin = u64_p(p, "bin").map(filmcraft_project::BinId);
+            let bin = if s.folder_revision().is_some() { bin_p(s, p, "file.import")? } else { u64_p(p, "bin").map(filmcraft_project::BinId) };
             let paths: Vec<String> = match p.get("paths").and_then(Value::as_array) {
                 Some(a) => a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
                 None => str_p(p, "path").map(|x| vec![x.to_string()]).unwrap_or_default(),
@@ -4071,19 +4138,33 @@ fn build() -> Vec<CommandSpec> {
                 .map(|a| a.iter().filter_map(|v| v.as_u64().map(ItemId)).collect())
                 .unwrap_or_else(|| s.state.project_selection.clone());
             // A bin named here goes with everything in it, as in the Project panel of any editor.
+            let modular = s.folder_revision().is_some();
+            let directory = modular.then(|| s.project.directory().into_owned());
             let root = s.project.root.id;
             let named: Vec<filmcraft_project::BinId> =
                 asked.iter().map(|i| filmcraft_project::BinId(i.0)).filter(|b| *b != root && s.project.root.find_bin(*b).is_some()).collect();
-            // a bin inside another named bin goes with that one
+            if let Some(dir) = &directory
+                && named.iter().any(|id| dir.parent(filmcraft_project::DirectoryEntry::Bin(*id)).is_none())
+            {
+                return Err(bad("project.delete", "choose an editorial bin"));
+            }
+            // In a standard project a nested bin goes with its parent.
             let bins: Vec<filmcraft_project::BinId> = named
                 .iter()
                 .copied()
-                .filter(|b| !named.iter().any(|o| o != b && s.project.root.find_bin(*o).is_some_and(|o| o.find_bin(*b).is_some())))
+                .filter(|b| modular || !named.iter().any(|o| o != b && s.project.root.find_bin(*o).is_some_and(|o| o.find_bin(*b).is_some())))
                 .collect();
             let mut items: Vec<ItemId> = asked.iter().copied().filter(|i| !named.contains(&filmcraft_project::BinId(i.0))).collect();
             for b in &bins {
                 if let Some(bin) = s.project.root.find_bin(*b) {
-                    bin.all_items(&mut items);
+                    if modular {
+                        items.extend(bin.children.iter().filter_map(|e| match e {
+                            filmcraft_project::BinEntry::Item(id) => Some(*id),
+                            _ => None,
+                        }));
+                    } else {
+                        bin.all_items(&mut items);
+                    }
                 }
             }
             items.sort_by_key(|i| i.0);
@@ -4134,10 +4215,20 @@ fn build() -> Vec<CommandSpec> {
                     }
                 }
                 for b in &bins {
-                    pr.root.remove_bin(*b);
+                    if modular {
+                        let dir = pr.directory_mut();
+                        for f in dir.folders.values_mut() {
+                            f.children.retain(|entry| *entry != filmcraft_project::DirectoryEntry::Bin(*b));
+                        }
+                        if let Some(removed) = pr.root.remove_bin(*b) {
+                            pr.root.children.extend(removed.children.into_iter().filter(|entry| matches!(entry, filmcraft_project::BinEntry::Bin(_))));
+                        }
+                    } else {
+                        pr.root.remove_bin(*b);
+                    }
                 }
                 for i in offlined.iter().chain(&retained_subclips) {
-                    if pr.root.parent_of(*i).is_none() {
+                    if !modular && pr.root.parent_of(*i).is_none() {
                         pr.root.children.push(filmcraft_project::BinEntry::Item(*i));
                     }
                 }
@@ -4194,6 +4285,12 @@ fn build() -> Vec<CommandSpec> {
                 return Err(bad("project.moveToBin", "need `items` (or a Project panel selection)"));
             }
             let bin = u64_p(p, "bin").map(filmcraft_project::BinId);
+            if s.folder_revision().is_some()
+                && (items.iter().any(|i| s.project.root.find_bin(filmcraft_project::BinId(i.0)).is_some())
+                    || s.project.directory().parent(filmcraft_project::DirectoryEntry::Bin(bin.unwrap_or(s.project.root.id))).is_none())
+            {
+                return Err(bad("project.moveToBin", "select editorial items and a destination bin"));
+            }
             let moved = s.edit("Move to Bin", |pr, _| pr.move_to_bin(&items, bin).ok_or_else(|| bad("project.moveToBin", "no such bin")))?;
             Ok(json!({"moved": moved}))
         }),
@@ -5465,7 +5562,12 @@ fn write_project(s: &mut Session, path: &str, adopt: bool) -> Result<Value> {
         return Err(EngineError::Other("open this project folder before saving it".into()));
     }
     let t0 = web_time::Instant::now();
-    let export = standard_export_from_folder(s, path)?;
+    let view = s.project_view();
+    let exported = standard_export_from_folder(s, path, &view, adopt)?;
+    let mut export = None;
+    if adopt && let Some(data) = &exported {
+        export = Some(filmcraft_format::decode(data).map_err(|e| EngineError::Other(e.to_string()))?.project);
+    }
     // Save As renames the project after its new file (not an edit: no undo step, not dirty).
     if adopt
         && export.is_none()
@@ -5475,13 +5577,9 @@ fn write_project(s: &mut Session, path: &str, adopt: bool) -> Result<Value> {
         name_project(std::sync::Arc::make_mut(&mut s.project), name);
     }
     // what is open (sequence tabs, how each is shown) goes into the file beside the project
-    let view = s.project_view();
-    let mut export = export;
-    if adopt && let (Some(export), Some(name)) = (&mut export, project_name_for(path)) {
-        name_project(export, name);
-    }
+
     let project = export.as_ref().unwrap_or(&s.project);
-    let bytes = filmcraft_format::encode_with_view(project, Some(&view), false);
+    let bytes = exported.unwrap_or_else(|| filmcraft_format::encode_with_view(project, Some(&view), false));
     let mut backup = None;
     if adopt && s.path.as_deref() == Some(path) && s.loaded_schema < filmcraft_format::SCHEMA_VERSION {
         let b = schema_backup_path(path, s.loaded_schema);
@@ -5507,16 +5605,17 @@ fn write_project(s: &mut Session, path: &str, adopt: bool) -> Result<Value> {
     Ok(json!({"path": path, "bytes": bytes.len(), "ms": t0.elapsed().as_secs_f64() * 1000.0, "backup": backup}))
 }
 
-fn standard_export_from_folder(s: &Session, path: &str) -> Result<Option<filmcraft_project::Project>> {
+fn standard_export_from_folder(s: &Session, path: &str, view: &filmcraft_project::ProjectView, adopt: bool) -> Result<Option<Vec<u8>>> {
     #[cfg(not(target_arch = "wasm32"))]
-    if s.editing_folder.is_some()
-        && let Some(origin) = &s.path
-    {
-        return filmcraft_format::project_folder::detached_project((*s.project).clone(), std::path::Path::new(origin), Some(std::path::Path::new(path)))
+    if let Some(f) = &s.editing_folder {
+        let name = if adopt { project_name_for(path) } else { None };
+        return f
+            .snapshot
+            .export_working(&f.project, &f.view, &s.project, view, std::path::Path::new(path), name.as_deref())
             .map(Some)
-            .map_err(|e| EngineError::Other(format!("{path}: {e}")));
+            .map_err(|e| EngineError::Other(e.to_string()));
     }
-    let _ = (s, path);
+    let _ = (s, path, view, adopt);
     Ok(None)
 }
 
@@ -5641,6 +5740,7 @@ fn recover(s: &mut Session, id: Option<&str>) -> Result<Value> {
     let (project, path) = match path {
         Some(origin) if crate::folder_edit::is_manifest(&origin) => {
             let project = filmcraft_format::project_folder::detached_project(project, std::path::Path::new(&origin), None)
+                .and_then(filmcraft_format::project_folder::portable_project)
                 .map_err(|e| EngineError::Other(format!("{origin}: {e}")))?;
             (project, None)
         }

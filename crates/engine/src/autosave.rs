@@ -705,7 +705,10 @@ pub(crate) struct Sent {
     pub path: Option<String>,
 }
 
+#[derive(Clone)]
 struct Snapshot {
+    #[cfg(not(target_arch = "wasm32"))]
+    directory_base: Option<String>,
     reviewed_source: Option<ItemId>,
     modular: bool,
     project: Arc<Project>,
@@ -755,7 +758,14 @@ impl ItemDraft {
             loaded.project.next_id = next;
         }
         let path = manifest.to_str().ok_or_else(|| io::Error::other("non-UTF-8 recovery origin"))?.to_owned();
-        Ok(Snapshot { project: Arc::new(loaded.project), path: Some(path), revision, modular: true, reviewed_source: (!sequence_edit).then_some(id) })
+        Ok(Snapshot {
+            directory_base: None,
+            project: Arc::new(loaded.project),
+            path: Some(path),
+            revision,
+            modular: true,
+            reviewed_source: (!sequence_edit).then_some(id),
+        })
     }
 }
 
@@ -917,7 +927,20 @@ impl Persistence {
     }
 
     pub(crate) fn send_dirty(&self, project: Arc<Project>, revision: u64, path: Option<String>, modular: bool) {
-        self.send(Msg::Dirty(Snapshot { project, revision, path, modular, reviewed_source: self.reviewed_source.map(|(_, id)| id) }));
+        self.send(Msg::Dirty(Snapshot {
+            #[cfg(not(target_arch = "wasm32"))]
+            directory_base: None,
+            project,
+            revision,
+            path,
+            modular,
+            reviewed_source: self.reviewed_source.map(|(_, id)| id),
+        }));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn send_dirty_directory(&self, project: Arc<Project>, revision: u64, path: Option<String>, base: String) {
+        self.send(Msg::Dirty(Snapshot { directory_base: Some(base), project, revision, path, modular: true, reviewed_source: None }));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -936,7 +959,7 @@ impl Persistence {
         reviewed_source: Option<ItemId>,
     ) -> Result<(), String> {
         let (reply, result) = channel();
-        let snapshot = project.map(|project| Snapshot { project, revision, path, modular: true, reviewed_source });
+        let snapshot = project.map(|project| Snapshot { directory_base: None, project, revision, path, modular: true, reviewed_source });
         self.tx.send(Msg::ReplaceJournal(snapshot, reply)).map_err(|_| self.stopped_error())?;
         result.recv().map_err(|_| self.stopped_error())?
     }
@@ -1274,9 +1297,12 @@ impl Worker {
             if s.modular {
                 let path = s.path.as_deref().filter(|p| is_folder_manifest(p)).ok_or_else(|| io::Error::other("missing modular recovery origin"))?;
                 meta.project_path = Some(std::path::absolute(path)?.to_str().ok_or_else(|| io::Error::other("non-UTF-8 recovery origin"))?.to_owned());
-                let written = self
-                    .checkpoints
-                    .publish(&self.session_dir, &s.project, |root, bytes| publish_checkpoint_meta(&self.session_dir, &mut meta, root, bytes))?;
+                let mut marker = |root: &str, bytes| publish_checkpoint_meta(&self.session_dir, &mut meta, root, bytes);
+                let written = if let Some(base) = &s.directory_base {
+                    self.checkpoints.publish_directory(&self.session_dir, Path::new(path), base, &s.project, |root, bytes, _| marker(root, bytes))
+                } else {
+                    self.checkpoints.publish(&self.session_dir, &s.project, marker)
+                }?;
                 return Ok(Self::checkpoint_metrics(&self.events, &self.session_dir, written));
             }
             let t0 = Instant::now();
@@ -1421,6 +1447,7 @@ impl Worker {
                     let root = meta.checkpoint.ok_or_else(|| io::Error::other("missing local relink checkpoint"))?;
                     let loaded = filmcraft_format::project_folder::load_checkpoint(&self.session_dir, &root)?;
                     Ok(Snapshot {
+                        directory_base: None,
                         project: Arc::new(loaded.project),
                         path: meta.project_path,
                         revision: draft.revision,
@@ -1440,6 +1467,28 @@ impl Worker {
         #[cfg(target_arch = "wasm32")]
         let materialized: Option<Snapshot> = None;
         let Some(s) = materialized.as_ref().or(self.latest.as_ref()) else { return Err("nothing to save".into()) };
+        #[cfg(not(target_arch = "wasm32"))]
+        let directory_snapshot;
+        #[cfg(not(target_arch = "wasm32"))]
+        let s = if let Some(base) = &s.directory_base {
+            let mut full = if self.journaled == s.revision {
+                let marker = read_meta(&self.session_dir).map_err(|e| e.to_string())?.checkpoint.ok_or_else(|| "missing folder checkpoint".to_owned())?;
+                filmcraft_format::project_folder::load_checkpoint(&self.session_dir, &marker).map_err(|e| e.to_string())?.project
+            } else {
+                let path = s.path.as_deref().ok_or("missing modular project")?;
+                let (snapshot, loaded) = filmcraft_format::project_folder::FolderSnapshot::open(Path::new(path)).map_err(|e| e.to_string())?;
+                if snapshot.revision() != base {
+                    return Err("stale directory checkpoint base".into());
+                }
+                loaded.project
+            };
+            full.modular_directory = s.project.modular_directory.clone();
+            full.next_id = s.project.next_id;
+            directory_snapshot = Snapshot { project: Arc::new(full), directory_base: None, ..s.clone() };
+            &directory_snapshot
+        } else {
+            s
+        };
         let scratch = crate::project_tools::trusted_scratch(s.project.settings.scratch.auto_save.as_deref(), s.path.as_deref(), &self.prefs.scratch_folders);
         let (dir, name) = match (&s.path, scratch) {
             // Project Settings ▸ Scratch Disks ▸ Project Auto Save
@@ -1454,7 +1503,19 @@ impl Worker {
             (None, _) => (self.data_dir.join(names::AUTO_SAVE_DIR), s.project.name.clone()),
         };
         let t0 = Instant::now();
-        let bytes = filmcraft_format::encode(&s.project, false);
+        #[cfg(not(target_arch = "wasm32"))]
+        let portable = if s.modular && s.project.modular_directory.is_some() {
+            let origin = s.path.as_deref().ok_or("missing modular project path")?;
+            let copy = filmcraft_format::project_folder::detached_project((*s.project).clone(), Path::new(origin), Some(&dir.join("snapshot.fcproj")))
+                .and_then(filmcraft_format::project_folder::portable_project)
+                .map_err(|e| e.to_string())?;
+            Some(copy)
+        } else {
+            None
+        };
+        #[cfg(target_arch = "wasm32")]
+        let portable: Option<Project> = None;
+        let bytes = filmcraft_format::encode(portable.as_ref().unwrap_or(&s.project), false);
         let serialize_ms = t0.elapsed().as_secs_f64() * 1000.0;
         let t1 = Instant::now();
         let unix = unix_now();

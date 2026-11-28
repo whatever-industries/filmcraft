@@ -18,11 +18,12 @@ mod reader;
 pub use reader::Reader;
 pub type IndexResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 mod editor;
+mod organization;
 mod overlay;
 mod paths;
 mod recovery;
 mod relinked_source;
-pub use relinked_source::{RelinkSave, lock_source_revision, save_relinked_source, save_trimmed_sequence};
+pub use relinked_source::{RelinkSave, lock_source_revision, save_directory, save_relinked_source, save_trimmed_sequence};
 mod retention;
 mod revisions;
 pub use retention::{RetentionPolicy, RetentionPreview, configure_retention, keep_version, preview_retention, prune_history, retention_policy};
@@ -177,7 +178,7 @@ fn load_group(
 }
 
 fn check_manifest(manifest: &Manifest) -> io::Result<()> {
-    if manifest.format != FORMAT || !matches!((manifest.layout, &manifest.revision), (1, None) | (2, Some(_))) {
+    if manifest.format != FORMAT || !matches!((manifest.layout, &manifest.revision), (1, None) | (2, Some(_)) | (3, _)) {
         return Err(invalid(format!("unsupported project folder format {:?}, layout {}", manifest.format, manifest.layout)));
     }
     if let Some(revision) = &manifest.revision {
@@ -217,9 +218,21 @@ fn assemble(folder: &Path, manifest: &Manifest, destination: &Path) -> io::Resul
     encode_at(folder, read_records(folder, manifest)?, destination)
 }
 
-fn encode_at(folder: &Path, mut records: ProjectRecords, destination: &Path) -> io::Result<Vec<u8>> {
+fn encode_at(folder: &Path, records: ProjectRecords, destination: &Path) -> io::Result<Vec<u8>> {
+    portable_bytes(folder, records, destination, None)
+}
+
+fn portable_bytes(folder: &Path, mut records: ProjectRecords, destination: &Path, name: Option<&str>) -> io::Result<Vec<u8>> {
     paths::rebase(&mut records, &folder.join(ROOT), destination)?;
-    let bytes = serde_json::to_vec(&join(records)?)?;
+    let mut document = join(records)?;
+    if destination != folder.join(ROOT) {
+        organization::portable(&mut document["project"])?;
+    }
+    if let Some(name) = name {
+        document["project"]["name"] = name.into();
+        document["project"]["root"]["name"] = name.into();
+    }
+    let bytes = serde_json::to_vec(&document)?;
     crate::decode(&bytes).map_err(invalid)?;
     Ok(bytes)
 }
@@ -290,6 +303,7 @@ fn materialize(
     previous: Option<&Manifest>,
     mut write_new: impl FnMut(&Path, &[u8]) -> io::Result<()>,
 ) -> io::Result<Manifest> {
+    let layout = if records.envelope["project"].get("modular_directory").is_some() { 3 } else { 1 };
     let envelope = write_payload(folder, records.envelope, previous.map(|m| m.envelope.as_str()), &mut write_new)?;
     let mut group = |values: BTreeMap<u64, Value>, prior: Option<&[(u64, String)]>| -> io::Result<Vec<_>> {
         let prior: BTreeMap<_, _> = prior.unwrap_or_default().iter().map(|(id, hash)| (*id, hash.as_str())).collect();
@@ -297,7 +311,7 @@ fn materialize(
     };
     Ok(Manifest {
         format: FORMAT.to_owned(),
-        layout: 1,
+        layout,
         copies: Vec::new(),
         identities: BTreeMap::new(),
         revision: None,
@@ -325,4 +339,14 @@ pub fn pack(source: &Path, folder: &Path, mut write_new: impl FnMut(&Path, &[u8]
 pub fn unpack(folder: &Path, destination: &Path) -> io::Result<()> {
     let manifest = serde_json::from_slice(&read_member(&folder.join(ROOT), MANIFEST_LIMIT)?)?;
     atomic_write_new(destination, &assemble(folder, &manifest, destination)?)
+}
+
+/// A recovered modular document opens as an independent standard project.
+pub fn portable_project(project: filmcraft_project::Project) -> io::Result<filmcraft_project::Project> {
+    if project.modular_directory.is_none() {
+        return Ok(project);
+    }
+    let mut raw = serde_json::to_value(project)?;
+    organization::portable(&mut raw)?;
+    Ok(serde_json::from_value(raw)?)
 }

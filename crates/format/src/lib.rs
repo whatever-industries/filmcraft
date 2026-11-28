@@ -168,6 +168,7 @@ pub fn validate_loaded(mut loaded: Loaded) -> Result<Loaded, FormatError> {
 fn validate_records(project: &mut Project) -> Result<(), FormatError> {
     // Graphic layers written before they carried a uid get a stable identity now, before any
     // undo history exists. The field is optional in the schema, so this is not a schema upgrade.
+    project.validate_directory().map_err(FormatError::Corrupt)?;
     project.ensure_graphic_layer_uids();
     // Embedded LUT text is rendered on the hot path. Drop oversize entries at load time so a
     // hostile project cannot retain an unrenderable multi-megabyte source or repeatedly offer it

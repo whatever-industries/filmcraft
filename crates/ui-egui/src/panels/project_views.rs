@@ -146,7 +146,8 @@ pub fn items_in_view(app: &FilmcraftApp, v: &View, filter: &str) -> Vec<ItemId> 
             let mut out = Vec::new();
             fn walk(app: &FilmcraftApp, b: &Bin, sort: &SortSpec, filter: &str, out: &mut Vec<ItemId>) {
                 let (bins, items) = pp::bin_children(&app.session.project, b, sort);
-                for bid in bins {
+                let modular = app.session.folder_revision().is_some();
+                for bid in bins.into_iter().filter(|_| !modular) {
                     if (app.ui.expanded_bins.contains(&bid.0) || !filter.is_empty())
                         && let Some(sub) = app.session.project.root.find_bin(bid)
                     {
@@ -463,7 +464,7 @@ pub fn clear_params(selection: &[filmcraft_project::ItemId], selected_bin: Optio
 
 /// Drop project items dragged onto a bin: move them (the selection when the dragged item is in it).
 /// A dragged bin nests in it, unless that would put the bin inside itself.
-fn accept_bin_drop(app: &FilmcraftApp, ui: &egui::Ui, r: Rect, bin: u64, actions: &mut Actions) -> bool {
+pub(super) fn accept_bin_drop(app: &FilmcraftApp, ui: &egui::Ui, r: Rect, bin: u64, actions: &mut Actions) -> bool {
     if !ui.rect_contains_pointer(r) {
         return false;
     }
@@ -471,6 +472,9 @@ fn accept_bin_drop(app: &FilmcraftApp, ui: &egui::Ui, r: Rect, bin: u64, actions
         let sel = &app.session.state.project_selection;
         if sel.contains(&item) { sel.iter().map(|i| i.0).collect() } else { vec![item.0] }
     } else if let Some(dragged) = crate::panels::dragged_bin(ui) {
+        if app.session.folder_revision().is_some() {
+            return false;
+        }
         let root = &app.session.project.root;
         if root.find_bin(BinId(dragged)).is_none_or(|d| d.find_bin(BinId(bin)).is_some()) {
             return false;
@@ -814,7 +818,8 @@ fn background_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, v: &View, bin: Opt
 fn list_bin(app: &mut FilmcraftApp, ui: &mut egui::Ui, bin: &Bin, depth: usize, filter: &str, row: &mut usize, actions: &mut Actions, v: &View, lc: &ListCtx) {
     let t = app.tokens;
     let (bins, items) = pp::bin_children(&app.session.project, bin, &app.session.prefs.project_panel.view.sort);
-    for bid in bins {
+    let modular = app.session.folder_revision().is_some();
+    for bid in bins.into_iter().filter(|_| !modular) {
         let Some(b) = app.session.project.root.find_bin(bid).cloned() else { continue };
         let open = app.ui.expanded_bins.contains(&b.id.0) || !filter.is_empty();
         let (r, resp) = ui.allocate_exact_size(vec2(lc.width, lc.row_h), Sense::click_and_drag());
@@ -1128,7 +1133,7 @@ pub fn icon_view(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, v: &View
     let th_h = size * 9.0 / 16.0;
     let cell = vec2(size + 20.0, th_h + 34.0);
     let ids = icon_order(app, &bin, filter);
-    let bins: Vec<Bin> = if filter.is_empty() {
+    let bins: Vec<Bin> = if filter.is_empty() && app.session.folder_revision().is_none() {
         bin.children.iter().filter_map(|e| if let BinEntry::Bin(b) = e { Some(b.clone()) } else { None }).collect()
     } else {
         Vec::new()

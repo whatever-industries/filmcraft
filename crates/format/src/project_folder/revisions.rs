@@ -203,7 +203,7 @@ pub(super) fn commit(
     let number = prior.map_or(0, |r| r.number).checked_add(1).ok_or_else(|| invalid("revision limit reached"))?;
     let utc_ms = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).map_err(invalid)?.as_millis()).map_err(invalid)?;
     let edit = Edit { revision: number, utc_ms };
-    next.layout = 2;
+    next.layout = next.layout.max(2);
     next.revision = Some(Revision {
         number,
         parent: base.to_owned(),

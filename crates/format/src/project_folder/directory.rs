@@ -56,7 +56,17 @@ impl FolderDirectory {
         }
         let folder = path.parent().ok_or_else(|| invalid("missing project directory"))?.to_owned();
         let bytes = read_member(path, MANIFEST_LIMIT)?;
-        let mut manifest: Manifest = serde_json::from_slice(&bytes)?;
+        Self::from_manifest(folder, serde_json::from_slice(&bytes)?, digest(&bytes), bytes.len() as u64)
+    }
+
+    /// Inspect one published or retained revision under the same retention policy as historical recovery.
+    pub fn retained(path: &Path, revision: &str) -> io::Result<Self> {
+        let folder = path.parent().filter(|_| path.file_name().is_some_and(|n| n == ROOT)).ok_or_else(|| invalid("expected project.fcmod"))?;
+        let manifest = super::recovery::at(folder, revision)?;
+        Self::from_manifest(folder.to_owned(), manifest, revision.to_owned(), 0)
+    }
+
+    fn from_manifest(folder: PathBuf, mut manifest: Manifest, revision: String, manifest_bytes: u64) -> io::Result<Self> {
         check_manifest(&manifest)?;
         let mut remaining = MAX_PROJECT_BYTES;
         let envelope = load_payload(&folder, &manifest.envelope, &mut remaining)?;
@@ -75,8 +85,8 @@ impl FolderDirectory {
         }
         resolve_bin_copies(&manifest.copies, &mut bins, |id| items.contains_key(&ItemId(id)))?;
         Ok(Self {
-            revision: digest(&bytes),
-            bytes_read: bytes.len() as u64 + (MAX_PROJECT_BYTES - remaining),
+            revision,
+            bytes_read: manifest_bytes + (MAX_PROJECT_BYTES - remaining),
             remaining_item_bytes: remaining,
             total_bin_backups: manifest.revision.as_ref().map_or(0, |r| r.total_bin_backups),
             folder,

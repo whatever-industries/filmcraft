@@ -5,7 +5,7 @@ impl FilmcraftApp {
 
     /// Destination of imports started from the currently shown Project panel view.
     pub fn import_bin(&self) -> filmcraft_project::BinId {
-        panels::project::view_of(self, panels::project::shown_inst(self)).bin
+        panels::project::view_of(self, panels::project::destination_inst(self)).bin
     }
 
     pub fn file_dialog(&mut self, id: &str, params: &Value) -> Result<Value, String> {

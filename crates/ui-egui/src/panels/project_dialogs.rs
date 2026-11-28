@@ -19,7 +19,20 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
     crate::widgets::revert_drag_on_escape(ctx, egui::Id::unique("project-dialog-before-drag"), &mut d);
     let mut close = false;
     let mut run: Option<(String, Value)> = None;
+    if matches!(&d,ProjectDialog::ChooseBin{command,..} if !matches!(command.as_str(),"file.import"|"file.newSequence"|"mediaBrowser.import"|"project.moveToBin"))
+        || matches!(&d,ProjectDialog::DirectoryName{command,..} if !matches!(command.as_str(),"file.newFolder"|"file.newBin"|"project.renameFolder"))
+    {
+        app.ui.project_panel.dialog = None;
+        return;
+    }
+    let mut resume = None;
     let title = match &d {
+        ProjectDialog::DirectoryName { command, .. } => match command.as_str() {
+            "file.newBin" => tl!("New Bin"),
+            "file.newFolder" => tl!("New Folder"),
+            _ => tl!("Rename Folder"),
+        },
+        ProjectDialog::ChooseBin { .. } => tl!("Choose a Destination Bin"),
         ProjectDialog::MetadataDisplay { .. } => tl!("Metadata Display"),
         ProjectDialog::SavePresetAs { .. } => tl!("Save As New View Preset"),
         ProjectDialog::ManagePresets { .. } => tl!("Manage Saved View Presets"),
@@ -33,6 +46,21 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
     }
     win.show(ctx, |ui| {
         match &mut d {
+            ProjectDialog::DirectoryName { command, parent, name } => {
+                ui.label(tl!("Name"));
+                let field = ui.text_edit_singleline(name);
+                app.auto.add_response("projectDialog.name", &field, tl!("Name"));
+                if ok_cancel(app, ui, &mut close) && !name.trim().is_empty() {
+                    run = Some((command.clone(),json!({"parent":parent,"folder":parent,"name":name})));
+                }
+            }
+            ProjectDialog::ChooseBin { command, params, parent, name } => {
+                if let Some(bin) = choose_bin(app, ui, *parent, name, &mut close) {
+                    params["bin"] = json!(bin);
+                    resume = Some((command.clone(), params.clone()));
+                    close = true;
+                }
+            }
             ProjectDialog::MetadataDisplay { columns, filter } => metadata_display(app, ui, columns, filter, &mut run),
             ProjectDialog::SavePresetAs { name } => {
                 ui.horizontal(|ui| {
@@ -106,9 +134,56 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
     }
     if close {
         app.ui.project_panel.dialog = None;
+        if let Some((cmd, params)) = resume
+            && let Err(error) = crate::menus::invoke_command(app, ctx, &cmd, params)
+        {
+            app.ui.status = error;
+        }
     } else if app.ui.project_panel.dialog.is_some() {
         app.ui.project_panel.dialog = Some(d);
     }
+}
+
+fn choose_bin(
+    app: &mut FilmcraftApp,
+    ui: &mut egui::Ui,
+    parent: filmcraft_project::BinId,
+    name: &mut String,
+    close: &mut bool,
+) -> Option<filmcraft_project::BinId> {
+    let mut chosen = None;
+    let dir = app.session.project.directory();
+    egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+        for folder in dir.folders.values() {
+            for entry in &folder.children {
+                let filmcraft_project::DirectoryEntry::Bin(id) = entry else { continue };
+                let Some(bin) = app.session.project.root.find_bin(*id) else { continue };
+                let label = format!("{} / {}", folder.name, bin.name);
+                let response = ui.push_id(id.0, |ui| ui.button(&label)).inner;
+                app.auto.add_response(&format!("projectDialog.bin.{}", id.0), &response, &label);
+                if response.clicked() {
+                    chosen = Some(*id);
+                }
+            }
+        }
+    });
+    ui.label(tl!("New Bin"));
+    let field = ui.text_edit_singleline(name);
+    app.auto.add_response("projectDialog.newBinName", &field, tl!("New Bin"));
+    let create = ui.add_enabled(!name.trim().is_empty(), egui::Button::new(tl!("Create Bin")));
+    app.auto.add_response("projectDialog.createBin", &create, tl!("Create Bin"));
+    if create.clicked() {
+        match app.session.execute("file.newBin", json!({"parent":parent,"name":name})) {
+            Ok(result) => chosen = result["bin"].as_u64().map(filmcraft_project::BinId),
+            Err(error) => app.ui.status = error.to_string(),
+        }
+    }
+    let cancel = ui.button(tl!("Cancel"));
+    app.auto.add_response("projectDialog.cancel", &cancel, tl!("Cancel"));
+    if cancel.clicked() {
+        *close = true;
+    }
+    chosen
 }
 
 /// OK / Cancel row; true when OK was clicked.

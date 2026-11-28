@@ -67,7 +67,7 @@ pub fn move_backups(folder: &Path, mut visit: impl FnMut(u64, &super::MoveBackup
     Ok(())
 }
 
-fn at(folder: &Path, requested: &str) -> io::Result<Manifest> {
+pub(super) fn at(folder: &Path, requested: &str) -> io::Result<Manifest> {
     check_hash(requested)?;
     let state = super::retention::Catalog::read(folder)?;
     let mut departure = false;
@@ -133,6 +133,7 @@ fn extract(folder: &Path, manifest: &Manifest, sequence: u64) -> io::Result<Proj
     let ids: Vec<_> = items.keys().copied().collect();
     project.insert("items".into(), json!(ids));
     project.remove("search_bins");
+    project.remove("modular_directory");
     envelope["view"] = json!({"open_sequences":[sequence], "active_sequence":sequence});
     let entries: Vec<_> = ids.iter().map(|id| json!({"Item":id})).collect();
     let bin = json!({"id":root,"name":"Recovered","children":entries});
@@ -167,7 +168,7 @@ pub fn restore_copy(folder: &Path, expected: &str, historical: &str, sequence: u
     }
     let past = &recovered.envelope["project"];
     let present = live.envelope.get_mut("project").filter(|value| value.is_object()).ok_or_else(|| invalid("missing current project metadata"))?;
-    let project = crate::decode(&super::assemble(folder, &manifest, &root)?).map_err(invalid)?.project;
+    let mut project = crate::decode(&super::assemble(folder, &manifest, &root)?).map_err(invalid)?.project;
     // The standard reader repairs low next_id values. Include this historical cut's
     // internal IDs too, even if they were deleted from the live project.
     let mut item = recovered.items.remove(&sequence).ok_or_else(|| invalid("missing selected sequence"))?;
@@ -190,6 +191,10 @@ pub fn restore_copy(folder: &Path, expected: &str, historical: &str, sequence: u
         }
     }
     let bin_id = project.root.parent_of(ItemId(sequence)).unwrap_or(project.root.id);
+    project.expose_editorial_bin(bin_id);
+    if let Some(dir) = &project.modular_directory {
+        present["modular_directory"] = serde_json::to_value(dir)?;
+    }
     let bin = live.bins.get_mut(&bin_id.0).ok_or_else(|| invalid("missing destination bin"))?;
     bin["children"].as_array_mut().ok_or_else(|| invalid("missing bin children"))?.push(json!({"Item":id}));
     Ok((id, revisions::save_with(folder, expected, live, revisions::publish)?))

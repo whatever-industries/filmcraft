@@ -208,7 +208,7 @@ fn stale_revision_and_project_switch_do_not_close_an_unrelated_view() {
 }
 
 #[test]
-fn list_and_icon_drop_require_an_open_destination() {
+fn bins_drop_into_folders_and_cannot_nest_in_an_open_or_closed_bin() {
     for mode in ["list", "icon"] {
         let dir = tempfile::tempdir().unwrap();
         let f = Folder::create(dir.path());
@@ -216,7 +216,8 @@ fn list_and_icon_drop_require_an_open_destination() {
         d.ok("ui.panel.show", json!({"panel":"Project"}));
         d.ok("ui.menu.invoke", json!({"id":"window.maximizeFrame","params":{}}));
         d.exec("project.view.set", json!({"view":mode}));
-        // Drag the entire Cuts bin so the same source is visible in list and icon view.
+        let dest = d.exec("file.newFolder", json!({"name":"Finishing"}))["folder"].as_u64().unwrap();
+        d.exec("file.save", json!({}));
         let initial = fs::read(&f.path).unwrap();
         let history = d.app().session.history.undo.len();
         d.app().ui.expanded_bins = vec![f.selects.0];
@@ -235,11 +236,22 @@ fn list_and_icon_drop_require_an_open_destination() {
             d.ok("ui.drag", json!({"from":from,"to":to,"steps":14}));
             d.frames(3);
             let s = &d.app().session;
-            assert_eq!(s.project.root.find_bin(f.selects).unwrap().find_bin(f.cuts).is_some(), open_dest, "{mode}");
-            assert_eq!(s.history.undo.len(), history + usize::from(open_dest));
-            assert_eq!(s.is_dirty(), open_dest);
+            assert!(s.project.root.find_bin(f.selects).unwrap().find_bin(f.cuts).is_none(), "{mode}");
+            assert_eq!(s.history.undo.len(), history);
+            assert!(!s.is_dirty());
             assert_eq!(fs::read(&f.path).unwrap(), initial);
         }
+        let point = |d: &mut Driver, key: &str| {
+            let [x, y, w, h] = d.element(key).unwrap();
+            json!({"x":x+w/2.0,"y":y+h/2.0})
+        };
+        let from = point(&mut d, &format!("project.bin.{}", f.cuts.0));
+        let to = point(&mut d, &format!("project.folder.{dest}"));
+        d.ok("ui.drag", json!({"from":from,"to":to,"steps":14}));
+        d.frames(3);
+        assert_eq!(d.app().session.project.directory().parent(filmcraft_project::DirectoryEntry::Bin(f.cuts)), Some(BinId(dest)));
+        assert!(d.app().session.is_dirty());
+        assert_eq!(fs::read(&f.path).unwrap(), initial);
     }
 }
 
@@ -292,11 +304,14 @@ fn killing_the_editor_after_close_recovers_cuts_and_its_setting() {
 }
 
 #[test]
-fn global_save_from_bin_focus_writes_every_edit_and_clean_parent_close_keeps_the_child() {
+fn global_save_from_bin_focus_writes_every_edit_and_closing_a_bin_keeps_its_sibling() {
     let dir = tempfile::tempdir().unwrap();
     let f = Folder::create(dir.path());
     let mut d = f.driver();
-    d.exec("project.moveToBin", json!({"items":[f.selects],"bin":f.cuts}));
+    let folder = d.exec("file.newFolder", json!({"name":"Editorial"}))["folder"].clone();
+    for id in [f.cuts, f.selects] {
+        d.exec("project.moveToFolder", json!({"entry":{"Bin":id},"folder":folder}));
+    }
     d.exec("file.save", json!({}));
     f.edit(&mut d);
     d.ok("ui.key", json!({"key":"Cmd+S"}));
@@ -305,7 +320,9 @@ fn global_save_from_bin_focus_writes_every_edit_and_clean_parent_close_keeps_the
     assert_eq!(published.project.sequence(f.master).unwrap().start_timecode, 24);
     assert_eq!(published.project.sequence(f.sequence).unwrap().start_timecode, 24);
     assert_eq!(published.project.settings.title_safe, (12.0, 14.0));
-    assert!(published.project.root.find_bin(f.cuts).unwrap().find_bin(f.selects).is_some());
+    for id in [f.cuts, f.selects] {
+        assert_eq!(published.project.directory().parent(filmcraft_project::DirectoryEntry::Bin(id)), Some(BinId(folder.as_u64().unwrap())));
+    }
     invoke(&mut d, "closeBinTab", json!({"bin":f.cuts}));
     assert!(d.element("project.closeBin.save").is_none());
     assert_eq!(d.app().ui.project_panel.tabs.len(), 1);
@@ -453,3 +470,58 @@ fn restoring_a_saved_sequence_is_undoable_and_export_preserves_a_changed_nested_
 mod verified_relink;
 
 mod one_reel;
+
+#[test]
+fn folder_destination_picker_can_be_dismissed_and_an_open_bin_receives_the_sequence() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = Folder::create(dir.path());
+    let mut d = f.driver();
+    d.ok("ui.panel.show", json!({"panel":"Project"}));
+    d.ok("ui.menu.invoke", json!({"id":"window.maximizeFrame","params":{}}));
+    d.frames(3);
+    let before = d.app().session.project.clone();
+    let disk = fs::read(&f.path).unwrap();
+    let toggle = format!("project.folder.{}.toggle", d.app().session.project.root.id.0);
+    d.click(&toggle);
+    d.frames(2);
+    assert!(d.element(&format!("project.bin.{}", f.cuts.0)).is_none());
+    d.click(&toggle);
+    d.frames(2);
+    assert!(d.element(&format!("project.bin.{}", f.cuts.0)).is_some());
+
+    for command in ["file.import", "file.newSequence"] {
+        let response = d.ok("ui.menu.invoke", json!({"id":command,"params":{}}));
+        assert_eq!(response["dialog"], "chooseBin");
+        d.frames(3);
+        let cancel = d.harness.get_by_role_and_label(egui::accesskit::Role::Button, "Cancel");
+        cancel.click();
+        d.frames(3);
+        assert_eq!(d.app().session.project, before);
+        assert_eq!(fs::read(&f.path).unwrap(), disk);
+    }
+    invoke(&mut d, "openBin", json!({"bin":f.selects,"how":"tab"}));
+    let made = d.ok("ui.menu.invoke", json!({"id":"file.newSequence","params":{"name":"Assembly"}}));
+    let id = ItemId(made["sequence"].as_u64().unwrap());
+    assert_eq!(d.app().session.project.root.parent_of(id), Some(f.selects));
+    assert_eq!(fs::read(&f.path).unwrap(), disk);
+}
+
+#[test]
+fn first_close_of_a_new_bin_publishes_its_folder_without_a_sibling_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = Folder::create(dir.path());
+    let mut d = f.driver();
+    let folder = d.exec("file.newFolder", json!({"name":"Finishing"}))["folder"].clone();
+    let bin = d.exec("file.newBin", json!({"parent":folder,"name":"Delivery"}))["bin"].clone();
+    let unused = d.exec("file.newFolder", json!({"parent":folder,"name":"Alternates"}))["folder"].clone();
+    let result = d.exec("file.newSequence", json!({"bin":bin,"name":"Delivery Cut"}));
+    invoke(&mut d, "openBin", json!({"bin":bin,"how":"tab"}));
+    invoke(&mut d, "closeBinTab", json!({"bin":bin}));
+    d.click("project.closeBin.save");
+    let disk = open(&f.path);
+    let owner = BinId(bin.as_u64().unwrap());
+    assert_eq!(disk.project.root.parent_of(ItemId(result["sequence"].as_u64().unwrap())), Some(owner));
+    assert_eq!(disk.project.directory().parent(filmcraft_project::DirectoryEntry::Bin(owner)), Some(BinId(folder.as_u64().unwrap())));
+    assert!(!disk.project.directory().folders.contains_key(&BinId(unused.as_u64().unwrap())));
+    assert!(d.app().session.is_dirty());
+}

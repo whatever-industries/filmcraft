@@ -40,7 +40,7 @@ pub fn save_relinked_source(path: &Path, expected: &str, owner: BinId, before: &
     if &allowed != after {
         return Err(invalid("relink changed unrelated source fields"));
     }
-    save_resident_records(path, expected, Some((owner, before, after)), None, None)
+    save_resident_records(path, expected, Some((owner, before, after)), None, None, None)
 }
 
 /// Publish the active timeline record and/or the current global view in one revision.
@@ -59,7 +59,7 @@ pub fn save_trimmed_sequence(
         }
         after.as_sequence().ok_or_else(|| invalid("missing sequence"))?.check_bounds().map_err(invalid)?;
     }
-    save_resident_records(path, expected, edit, view, next_id)
+    save_resident_records(path, expected, edit, view, next_id, None)
 }
 
 /// Splits can consume IDs even for segments removed by the extract. Preserve the
@@ -89,12 +89,33 @@ fn stage(folder: &Path, hash: &str, data: &[u8], written: &mut u64, read: &mut u
     Ok(())
 }
 
+/// The editor has only changed folder names or the placement of existing bins.
+pub fn save_directory(path: &Path, expected: &str, project: &Project, view: Option<&ProjectView>) -> io::Result<RelinkSave> {
+    project.validate_directory().map_err(invalid)?;
+    save_resident_records(path, expected, None, view, None, Some(project))
+}
+
+pub(crate) fn apply_directory(envelope: &mut serde_json::Value, project: &Project) -> io::Result<()> {
+    let metadata = envelope["project"].as_object_mut().ok_or_else(|| invalid("missing project metadata"))?;
+    if let Some(dir) = &project.modular_directory {
+        metadata.insert("modular_directory".into(), serde_json::to_value(dir)?);
+    } else {
+        metadata.remove("modular_directory");
+    }
+    if project.next_id > Project::MAX_NEXT_ID {
+        return Err(invalid("project ID limit reached"));
+    }
+    metadata.insert("next_id".into(), project.next_id.into());
+    Ok(())
+}
+
 fn save_resident_records(
     path: &Path,
     expected: &str,
     edit: Option<(BinId, &ProjectItem, &ProjectItem)>,
     view: Option<&ProjectView>,
     next_id: Option<u64>,
+    organization: Option<&Project>,
 ) -> io::Result<RelinkSave> {
     let folder = folder(path)?;
     let _guard = revisions::writer(folder)?;
@@ -143,7 +164,11 @@ fn save_resident_records(
     }
     let mut envelope = directory.envelope;
     let counter_changed = set_trim_counter(&mut envelope, next_id, edit.map(|(_, _, after)| after))?;
-    if view.is_some() || counter_changed {
+    if let Some(project) = organization {
+        apply_directory(&mut envelope, project)?;
+        next.layout = 3;
+    }
+    if view.is_some() || counter_changed || organization.is_some() {
         let mut budget = MAX_PROJECT_BYTES;
         let old = verified_bytes(folder, &prior.envelope, &mut budget)?;
         bytes_read += old.len() as u64;

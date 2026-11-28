@@ -31,7 +31,23 @@ fn edited_bytes(directory: &FolderDirectory, original: &[u8], saved: &ProjectIte
     Ok(bytes)
 }
 
+enum PartialEdit<'a> {
+    Item(&'a ProjectItem, &'a ProjectItem, Option<u64>),
+    Directory(&'a Project),
+}
+
 impl CheckpointStore {
+    pub fn publish_directory(
+        &mut self,
+        session: &Path,
+        path: &Path,
+        expected: &str,
+        project: &Project,
+        marker: impl FnOnce(&str, usize, &str) -> io::Result<usize>,
+    ) -> io::Result<CheckpointWrite> {
+        project.validate_directory().map_err(invalid)?;
+        self.publish_partial(session, path, expected, PartialEdit::Directory(project), marker)
+    }
     pub fn publish_relink(
         &mut self,
         session: &Path,
@@ -45,7 +61,7 @@ impl CheckpointStore {
         if identity(saved).is_none() || identity(saved) != identity(working) {
             return Err(invalid("source differs from reviewed relink"));
         }
-        self.publish_edited_item(session, path, expected, (saved, working), None, publish_marker)
+        self.publish_partial(session, path, expected, PartialEdit::Item(saved, working, None), publish_marker)
     }
 
     pub fn publish_trim(
@@ -61,19 +77,17 @@ impl CheckpointStore {
         if saved.as_sequence().is_none() || working.as_sequence().is_none() {
             return Err(invalid("expected a sequence checkpoint"));
         }
-        self.publish_edited_item(session, path, expected, items, next_id, publish_marker)
+        self.publish_partial(session, path, expected, PartialEdit::Item(saved, working, next_id), publish_marker)
     }
 
-    fn publish_edited_item(
+    fn publish_partial(
         &mut self,
         session: &Path,
         path: &Path,
         expected: &str,
-        items: (&ProjectItem, &ProjectItem),
-        next_id: Option<u64>,
+        edit: PartialEdit,
         publish_marker: impl FnOnce(&str, usize, &str) -> io::Result<usize>,
     ) -> io::Result<CheckpointWrite> {
-        let (saved, working) = items;
         let start = Instant::now();
         let folder = path.parent().ok_or_else(|| invalid("missing project directory"))?;
         let (_, mut records) = revisions::read_base(folder, expected)?;
@@ -82,7 +96,12 @@ impl CheckpointStore {
             return Err(invalid("stale relink checkpoint base"));
         }
         let mut envelope = directory.envelope.take();
-        crate::project_folder::relinked_source::set_trim_counter(&mut envelope, next_id, Some(working))?;
+        match edit {
+            PartialEdit::Item(_, working, next_id) => {
+                crate::project_folder::relinked_source::set_trim_counter(&mut envelope, next_id, Some(working))?;
+            }
+            PartialEdit::Directory(project) => crate::project_folder::relinked_source::apply_directory(&mut envelope, project)?,
+        }
         if let Some(fields) = envelope.as_object_mut() {
             fields.remove("view");
         }
@@ -101,11 +120,14 @@ impl CheckpointStore {
         records.layout = 1;
         records.revision = None;
 
-        let (source_pos, (_, hash)) =
-            records.items.iter_mut().enumerate().find(|(_, (id, _))| *id == saved.id.0).ok_or_else(|| invalid("missing reviewed source"))?;
-        let bytes = edited_bytes(&directory, &verified_bytes(folder, hash, &mut remaining)?, saved, working)?;
-        *hash = digest(&bytes);
-        let mut replacement = Some(bytes);
+        let mut replacement = if let PartialEdit::Item(saved, working, _) = edit {
+            let (pos, (_, hash)) = records.items.iter_mut().enumerate().find(|(_, (id, _))| *id == saved.id.0).ok_or_else(|| invalid("missing edited item"))?;
+            let bytes = edited_bytes(&directory, &verified_bytes(folder, hash, &mut remaining)?, saved, working)?;
+            *hash = digest(&bytes);
+            Some((pos, bytes))
+        } else {
+            None
+        };
         let first_item = 1 + records.bins.len();
         let ids: Vec<_> = records.items.iter().map(|(id, _)| ItemId(*id)).collect();
         self.publish_records(
@@ -117,8 +139,8 @@ impl CheckpointStore {
                 if pos == 0 {
                     return Ok(header.take());
                 }
-                if pos == first_item + source_pos {
-                    return Ok(replacement.take());
+                if replacement.as_ref().is_some_and(|(index, _)| pos == first_item + index) {
+                    return Ok(replacement.take().map(|(_, data)| data));
                 }
                 let budget = if pos < first_item { &mut bin_budget } else { &mut remaining };
                 let bytes = verified_bytes(folder, hash, budget)?;

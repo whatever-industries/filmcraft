@@ -113,6 +113,7 @@ impl Session {
     }
 }
 
+mod media_check;
 mod recovery;
 mod scope;
 pub(crate) mod warm;
@@ -123,7 +124,7 @@ pub(crate) fn available(s: &Session) -> std::result::Result<(), String> {
 
 fn bin_id(p: &Value, saved: &Project, working: &Project) -> Result<BinId> {
     let id = BinId(p.get("bin").and_then(Value::as_u64).ok_or_else(|| EngineError::Other("expected a numeric bin id".into()))?);
-    if saved.root.find_bin(id).is_none() && working.root.find_bin(id).is_none() {
+    if [saved, working].iter().all(|p| p.directory().parent(filmcraft_project::DirectoryEntry::Bin(id)).is_none()) {
         return Err(EngineError::Other(format!("unknown bin {}", id.0)));
     }
     Ok(id)
@@ -238,11 +239,16 @@ impl Session {
     }
 
     pub(crate) fn bin_status(&mut self, _: &Value) -> Result<Value> {
-        if self.warm_folder.is_some() {
-            return Ok(json!({"dirtyBins":self.dirty_folder_bins(),"projectSettingsDirty":false,"unfiledItemsDirty":false}));
+        let status = if let Some(w) = &self.warm_folder {
+            scope::Status { bins: self.dirty_folder_bins(), settings: false, organization: w.saved_directory != self.project.modular_directory, unfiled: false }
+        } else {
+            scope::status(&self.folder()?.project, self.committed_state().0)
+        };
+        let mut result = json!({"dirtyBins":status.bins,"projectSettingsDirty":status.settings,"unfiledItemsDirty":status.unfiled});
+        if status.organization {
+            result["projectDirectoryDirty"] = true.into();
         }
-        let status = scope::status(&self.folder()?.project, self.committed_state().0);
-        Ok(json!({"dirtyBins":status.bins,"projectSettingsDirty":status.settings,"unfiledItemsDirty":status.unfiled}))
+        Ok(result)
     }
 
     /// History restores model snapshots while the offline inventory and decoders live in the session.
@@ -267,7 +273,7 @@ impl Session {
         if self.trim_play.dynamic.is_some() {
             return;
         }
-        if self.warm_folder.is_some() && self.dirty_folder_bins().is_empty() {
+        if self.warm_folder.as_ref().is_some_and(|w| w.saved_directory == self.project.modular_directory) && self.dirty_folder_bins().is_empty() {
             self.saved_revision = self.revision;
         }
         if let Some(folder) = &self.editing_folder {

@@ -554,6 +554,18 @@ fn import(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
     }
+    // A modular drop files every imported clip in the chosen editorial bin.
+    if s.folder_revision().is_some() {
+        let id = bin.map(filmcraft_project::BinId).ok_or_else(|| bad("mediaBrowser.import", "choose an editorial bin"))?;
+        if s.project.directory().parent(filmcraft_project::DirectoryEntry::Bin(id)).is_none() {
+            return Err(bad("mediaBrowser.import", "choose an editorial bin"));
+        }
+        let mut pending: Vec<_> = folders.drain(..).rev().collect();
+        while let Some(folder) = pending.pop() {
+            files.extend(folder.files);
+            pending.extend(folder.subs.into_iter().rev());
+        }
+    }
     // an image sequence imports from its first selected frame only
     if seq {
         files.truncate(1);

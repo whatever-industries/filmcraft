@@ -140,6 +140,46 @@ impl FolderSnapshot {
         self.manifest.parent().ok_or_else(|| invalid("missing project folder"))
     }
 
+    /// Export the working edit against its raw saved records so unknown fields survive.
+    pub fn export_working(
+        &self,
+        before: &Project,
+        before_view: &ProjectView,
+        after: &Project,
+        view: &ProjectView,
+        dest: &Path,
+        name: Option<&str>,
+    ) -> io::Result<Vec<u8>> {
+        let folder = self.directory()?;
+        let (_, manifest) = revisions::read_base(folder, &self.revision)?;
+        let mut records = read_records(folder, &manifest)?;
+        records.envelope = overlay::record(&records.envelope, &metadata(before, before_view)?, &metadata(after, view)?, "project metadata")?;
+        let old_bins = BinRecords::new(before)?.0;
+        let bins = BinRecords::new(after)?.0;
+        records.bins.retain(|id, _| bins.contains_key(id));
+        for (id, bin) in bins {
+            let value = match (records.bins.get(&id), old_bins.get(&id)) {
+                (Some(raw), Some(old)) => overlay::record(raw, old, &bin, "bin")?,
+                _ => bin,
+            };
+            records.bins.insert(id, value);
+        }
+        records.items.retain(|id, _| after.items.contains_key(&filmcraft_project::ItemId(*id)));
+        for (id, item) in &after.items {
+            let old = before.item(*id);
+            if old.is_some_and(|old| same_item(old, item)) {
+                continue;
+            }
+            let value = serde_json::to_value(item)?;
+            let merged = match (records.items.get(&id.0), old) {
+                (Some(raw), Some(old)) => overlay::record(raw, &serde_json::to_value(old)?, &value, "item")?,
+                _ => value,
+            };
+            records.items.insert(id.0, merged);
+        }
+        super::portable_bytes(folder, records, dest, name)
+    }
+
     pub fn revision(&self) -> &str {
         &self.revision
     }
@@ -187,6 +227,7 @@ impl FolderSnapshot {
         let (_guard, prior_bytes, prior, mut delta) = self.verified_writer()?;
         let folder = delta.folder;
         let mut before_bins = BinRecords::new(before)?;
+        after.validate_directory().map_err(invalid)?;
         let mut after_bins = BinRecords::new(after)?;
         if after_bins.0.len().saturating_add(after.items.len()) > super::RECORD_LIMIT {
             return Err(invalid("too many project records"));
@@ -208,6 +249,9 @@ impl FolderSnapshot {
             }
         }
         let mut next = prior.clone();
+        if after.modular_directory.is_some() {
+            next.layout = 3;
+        }
         // Compare the physical source record in its original namespace. A later
         // edit that needs both IDs materializes the copy directly in the bin.
         next.copies.clear();
@@ -557,12 +601,27 @@ impl BinRecords {
 
 fn metadata(project: &Project, view: &ProjectView) -> io::Result<Value> {
     // Exhaustively destructure Project so new persisted fields are accounted for here.
-    let Project { name, custom_colors, custom_color_names, settings, root, items, next_id, luts, transcripts, search_bins, source_graphics, narrations, notes } =
-        project;
+    let Project {
+        modular_directory,
+        name,
+        custom_colors,
+        custom_color_names,
+        settings,
+        root,
+        items,
+        next_id,
+        luts,
+        transcripts,
+        search_bins,
+        source_graphics,
+        narrations,
+        notes,
+    } = project;
     if *next_id > Project::MAX_NEXT_ID {
         return Err(invalid("project ID limit reached"));
     }
     let metadata = Project {
+        modular_directory: modular_directory.clone(),
         name: name.clone(),
         custom_colors: custom_colors.clone(),
         custom_color_names: custom_color_names.clone(),

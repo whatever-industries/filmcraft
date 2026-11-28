@@ -811,7 +811,9 @@ impl Session {
         }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(w) = &self.warm_folder {
-            if let Some(draft) = w.draft(&project, revision) {
+            if w.saved_directory != project.modular_directory {
+                p.send_dirty_directory(project, revision, self.path.clone(), w.revision.clone());
+            } else if let Some(draft) = w.draft(&project, revision) {
                 p.reviewed_source = draft.saved.as_media().map(|_| (self.document_epoch, draft.saved.id));
                 p.send_dirty_item(draft);
             } else {
@@ -1170,6 +1172,10 @@ impl Session {
         let mut p = (*self.project).clone();
         let mut st = self.state.clone();
         let r = f(&mut p, &mut st)?;
+        if self.folder_revision().is_some() {
+            p.preserve_editorial_bins(&self.project);
+            p.validate_directory().map_err(EngineError::Other)?;
+        }
         self.refuse_self_nesting(&p)?;
         self.drop_orphan_transitions(&mut p);
         #[cfg(not(target_arch = "wasm32"))]
@@ -1203,6 +1209,10 @@ impl Session {
         let mut p = (*self.project).clone();
         let mut st = self.state.clone();
         let r = f(&mut p, &mut st)?;
+        if self.folder_revision().is_some() {
+            p.preserve_editorial_bins(&self.project);
+            p.validate_directory().map_err(EngineError::Other)?;
+        }
         self.refuse_self_nesting(&p)?;
         self.drop_orphan_transitions(&mut p);
         self.project = Arc::new(p);

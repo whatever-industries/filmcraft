@@ -702,3 +702,268 @@ fn browsing_older_pages_and_a_retired_selection_preserve_the_edit() {
     assert!(s.execute("project.restoreSequenceCopy", json!({"revision":original,"sequence":f.cut})).is_err());
     assert_eq!(s.project, before);
 }
+
+#[test]
+fn folder_moves_publish_with_global_save_and_export_as_an_ordinary_tree() {
+    use filmcraft_project::DirectoryEntry::{Bin, Folder};
+    let tmp = tempfile::tempdir().unwrap();
+    let f = Fixture::new(tmp.path());
+    let project_files = || {
+        fs::read_dir(f.manifest.parent().unwrap())
+            .unwrap()
+            .map(|e| {
+                let entry = e.unwrap();
+                let stat = entry.metadata().unwrap();
+                (entry.file_name(), (stat.len(), stat.modified().unwrap()))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let original_files = project_files();
+    let before = manifest(&f);
+    let mut s = f.open();
+    let root = s.project.root.id;
+    let old = s.project.directory();
+    assert_eq!(old.parent(Bin(f.cuts)), Some(f.cuts));
+    assert_eq!(old.parent(Folder(f.cuts)), Some(root));
+    assert_eq!(old.parent(Bin(f.selects)), Some(f.cuts));
+    assert_eq!(manifest(&f), before);
+    assert_eq!(project_files(), original_files);
+    let dest = BinId(s.execute("file.newFolder", json!({"name":"Finishing"})).unwrap()["folder"].as_u64().unwrap());
+    s.execute("project.moveToFolder", json!({"folder":dest,"entry":Bin(f.selects)})).unwrap();
+    assert!(s.execute("project.moveToFolder", json!({"folder":dest,"entry":Folder(dest)})).is_err());
+    let pending = status(&mut s);
+    assert_eq!(pending["dirtyBins"], json!([]));
+    assert_eq!(pending["projectSettingsDirty"], false);
+    assert_eq!(pending["projectDirectoryDirty"], true);
+    trim(&mut s, f.select, 12);
+    s.execute("project.saveBin", json!({"bin":f.selects})).unwrap();
+    let reopened = f.open();
+    assert_eq!(frame(&reopened.project, f.select), 12);
+    assert_eq!(reopened.project.directory().parent(Bin(f.selects)), Some(f.cuts));
+    let bin_save = manifest(&f);
+    s.execute("file.save", json!({})).unwrap();
+    let after = manifest(&f);
+    for key in ["bins", "items"] {
+        assert_eq!(bin_save[key], after[key]);
+    }
+    assert_eq!(f.open().project.directory().parent(Bin(f.selects)), Some(dest));
+    let exported = tmp.path().join("portable.fcproj");
+    filmcraft_format::project_folder::unpack(f.manifest.parent().unwrap(), &exported).unwrap();
+    let p = filmcraft_format::decode(&fs::read(exported).unwrap()).unwrap().project;
+    assert!(p.modular_directory.is_none());
+    let parent = p.root.find_bin(dest).unwrap();
+    assert!(parent.find_bin(f.selects).is_some());
+    assert_eq!(p.root.parent_of(f.cut), Some(f.cuts));
+    assert_eq!(p.root.parent_of(f.select), Some(f.selects));
+    assert_eq!(frame(&p, f.select), 12);
+}
+
+#[test]
+fn first_selective_save_publishes_only_the_required_new_folder_path() {
+    use filmcraft_project::DirectoryEntry::{Bin, Folder};
+    let tmp = tempfile::tempdir().unwrap();
+    let f = Fixture::new(tmp.path());
+    let mut s = f.open();
+    let a = s.execute("file.newFolder", json!({"name":"Show"})).unwrap()["folder"].clone();
+    let b = s.execute("file.newFolder", json!({"name":"Episode","parent":a})).unwrap()["folder"].clone();
+    let unused = s.execute("file.newFolder", json!({"name":"Unused","parent":a})).unwrap()["folder"].clone();
+    let bin = s.execute("file.newBin", json!({"name":"Assembly","parent":b})).unwrap()["bin"].clone();
+    let other = s.execute("file.newBin", json!({"name":"Other","parent":b})).unwrap()["bin"].clone();
+    s.execute("project.saveBin", json!({"bin":bin})).unwrap();
+    let reopened = f.open();
+    let dir = reopened.project.directory();
+    let id = |v: &Value| BinId(v.as_u64().unwrap());
+    assert_eq!(dir.parent(Bin(id(&bin))), Some(id(&b)));
+    assert_eq!(dir.parent(Folder(id(&b))), Some(id(&a)));
+    assert!(dir.parent(Bin(id(&other))).is_none());
+    assert!(!dir.folders.contains_key(&id(&unused)));
+    assert!(s.is_dirty());
+}
+
+#[test]
+fn organizing_an_indexed_project_keeps_reels_deferred_and_checkpoint_independent() {
+    use filmcraft_format::project_folder::{
+        FolderDirectory,
+        index::{Index, cache_directory},
+        load_checkpoint,
+    };
+    use filmcraft_project::DirectoryEntry::{Bin, Folder};
+    let scratch = tempfile::tempdir().unwrap();
+    let manifest = if let Some(source) = std::env::var_os("FILMCRAFT_FOLDER_TRIAL") {
+        let folder = scratch.path().join("Feature");
+        fs::create_dir(&folder).unwrap();
+        for file in fs::read_dir(source).unwrap().map(|e| e.unwrap()) {
+            if file.file_type().unwrap().is_file() {
+                fs::copy(file.path(), folder.join(file.file_name())).unwrap();
+            }
+        }
+        folder.join("project.fcmod")
+    } else {
+        let fixture = Fixture::new(scratch.path());
+        let session = fixture.open();
+        let src = scratch.path().join("view.fcproj");
+        let view = filmcraft_project::ProjectView { active_sequence: Some(fixture.cut), ..Default::default() };
+        fs::write(&src, filmcraft_format::encode_with_view(&session.project, Some(&view), false)).unwrap();
+        let folder = scratch.path().join("WithView");
+        filmcraft_format::project_folder::pack(&src, &folder, filmcraft_format::atomic_write_new).unwrap();
+        folder.join("project.fcmod")
+    };
+    let cache = scratch.path().join("cache");
+    let d = FolderDirectory::open(&manifest).unwrap();
+    let (index, _, _) = Index::build(&d, None).unwrap();
+    fs::write(cache_directory(&manifest, &cache).unwrap().join("index.json"), index.bytes().unwrap()).unwrap();
+    let total = index.labels.values().filter(|l| l.sequence).count();
+    let mut s = Session::local_folder_editor();
+    s.enable_experimental_modular_relink(cache);
+    s.execute("file.open", json!({"path":manifest})).unwrap();
+    worker(&mut s, scratch.path());
+    let resident = |s: &Session| s.project.sequences().map(|q| q.id).collect::<std::collections::BTreeSet<_>>();
+    let loaded = resident(&s);
+    assert!(s.has_deferred_timelines() && loaded.len() < total);
+    let before: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    let dir = s.project.directory().into_owned();
+    let moving = *dir.folders.values().flat_map(|f| &f.children).find(|e| matches!(e, Bin(_))).unwrap();
+    let new = BinId(s.execute("file.newFolder", json!({"name":"Finishing"})).unwrap()["folder"].as_u64().unwrap());
+    s.execute("project.moveToFolder", json!({"entry":moving,"folder":new})).unwrap();
+    s.execute("project.directory", json!({})).unwrap();
+    assert_eq!(resident(&s), loaded);
+    s.sync_persistence();
+    let worker = s.persistence.as_ref().unwrap();
+    worker.flush().unwrap();
+    let journal = worker.session_dir.clone();
+    let meta: Value = serde_json::from_slice(&fs::read(journal.join("session.json")).unwrap()).unwrap();
+    let marker = meta["checkpoint"].as_str().unwrap();
+    // Prevent publication after the checkpoint was confirmed, as if interrupted before root replacement.
+    let archive = manifest.with_file_name(d.revision);
+    fs::create_dir(&archive).unwrap();
+    assert!(s.execute("file.save", json!({})).is_err());
+    let source = manifest.parent().unwrap();
+    let detached = scratch.path().join("unmounted");
+    fs::rename(source, &detached).unwrap();
+    let recovered = load_checkpoint(&journal, marker).unwrap().project;
+    assert_eq!(recovered.directory().parent(moving), Some(new));
+    assert_eq!(recovered.sequences().count(), total);
+    fs::rename(&detached, source).unwrap();
+    fs::remove_dir(archive).unwrap();
+    let result = s.execute("file.save", json!({})).unwrap();
+    assert!(s.has_deferred_timelines());
+    assert_eq!(resident(&s), loaded);
+    let after: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    for k in ["items", "bins"] {
+        assert_eq!(after[k], before[k]);
+    }
+    assert_eq!(after["revision"]["total_bin_backups"].as_u64().unwrap_or(0), before["revision"]["total_bin_backups"].as_u64().unwrap_or(0));
+    let reopened = FolderSnapshot::open(&manifest).unwrap().1.project;
+    assert_eq!(reopened.directory().parent(Folder(new)), Some(dir.root));
+    assert_eq!(reopened.directory().parent(moving), Some(new));
+    eprintln!("folder trial: {total} sequences, {} resident, {} bytes published", loaded.len(), result["bytes"]);
+    s.shutdown();
+}
+
+#[test]
+fn retained_bin_media_check_follows_cross_bin_sources_and_includes_unused_clips() {
+    use filmcraft_project::{MediaRef, MergedClip};
+    let tmp = tempfile::tempdir().unwrap();
+    let f = Fixture::new(tmp.path());
+    let mut s = f.open();
+    let path = f.manifest.with_file_name("original.mov");
+    let proxy = f.manifest.with_file_name("proxy.mov");
+    fs::write(&path, b"original footage").unwrap();
+    fs::write(&proxy, b"proxy footage").unwrap();
+    let mut ids = Vec::new();
+    for bin in [f.cuts, f.selects, f.selects] {
+        let result = s.execute("file.newColorMatte", json!({"color":"#2288bb","bin":bin})).unwrap();
+        let id = ItemId(result["item"].as_u64().unwrap());
+        ids.push(id);
+        s.edit("Attach test media", |p, _| {
+            let media = p.item_mut(id).unwrap().as_media_mut().unwrap();
+            media.media = MediaRef::File { path: "original.mov".into() };
+            media.proxy = Some(MediaRef::File { path: "proxy.mov".into() });
+            media.identity = Some(crate::relink::identity_of_bytes(b"original footage"));
+            Ok(())
+        })
+        .unwrap();
+    }
+    s.edit("Reference another bin", |p, _| {
+        p.sequence_mut(f.cut).unwrap().merged = Some(MergedClip { video: Some(ids[1]), ..Default::default() });
+        Ok(())
+    })
+    .unwrap();
+    s.execute("file.save", json!({})).unwrap();
+    let saved = s.folder_revision().unwrap().to_owned();
+    trim(&mut s, f.cut, 24);
+    s.execute("file.save", json!({})).unwrap();
+    let backup = tmp.path().join("Backup");
+    filmcraft_format::project_folder::backup_history(f.manifest.parent().unwrap(), &backup).unwrap();
+    fs::copy(&proxy, backup.join("proxy.mov")).unwrap();
+    fs::rename(f.manifest.parent().unwrap(), tmp.path().join("Detached")).unwrap();
+    let mut restored = Session::local_folder_editor();
+    let backup_root = backup.join("project.fcmod");
+    restored.execute("file.open", json!({"path":backup_root})).unwrap();
+    let head = fs::read(&backup_root).unwrap();
+    for (contents, state) in [(None, "missing"), (Some(b"replacement".as_slice()), "changed"), (Some(b"original footage".as_slice()), "matched")] {
+        if let Some(bytes) = contents {
+            fs::write(backup.join("original.mov"), bytes).unwrap()
+        } else {
+            assert!(!backup.join("original.mov").exists());
+        }
+        let result = restored.execute("project.inspectBinMedia", json!({"bin":f.cuts,"revision":saved})).unwrap();
+        let checked: std::collections::BTreeSet<ItemId> = serde_json::from_value(result["inspectedItems"].clone()).unwrap();
+        assert_eq!(checked, [f.cut, ids[0], ids[1]].into_iter().collect());
+        let files = result["media"].as_array().unwrap();
+        assert_eq!(files.len(), 2);
+        for file in files {
+            assert_eq!(file["original"], state);
+            assert_eq!(file["proxy"], "presentUnverified");
+        }
+        assert_eq!(fs::read(&backup_root).unwrap(), head);
+        assert!(!restored.is_dirty());
+    }
+}
+
+#[test]
+fn folder_export_keeps_extension_fields_saved_views_and_unfiled_items() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut p = Project::new("Reels");
+    let empty = p.add_bin("Same", None);
+    let mixed = p.add_bin("Same", None);
+    let first = p.new_sequence("Opening", Default::default(), 1, 0, Some(mixed));
+    let leaf = p.add_bin("Selects", Some(mixed));
+    let second = p.new_sequence("Master", Default::default(), 1, 0, Some(mixed));
+    p.sequence_mut(second).unwrap().merged = Some(filmcraft_project::MergedClip { video: Some(first), ..Default::default() });
+    let root_item = p.new_sequence("Top", Default::default(), 1, 0, None);
+    let unfiled = p.new_sequence("Unfiled", Default::default(), 1, 0, None);
+    p.root.remove_item(unfiled);
+    let view = filmcraft_project::ProjectView { open_sequences: vec![first, second], active_sequence: Some(second), ..Default::default() };
+    let mut doc: Value = serde_json::from_slice(&filmcraft_format::encode_with_view(&p, Some(&view), false)).unwrap();
+    doc["project"]["items"][first.0.to_string()]["extensionExample"] = json!({"v":[1,8]});
+    doc["extensionExample"] = json!(["kept"]);
+    let src = tmp.path().join("source.fcproj");
+    fs::write(&src, serde_json::to_vec(&doc).unwrap()).unwrap();
+    let folder = tmp.path().join("folder");
+    filmcraft_format::project_folder::pack(&src, &folder, filmcraft_format::atomic_write_new).unwrap();
+    let portable = tmp.path().join("clean.fcproj");
+    filmcraft_format::project_folder::unpack(&folder, &portable).unwrap();
+    let clean: Value = serde_json::from_slice(&fs::read(portable).unwrap()).unwrap();
+    assert_eq!(clean, doc);
+    let mut s = Session::local_folder_editor();
+    s.execute("file.open", json!({"path":folder.join("project.fcmod")})).unwrap();
+    let to = s.execute("file.newFolder", json!({"name":"Finishing"})).unwrap()["folder"].clone();
+    s.execute("project.moveToFolder", json!({"folder":to,"entry":{"Bin":leaf}})).unwrap();
+    let output = tmp.path().join("edited.fcproj");
+    s.execute("file.saveCopy", json!({"path":output})).unwrap();
+    let data = fs::read(output).unwrap();
+    let edited: Value = serde_json::from_slice(&data).unwrap();
+    assert_eq!(edited["extensionExample"], doc["extensionExample"]);
+    assert_eq!(edited["project"]["items"][first.0.to_string()]["extensionExample"], doc["project"]["items"][first.0.to_string()]["extensionExample"]);
+    let loaded = filmcraft_format::decode(&data).unwrap();
+    let after = loaded.project;
+    assert_eq!(after.root.parent_of(unfiled), None);
+    assert_eq!(after.root.parent_of(root_item), Some(p.root.id));
+    assert_eq!(after.sequence(second).unwrap().merged.as_ref().unwrap().video, Some(first));
+    assert!(after.root.find_bin(empty).unwrap().children.is_empty());
+    assert!(after.root.find_bin(BinId(to.as_u64().unwrap())).unwrap().find_bin(leaf).is_some());
+    let view = loaded.view.unwrap();
+    assert_eq!(view.open_sequences, vec![first, second]);
+    assert_eq!(view.active_sequence, Some(second));
+}

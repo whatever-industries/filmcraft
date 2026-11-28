@@ -27,6 +27,7 @@ pub(crate) struct WarmFolder {
     manifest: PathBuf,
     pub revision: String,
     pub view: ProjectView,
+    pub saved_directory: Option<filmcraft_project::ProjectDirectory>,
     // Older verified indexes support edge trims but cannot qualify an allocating edit.
     saved_next_id: Option<u64>,
     pub edited_item: Option<(BinId, ProjectItem)>,
@@ -59,7 +60,20 @@ impl WarmFolder {
             loaded.project.next_id = next;
         }
         let view = reader.view.clone();
-        Ok((Self { reader, index, manifest, revision, view, saved_next_id, edited_item: None, cleanup: None }, loaded))
+        Ok((
+            Self {
+                reader,
+                index,
+                manifest,
+                revision,
+                view,
+                saved_directory: loaded.project.modular_directory.clone(),
+                saved_next_id,
+                edited_item: None,
+                cleanup: None,
+            },
+            loaded,
+        ))
     }
 
     pub fn sequence_name(&self, id: ItemId) -> Option<&str> {
@@ -96,6 +110,31 @@ impl Session {
     pub(crate) fn prepare_warm_command(&mut self, id: &str, p: &Value) -> Result<()> {
         let Some(w) = &self.warm_folder else { return Ok(()) };
         match id {
+            "edit.undo" | "edit.redo"
+                if w.edited_item.is_some() && {
+                    let entries = if id == "edit.undo" { &self.history.undo } else { &self.history.redo };
+                    entries.last().is_some_and(|(_, state, _)| state.modular_directory != w.saved_directory)
+                } =>
+            {
+                self.promote_warm_folder()
+            }
+            "project.directory" | "project.inspectBinMedia" => Ok(()),
+            "project.moveToFolder" | "project.renameFolder" | "file.newFolder" if w.edited_item.is_none() && w.saved_next_id.is_some() => Ok(()),
+            _ if self.project.modular_directory != w.saved_directory
+                && !matches!(
+                    id,
+                    "file.save"
+                        | "project.binStatus"
+                        | "project.saveBin"
+                        | "project.discardBin"
+                        | "file.autoSaveStatus"
+                        | "file.autoSaveNow"
+                        | "edit.undo"
+                        | "edit.redo"
+                ) =>
+            {
+                self.promote_warm_folder()
+            }
             "file.open"
             | "file.autoSaveStatus"
             | "file.recoveryList"
@@ -276,18 +315,22 @@ impl Session {
         crate::still_migration::migrate_legacy_still_sizes(&mut base, &self.media, &*self.services);
         let base = Arc::new(base);
         let merge = |partial: &Project| -> Result<Arc<Project>> {
-            let Some((_, saved)) = &w.edited_item else { return Ok(base.clone()) };
+            let mut result = base.clone();
+            if partial.modular_directory != base.modular_directory {
+                Arc::make_mut(&mut result).modular_directory = partial.modular_directory.clone();
+            }
+            if w.saved_next_id.is_some() && partial.next_id != base.next_id {
+                Arc::make_mut(&mut result).next_id = partial.next_id;
+            }
+            let Some((_, saved)) = &w.edited_item else { return Ok(result) };
             if base.item(saved.id) != Some(saved) {
                 return Err(error("the saved item changed during promotion"));
             }
             let working = partial.item(saved.id).ok_or_else(|| error("missing edited item in history"))?;
-            let mut result = base.clone();
             if working != saved {
                 Arc::make_mut(&mut result).items.insert(saved.id, working.clone());
             }
-            if w.saved_next_id.is_some() && partial.next_id != result.next_id {
-                Arc::make_mut(&mut result).next_id = partial.next_id;
-            }
+
             Ok(result)
         };
         let current = merge(&self.project)?;
@@ -326,6 +369,17 @@ impl Session {
         let mut warning = None;
         let mut resolved = true;
         let view = (bin.is_none() && current_view != w.view).then_some(&current_view);
+        let organization = self.project.modular_directory != w.saved_directory;
+        if organization && bin.is_none() {
+            let change = filmcraft_format::project_folder::save_directory(&w.manifest, &w.revision, &self.project, view).map_err(error)?;
+            bytes = change.bytes_written;
+            warning = change.maintenance_warning;
+            w.revision = change.revision;
+            w.saved_directory = self.project.modular_directory.clone();
+            w.saved_next_id = Some(self.project.next_id);
+        } else if organization {
+            resolved = false;
+        }
         if let Some((owner, saved)) = &mut w.edited_item
             && let Some(working) = self.project.item(saved.id)
             && working != saved
@@ -357,7 +411,7 @@ impl Session {
             w.view = current_view;
         }
         if bytes > 0
-            && w.edited_item.as_ref().is_some_and(|(_, item)| item.as_sequence().is_some())
+            && (organization || w.edited_item.as_ref().is_some_and(|(_, item)| item.as_sequence().is_some()))
             && let Some(cache) = &self.warm_cache
             && let Err(e) = filmcraft_format::project_folder::index::refresh_saved_trim(&w.manifest, cache, &prior_revision, &w.revision)
         {

@@ -12,6 +12,7 @@
 //! View Options…, Save Arrangement…) by `project_dialogs`.
 
 pub(crate) mod bin_views;
+pub(crate) mod organization;
 
 use egui::{Align2, Color32, Rect, Sense, Stroke, pos2, vec2};
 use filmcraft_engine::project_panel::{FontSize, ViewMode};
@@ -69,16 +70,41 @@ pub struct Hover {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ProjectDialog {
+    DirectoryName {
+        command: String,
+        parent: BinId,
+        name: String,
+    },
+    ChooseBin {
+        command: String,
+        params: Value,
+        parent: BinId,
+        name: String,
+    },
     /// Metadata Display…: the columns shown, in order, and the field filter.
-    MetadataDisplay { columns: Vec<String>, filter: String },
+    MetadataDisplay {
+        columns: Vec<String>,
+        filter: String,
+    },
     /// Save As New View Preset.
-    SavePresetAs { name: String },
+    SavePresetAs {
+        name: String,
+    },
     /// Manage Saved View Presets: the selected slot (0-based) and its name being edited.
-    ManagePresets { selected: usize, name: String },
+    ManagePresets {
+        selected: usize,
+        name: String,
+    },
     /// Freeform View Options….
-    FreeformOptions { options: filmcraft_engine::project_panel::FreeformOptions },
+    FreeformOptions {
+        options: filmcraft_engine::project_panel::FreeformOptions,
+    },
     /// Freeform ▸ Save Arrangement…, with the canvas width (unscaled) its unplaced cards wrap at.
-    SaveArrangement { name: String, bin: Option<u64>, width: Option<f64> },
+    SaveArrangement {
+        name: String,
+        bin: Option<u64>,
+        width: Option<f64>,
+    },
 }
 
 /// Frontend state of the Project panel (`UiState::project_panel`).
@@ -87,6 +113,8 @@ pub enum ProjectDialog {
 pub struct ProjectPanelUi {
     /// The bin the Project panel shows in place (None = the project's root).
     pub bin: Option<u64>,
+    pub folder: Option<BinId>,
+    pub collapsed_folders: std::collections::BTreeSet<BinId>,
     /// Bins opened in new tabs (inside the Project panel) or new windows (floating).
     pub tabs: Vec<BinTab>,
     /// The tab shown in the Project panel: None = the project, else an index into `tabs`.
@@ -175,6 +203,11 @@ pub fn shown_inst(app: &FilmcraftApp) -> Inst {
     }
 }
 
+/// Destination for a command invoked from a docked or floating modular bin.
+pub(crate) fn destination_inst(app: &FilmcraftApp) -> Inst {
+    bin_views::focused_index(app).map_or_else(|| shown_inst(app), Inst::Tab)
+}
+
 /// Text size of the panel (Font Size).
 pub fn font(app: &FilmcraftApp) -> f32 {
     app.session.prefs.project_panel.view.font_size.points()
@@ -195,7 +228,14 @@ pub fn set_mode(app: &mut FilmcraftApp, inst: Inst, mode: ViewMode, actions: &mu
 pub fn navigate(app: &mut FilmcraftApp, inst: Inst, bin: Option<u64>) {
     let root = app.session.project.root.id.0;
     if bin_views::modular(app) {
-        let _ = bin_views::open(app, inst, bin.unwrap_or(root), "openInPlace", false);
+        if let Some(id) = bin {
+            if let Err(error) = open_bin(app, inst, id, Some("openInPlace"), egui::Modifiers::NONE) {
+                app.ui.status = error;
+            }
+        } else {
+            app.ui.project_panel.active_tab = None;
+            bin_views::focus(app, None);
+        }
         app.ui.project_panel.selected_bin = None;
         return;
     }
@@ -213,6 +253,9 @@ pub fn navigate(app: &mut FilmcraftApp, inst: Inst, bin: Option<u64>) {
 /// Open a bin as Settings ▸ General ▸ Bins says (`how`: `openInPlace` | `openNewTab` |
 /// `openNewWindow`, or None for the double-click setting with these modifiers).
 pub fn open_bin(app: &mut FilmcraftApp, inst: Inst, bin: u64, how: Option<&str>, mods: egui::Modifiers) -> Result<Value, String> {
+    if bin_views::modular(app) && app.session.project.directory().parent(filmcraft_project::DirectoryEntry::Bin(BinId(bin))).is_none() {
+        return Err(tl!("Choose an editorial bin").into());
+    }
     #[cfg(not(target_arch = "wasm32"))]
     app.session.prepare_bin_view(BinId(bin)).map_err(|e| e.to_string())?;
     if app.session.project.root.find_bin(BinId(bin)).is_none() {
@@ -451,6 +494,11 @@ fn run(app: &mut FilmcraftApp, ctx: &egui::Context, actions: Actions) {
 
 /// One panel instance: breadcrumb, search, Preview Area, the view, footer.
 fn body(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, v: &View, actions: &mut Actions) {
+    if bin_views::modular(app) && v.inst == Inst::Main {
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt("project-folders"));
+        organization::show(app, &mut child, actions);
+        return;
+    }
     let t = app.tokens;
     let pre = v.prefix.clone();
     if bin_views::modular(app) && ui.rect_contains_pointer(rect) && ui.input(|i| i.pointer.any_pressed()) {
@@ -472,7 +520,7 @@ fn body(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, v: &View, actions
     }
     up_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tl!("Up one level")));
     crate::dock::paint_widget_focus(ui.painter(), &up_resp, &t);
-    let can_up = v.bin != top || bin_views::modular(app) && v.bin != root_id;
+    let can_up = v.bin != top || bin_views::modular(app);
     // a bordered button while there is a level to go up to, so it reads as clickable
     if can_up {
         ui.painter().rect_filled(up, 3.0, if up_resp.hovered() { t.hover } else { t.field_bg });
@@ -480,11 +528,29 @@ fn body(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, v: &View, actions
     }
     icons::paint(ui.painter(), Rect::from_center_size(up.center(), vec2(14.0, 14.0)), Icon::ArrowUp, if can_up { t.text } else { t.text_faint });
     if up_resp.clicked() && can_up {
-        let parent = parent_bin(&app.session.project.root, v.bin);
-        navigate(app, v.inst, parent.map(|b| b.0));
+        go_up(app, v);
     }
     let mut crumb = format!("{}.fcproj", app.session.project.name);
-    for b in bin_path(&app.session.project.root, v.bin) {
+    let path = if bin_views::modular(app) {
+        let dir = app.session.project.directory();
+        let mut path = Vec::new();
+        let mut entry = filmcraft_project::DirectoryEntry::Bin(v.bin);
+        if let Some(b) = app.session.project.root.find_bin(v.bin) {
+            path.push(b.name.clone());
+        }
+        while let Some(parent) = dir.parent(entry) {
+            if parent == dir.root {
+                break;
+            }
+            path.push(dir.folders[&parent].name.clone());
+            entry = filmcraft_project::DirectoryEntry::Folder(parent);
+        }
+        path.reverse();
+        path
+    } else {
+        bin_path(&app.session.project.root, v.bin)
+    };
+    for b in path {
         crumb.push_str(" / ");
         crumb.push_str(&b);
     }
@@ -539,6 +605,22 @@ fn body(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, v: &View, actions
         app.ui.project_panel.reveal = None;
     }
     footer(app, ui, Rect::from_min_max(pos2(rect.min.x, rect.max.y - FOOTER_H), rect.max), v, actions);
+}
+
+fn go_up(app: &mut FilmcraftApp, view: &View) {
+    if bin_views::modular(app) {
+        let dir = app.session.project.directory();
+        let entry = if view.inst == Inst::Main {
+            filmcraft_project::DirectoryEntry::Folder(app.ui.project_panel.folder.unwrap_or(dir.root))
+        } else {
+            filmcraft_project::DirectoryEntry::Bin(view.bin)
+        };
+        app.ui.project_panel.folder = dir.parent(entry);
+        navigate(app, view.inst, None);
+    } else {
+        let parent = parent_bin(&app.session.project.root, view.bin);
+        navigate(app, view.inst, parent.map(|b| b.0));
+    }
 }
 
 fn bin_path(root: &filmcraft_project::Bin, target: BinId) -> Vec<String> {
@@ -999,9 +1081,8 @@ pub fn route(app: &mut FilmcraftApp, ctx: &egui::Context, op: &str, params: &Val
         }
         "up" => {
             let v = view_of(app, inst);
-            let parent = parent_bin(&app.session.project.root, v.bin);
-            navigate(app, inst, parent.map(|b| b.0));
-            Ok(json!({"bin": view_of(app, inst).bin.0}))
+            go_up(app, &v);
+            if bin_views::modular(app) { Ok(json!({"folder":organization::selected_folder(app)})) } else { Ok(json!({"bin":view_of(app,inst).bin.0})) }
         }
         "closeBinTab" => {
             let k = if let Some(bin) = params.get("bin").and_then(Value::as_u64) {
@@ -1110,10 +1191,26 @@ fn start_rename(app: &mut FilmcraftApp, params: &Value) -> Result<Value, String>
 pub fn new_bin(app: &mut FilmcraftApp, params: &Value) -> Result<Value, String> {
     let shown = view_of(app, shown_inst(app));
     let parent = match params.get("parent") {
+        None if bin_views::modular(app) => Some(
+            if shown.inst == Inst::Main {
+                organization::selected_folder(app)
+            } else {
+                app.session.project.directory().parent(filmcraft_project::DirectoryEntry::Bin(shown.bin)).unwrap_or(app.session.project.root.id)
+            }
+            .0,
+        ),
         None => (shown.bin != app.session.project.root.id).then_some(shown.bin.0),
         Some(Value::Null) => None,
         Some(p) => Some(p.as_u64().ok_or("`parent` must be a bin id")?),
     };
+    if bin_views::modular(app) {
+        app.ui.project_panel.dialog = Some(ProjectDialog::DirectoryName {
+            command: "file.newBin".into(),
+            parent: parent.map(BinId).unwrap_or(app.session.project.root.id),
+            name: String::new(),
+        });
+        return Ok(json!({"dialog":"newBin"}));
+    }
     let r = app.session.execute("file.newBin", json!({"name": tl!("New Bin"), "parent": parent})).map_err(|e| e.to_string())?;
     let bin = r.get("bin").and_then(Value::as_u64).ok_or("the new bin has no id")?;
     let text = app.session.project.root.find_bin(BinId(bin)).map(|b| b.name.clone()).ok_or("no such bin")?;

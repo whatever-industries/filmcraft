@@ -45,12 +45,13 @@ impl<'a> Index<'a> {
 pub(super) struct Status {
     pub bins: BTreeSet<BinId>,
     pub settings: bool,
+    pub organization: bool,
     pub unfiled: bool,
 }
 
 impl Status {
     pub fn dirty(&self) -> bool {
-        self.settings || self.unfiled || !self.bins.is_empty()
+        self.settings || self.organization || self.unfiled || !self.bins.is_empty()
     }
 }
 
@@ -59,7 +60,15 @@ pub(super) fn status(before: &Project, after: &Project) -> Status {
     let new = Index::new(&after.root);
     let mut bins = BTreeSet::new();
     for (&id, &(bin, parent)) in &old.bins {
-        if !new.bins.get(&id).is_some_and(|(b, p)| *p == parent && b.name == bin.name && members(bin).eq(members(b))) {
+        if !new.bins.get(&id).is_some_and(|(b, p)| {
+            *p == parent
+                && b.name == bin.name
+                && (if after.modular_directory.is_some() || before.modular_directory.is_some() {
+                    direct_items(Some(bin)).eq(direct_items(Some(b)))
+                } else {
+                    members(bin).eq(members(b))
+                })
+        }) {
             bins.insert(id);
         }
     }
@@ -81,6 +90,7 @@ pub(super) fn status(before: &Project, after: &Project) -> Status {
             bins.extend(owners.into_iter().flatten().flatten());
         }
     }
+    let organization = before.modular_directory != after.modular_directory;
     let settings = before.name != after.name
         || before.notes != after.notes
         || before.settings != after.settings
@@ -88,7 +98,7 @@ pub(super) fn status(before: &Project, after: &Project) -> Status {
         || before.custom_colors != after.custom_colors
         || before.custom_color_names != after.custom_color_names
         || before.search_bins != after.search_bins;
-    Status { bins, settings, unfiled }
+    Status { bins, settings, organization, unfiled }
 }
 
 fn conflict(reason: &str) -> EngineError {
@@ -136,6 +146,21 @@ pub(super) fn project_transfer(
     let dst_bin = dest.map(|b| b.0);
     let src_bin = src.map(|b| b.0);
     let mut next = target.clone();
+    let entry = filmcraft_project::DirectoryEntry::Bin(id);
+    if let Some(dir) = &from.modular_directory
+        && dir.parent(entry).is_some()
+        && target.directory().parent(entry).is_none()
+    {
+        // The root (or a pure legacy folder) can already have a backing record
+        // when its first recovery copy creates a visible editorial bin there.
+        next.directory_mut().copy_path(dir, entry).map_err(|e| conflict(&e))?;
+    } else if src.is_none()
+        && let Some(dir) = &mut next.modular_directory
+    {
+        for folder in dir.folders.values_mut() {
+            folder.children.retain(|e| *e != filmcraft_project::DirectoryEntry::Bin(id));
+        }
+    }
     let ids: BTreeSet<_> = direct_items(dst_bin).chain(direct_items(src_bin)).collect();
     for item in ids {
         let before_owner = old.owners.get(&item).and_then(|owners| owners.first()).copied();
@@ -184,7 +209,8 @@ pub(super) fn project_transfer(
     }
     let old_children = dst_bin.into_iter().flat_map(members).filter(|m| matches!(m, Member::Bin(_))).collect::<BTreeSet<_>>();
     let new_children = src_bin.into_iter().flat_map(members).filter(|m| matches!(m, Member::Bin(_))).collect::<BTreeSet<_>>();
-    for child in old_children.difference(&new_children) {
+    let organized = target.modular_directory.is_some() || from.modular_directory.is_some();
+    for child in old_children.difference(&new_children).filter(|_| !organized) {
         if let Member::Bin(k) = child
             && (new.bins.contains_key(k) || old.bins.get(k).is_some_and(|(b, _)| !b.children.is_empty()))
         {
@@ -196,12 +222,24 @@ pub(super) fn project_transfer(
         for entry in &source.children {
             replacement.children.push(match entry {
                 BinEntry::Item(i) => BinEntry::Item(*i),
+                BinEntry::Bin(b) if target.modular_directory.is_some() || from.modular_directory.is_some() => {
+                    if let Some((existing, _)) = old.bins.get(&b.id) {
+                        BinEntry::Bin((*existing).clone())
+                    } else {
+                        continue;
+                    }
+                }
                 BinEntry::Bin(b) => match old.bins.get(&b.id) {
                     Some((existing, Some(parent))) if *parent == id => BinEntry::Bin((*existing).clone()),
                     Some(_) => return Err(conflict("a child bin was moved between parents")),
                     None => BinEntry::Bin(Bin { id: b.id, name: b.name.clone(), children: Vec::new() }),
                 },
             });
+        }
+        if organized && let Some(existing) = dst_bin {
+            replacement
+                .children
+                .extend(existing.children.iter().filter(|entry| matches!(entry,BinEntry::Bin(b) if !new_children.contains(&Member::Bin(b.id)))).cloned());
         }
         if let Some(bin) = next.root.find_bin_mut(id) {
             *bin = replacement;
@@ -239,6 +277,8 @@ pub(super) fn project_transfer(
     if next.nest_cycle().is_some() {
         return Err(conflict("the combined timelines would form a cycle"));
     }
+    next.preserve_editorial_bins(target);
+    next.validate_directory().map_err(|e| conflict(&e))?;
     next.next_id = next.next_id.max(next.max_id().saturating_add(1));
     Ok(next)
 }

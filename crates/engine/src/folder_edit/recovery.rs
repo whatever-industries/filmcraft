@@ -57,6 +57,7 @@ impl Session {
                 let name = item.name.clone();
                 project.items.insert(id, item);
                 project.root.find_bin_mut(bin).ok_or_else(|| error("missing destination bin"))?.children.push(BinEntry::Item(id));
+                project.expose_editorial_bin(bin);
                 if let Some(v) = cut.transcripts.remove(&source) {
                     project.transcripts.insert(id, v);
                 }

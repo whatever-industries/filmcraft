@@ -101,7 +101,46 @@ impl FilmcraftApp {
         // (Premiere's behaviour): `mediaBrowser.import` walks it with the Media Browser's depth and
         // folder budgets. Plain files import exactly as before: `imageSequence: false` keeps
         // `file.import`'s single-file behaviour.
-        let imported = self.session.execute("mediaBrowser.import", json!({"paths": paths, "bin": self.import_bin().0, "imageSequence": false}));
+        let mut bin = self.import_bin();
+        if self.session.folder_revision().is_some() && crate::panels::project::destination_inst(self) == crate::panels::project::Inst::Main {
+            let target = pointer.and_then(|(point, viewport)| {
+                self.auto.all().iter().find_map(|e| {
+                    if e.viewport != viewport {
+                        return None;
+                    }
+                    let [x, y, w, h] = e.rect;
+                    if !egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h)).contains(point) {
+                        return None;
+                    }
+                    e.id.strip_prefix("project.bin.")
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .map(filmcraft_project::BinId)
+                        .map(filmcraft_project::DirectoryEntry::Bin)
+                        .or_else(|| {
+                            e.id.strip_prefix("project.folder.")
+                                .and_then(|s| s.parse::<u64>().ok())
+                                .map(filmcraft_project::BinId)
+                                .map(filmcraft_project::DirectoryEntry::Folder)
+                        })
+                })
+            });
+            if let Some(filmcraft_project::DirectoryEntry::Bin(id)) = target {
+                bin = id;
+            } else {
+                let parent = match target {
+                    Some(filmcraft_project::DirectoryEntry::Folder(f)) => f,
+                    _ => crate::panels::project::organization::selected_folder(self),
+                };
+                self.ui.project_panel.dialog = Some(crate::panels::project::ProjectDialog::ChooseBin {
+                    command: "mediaBrowser.import".into(),
+                    params: json!({"paths":paths,"imageSequence":false}),
+                    parent,
+                    name: String::new(),
+                });
+                return;
+            }
+        }
+        let imported = self.session.execute("mediaBrowser.import", json!({"paths":paths,"bin":bin,"imageSequence":false}));
         // Say why a drop did not fully import (a folder without media, an unsupported file), as the
         // Import dialog does.
         match &imported {

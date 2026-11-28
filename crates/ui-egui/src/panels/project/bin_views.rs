@@ -31,6 +31,11 @@ pub(crate) fn sync(app: &mut FilmcraftApp) {
     let changed = app.bin_views.epoch != Some(epoch);
     if changed {
         if app.bin_views.epoch.is_some() && !app.bin_views.published.is_empty() {
+            if matches!(app.ui.project_panel.dialog, Some(super::ProjectDialog::DirectoryName { .. } | super::ProjectDialog::ChooseBin { .. })) {
+                app.ui.project_panel.dialog = None;
+            }
+            app.ui.project_panel.folder = None;
+            app.ui.project_panel.collapsed_folders.clear();
             app.ui.project_panel.tabs.clear();
             app.ui.project_panel.bin = None;
             app.ui.project_panel.active_tab = None;
@@ -55,12 +60,11 @@ pub(crate) fn normalize(app: &mut FilmcraftApp) {
         return;
     }
     let pp = &mut app.ui.project_panel;
-    let root = &app.session.project.root;
     let active = pp.active_tab.and_then(|k| pp.tabs.get(k)).map(|t| t.nav.unwrap_or(t.bin)).or(pp.bin);
     let mut restored = Vec::<BinTab>::new();
     let mut seen = BTreeSet::new();
     let mut add = |t: BinTab| {
-        if t.bin != root.id.0 && root.find_bin(BinId(t.bin)).is_some() && seen.insert(t.bin) {
+        if app.session.project.directory().parent(filmcraft_project::DirectoryEntry::Bin(BinId(t.bin))).is_some() && seen.insert(t.bin) {
             restored.push(t);
         }
     };
@@ -84,7 +88,7 @@ pub(super) fn open(app: &mut FilmcraftApp, inst: Inst, bin: u64, how: &str, expl
         return Err(format!("unknown bin open mode {how}"));
     }
     let root = app.session.project.root.id.0;
-    if bin == root {
+    if bin == root && app.session.project.directory().parent(filmcraft_project::DirectoryEntry::Bin(BinId(bin))).is_none() {
         app.ui.project_panel.active_tab = None;
         app.bin_views.focused = None;
         app.bin_views.bring_forward = Some(root);

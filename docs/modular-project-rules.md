@@ -20,7 +20,9 @@ Check an item when the modular branch demonstrates the behavior. “Local only�
 - [x] **Feature-scale measurements.** At 24,000 and 48,000 clips, saving a move’s destination took 110 ms and 185 ms. The corresponding standard-project saves took 204 ms and 357 ms. Folder open took longer and used more memory in that trial. [Measurements](https://github.com/whatever-industries/filmcraft/blob/codex/project-sequence-recovery/docs/modular-project-rules.md#sequence-transfer-performance)
 - [x] **Opt-in editing with other reels unloaded.** The branch supports project-wide source relink and crash recovery. Qualified one-reel trims and splits kept 11 unrelated reels unloaded at both project sizes. [Relink and recovery](https://github.com/whatever-industries/filmcraft/blob/codex/project-sequence-recovery/docs/modular-project-rules.md#crash-recovery-after-a-partial-relink) · [One-reel trials](https://github.com/whatever-industries/filmcraft/blob/codex/project-sequence-recovery/docs/modular-project-rules.md#editing-one-reel-with-unrelated-timelines-unloaded)
 - [x] **Published-history backup · local only.** After two intermediate saves were pruned and the source volume ejected, the 107-frame current cut and the protected 119-frame cut both reopened.
-- [ ] **Next · check media after restore.** Inspect originals and proxies for one retained save. Repeat the detached-drive trial with only a proxy available, the original returning, and different footage at the same relative path. Inspection must preserve both cuts and write zero project bytes.
+- [x] **Project folders and independent bins · local only.** Legacy mixed nodes open as a folder with a same-named editorial bin. Reorganizing the directory preserves editorial IDs and saved bin history. Global Save publishes structure. A new bin’s first selective Save publishes its minimum folder path. [Storage and editor checks](#project-folders-and-independent-bins)
+- [x] **Directory recovery · local only.** On both feature fixtures, a directory-only Save kept 11 reels deferred and changed zero bin or item records. After a blocked publication, the confirmed checkpoint restored all 12 reels with the source path disconnected.
+- [x] **Inspect saved bin media · local only.** Inspect unused clips filed in the chosen bin and the sources its sequences need across bins. The detached backup regression covers a missing original with a present proxy, replacement footage and the returning original. [Inspection scope](#checking-media-in-a-saved-bin)
 - [ ] **Review replacements in the editor.** Check identity again before applying a relink. Save the bin offline and verify the remembered path and review requirement on reopen.
 - [ ] **Qualify the production workflow end to end.** Extend validation beyond the qualified one-reel edits, exercise a physically full volume, and run the single-editor acceptance workflow in “What completes #1049” on a feature-scale project.
 
@@ -35,9 +37,29 @@ Check an item when it lands on the relevant upstream `main`. Later entries descr
 - [ ] **Schema 19 sequence recovery · prepared on the fork.** Submit after independent saves. [Prepared change](https://github.com/whatever-industries/filmcraft/commit/7a12ad1494c957b12eb145d9d9bfe4de5472df47)
 - [ ] **Editor saves and recovery.** Land bin Save and Discard, sequence-move recovery, crash checkpoints, and retention after the storage changes.
 - [ ] **On-demand editing.** Land the qualified project-wide search, relink, and one-reel editing paths.
+- [ ] **Project folders and editorial bins.** Submit storage compatibility, editor behavior and recovery validation after the independent-save foundation lands.
 - [ ] **Published-history backup and restore review.** Land the backup port and the media checks as each passes branch validation.
 
 **Close #1049** when the merged single-editor workflow passes the production acceptance run. Multi-editor collaboration follows as phase two.
+
+## Project folders and independent bins
+
+Folders contain folders and bins. Editorial bins contain directly filed items. Each sequence refers to sources by project-wide item ID, including sources in other bins. Duplicate names are allowed. Directory commands distinguish folder IDs from bin IDs.
+
+Older modular projects open with an inferred directory. A leaf, including an empty leaf, is an editorial bin. A parent with only child bins is a folder. A mixed parent becomes a folder with a same-named bin for its direct items, placed where its first direct item appeared. Loose root items follow the same rule. Unfiled items keep their project identities. Conversion without reorganization preserves the original standard tree and ordering.
+
+Global Save publishes folder renames and bin moves with changed settings and outstanding editorial edits. Closing an existing bin with Save publishes its contents at its last saved location. The first selective Save of a new bin publishes its ancestor folders up to the nearest saved folder. Sibling edits wait for their own Save. A folder-only revision adds zero editorial backups. Standard export writes the edited organization as ordinary nested project containers.
+
+| Local directory trial | Timeline clips | Reels resident before and after Save | Bin and item payloads changed | Publication bytes |
+| --- | ---: | ---: | ---: | ---: |
+| Feature | 24,000 | 1 of 12 | 0 | 181,613 |
+| Large feature | 48,000 | 1 of 12 | 0 | 359,215 |
+
+The trials opened a disposable copy with a verified index, created a folder, moved a bin and inspected the directory. Each trial blocked publication after a confirmed recovery checkpoint, removed access to the source path, loaded the checkpoint and checked all 12 sequences. After reconnecting the copy, Save succeeded and reopening placed the bin in the new folder. Publication bytes include the envelope and revision manifests. To repeat a trial, set `FILMCRAFT_FOLDER_TRIAL` to the fixture’s modular folder and run `cargo test -p filmcraft-engine --lib organizing_an_indexed_project -- --nocapture`. The test copies the fixture to a temporary directory before writing.
+
+### Checking media in a saved bin
+
+Run `project.inspectBinMedia` on a local modular document or a restored history backup. Supply the editorial `bin` ID and optionally a retained `revision`. The default is the open session’s published revision. The result names the visited item IDs and reports original and proxy status for each file-backed source. Original status uses the saved fingerprint when available. A readable proxy is reported as present with unverified identity because the project stores no separate proxy fingerprint. Stored paths pass through the ordinary document media access checks. Inspection leaves the working edit and saved history intact.
 
 ## Saving and leaving the editor
 

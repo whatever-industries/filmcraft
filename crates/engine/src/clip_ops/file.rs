@@ -112,8 +112,17 @@ pub(super) fn bin_from_selection(s: &mut Session, p: &Value) -> Result<Value> {
             format!("Bin {n:02}")
         }
     };
+    let modular = s.folder_revision().is_some();
     let bin = s.edit("New Bin From Selection", |pr, _| {
-        let b = pr.add_bin(&name, parent);
+        let b = if modular {
+            if items.iter().any(|id| !pr.items.contains_key(id)) {
+                return Err(bad("file.newBinFromSelection", "choose editorial items"));
+            }
+            let folder = parent.and_then(|bin| pr.directory().parent(filmcraft_project::DirectoryEntry::Bin(bin))).unwrap_or(pr.root.id);
+            pr.create_editorial_bin(folder, &name).map_err(crate::EngineError::Other)?
+        } else {
+            pr.add_bin(&name, parent)
+        };
         pr.move_to_bin(&items, Some(b));
         Ok(b)
     })?;

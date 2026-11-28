@@ -273,6 +273,9 @@ pub fn invoke_command(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut
     // can neither see nor close a dialog, so the engine command runs with what was given, and
     // Sequence Settings… answers the settings it would have shown.
     let menu = !app.engine_call;
+    if crate::panels::project::organization::choose_destination(app, id, &mut params) {
+        return Ok(json!({"dialog":"chooseBin"}));
+    }
     if !menu && id == "sequence.settings" && (params.is_null() || params.as_object().is_some_and(|m| m.is_empty())) {
         filmcraft_engine::find_command(id).map_or(Ok(()), |c| (c.enabled)(&app.session))?;
         let seq = app.session.execute("sequence.inspect", json!({})).map_err(|e| e.to_string())?;

@@ -80,6 +80,9 @@ pub use track::{
     AudioChannels, FieldOptions, FieldProcessing, Marker, MarkerKind, TimeInterpolation, Track, TrackItem, TrackKind, Transition, TransitionAlign,
 };
 pub use view::{MAX_LUT_TEXT_BYTES, ProjectLut, ProjectView, SequenceView};
+mod organization;
+pub use organization::{DirectoryEntry, ProjectDirectory, ProjectFolder};
+
 id_type!(ItemId);
 id_type!(BinId);
 id_type!(TrackId);
@@ -89,6 +92,8 @@ id_type!(MarkerId);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Project {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modular_directory: Option<ProjectDirectory>,
     pub name: String,
     /// Custom marker/clip swatches saved only with this project (schema v16).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -190,6 +195,7 @@ impl Project {
             custom_colors: Vec::new(),
             custom_color_names: BTreeMap::new(),
             settings: ProjectSettings::default(),
+            modular_directory: None,
             root: Bin { id: BinId(0), name: name.into(), children: Vec::new() },
             items: BTreeMap::new(),
             next_id: 1,
@@ -215,6 +221,9 @@ impl Project {
     pub fn max_id(&self) -> u64 {
         let mut max = 0;
         let mut see = |id: u64| max = max.max(id);
+        if let Some(directory) = &self.modular_directory {
+            directory.folders.keys().for_each(|id| see(id.0));
+        }
         let mut bins = vec![&self.root];
         while let Some(bin) = bins.pop() {
             see(bin.id.0);
@@ -237,6 +246,14 @@ impl Project {
         max
     }
 
+    pub fn directory(&self) -> std::borrow::Cow<'_, ProjectDirectory> {
+        self.modular_directory.as_ref().map(std::borrow::Cow::Borrowed).unwrap_or_else(|| std::borrow::Cow::Owned(ProjectDirectory::from_legacy(&self.root)))
+    }
+
+    pub fn directory_mut(&mut self) -> &mut ProjectDirectory {
+        self.modular_directory.get_or_insert_with(|| ProjectDirectory::from_legacy(&self.root))
+    }
+
     /// Add an item to a bin (root when None / not found).
     pub fn add_item(&mut self, name: &str, label: Label, kind: ItemKind, bin: Option<BinId>) -> ItemId {
         let id = ItemId(self.alloc_id());
@@ -250,7 +267,21 @@ impl Project {
         } else {
             self.root.children.push(BinEntry::Item(id));
         }
+        let destination = bin.filter(|id| self.root.find_bin(*id).is_some()).unwrap_or(self.root.id);
+        self.expose_editorial_bin(destination);
         id
+    }
+
+    /// A recovered cut without a surviving owner is filed in the root's editorial bin.
+    pub fn expose_editorial_bin(&mut self, destination: BinId) {
+        if let Some(dir) = &mut self.modular_directory
+            && dir.parent(DirectoryEntry::Bin(destination)).is_none()
+        {
+            let parent = if dir.folders.contains_key(&destination) { destination } else { dir.root };
+            if let Some(folder) = dir.folders.get_mut(&parent) {
+                folder.children.push(DirectoryEntry::Bin(destination));
+            }
+        }
     }
 
     pub fn add_bin(&mut self, name: &str, parent: Option<BinId>) -> BinId {
@@ -259,6 +290,12 @@ impl Project {
         match parent.and_then(|p| self.root.find_bin_mut(p)) {
             Some(p) => p.children.push(BinEntry::Bin(bin)),
             None => self.root.children.push(BinEntry::Bin(bin)),
+        }
+        if let Some(dir) = &mut self.modular_directory {
+            let folder = parent.filter(|id| dir.folders.contains_key(id)).unwrap_or(dir.root);
+            if let Some(record) = dir.folders.get_mut(&folder) {
+                record.children.push(DirectoryEntry::Bin(id));
+            }
         }
         id
     }
