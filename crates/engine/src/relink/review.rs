@@ -149,7 +149,7 @@ pub(super) fn verified(s: &mut Session, p: &Value, item: ItemId, path: &str) -> 
     let only_source = p.get("review").map(|_| item);
     let rows = apply(s, vec![Plan { item, cand }], false, None, only_source, "Link Media")?;
     if let (Some(w), Some(saved)) = (&mut s.warm_folder, saved) {
-        w.source = Some((owner, saved));
+        w.edited_item = Some((owner, saved));
         s.reviewed_relink = Some(item);
     }
     Ok(json!({"relinked": rows,"bin":owner}))

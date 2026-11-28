@@ -713,11 +713,11 @@ struct Snapshot {
     path: Option<String>,
 }
 
-/// A single working source from the opt-in partial editor. The worker reads the rest
+/// One edited sequence or reviewed source from the opt-in partial editor. The worker reads the rest
 /// of the project from the verified base before acknowledging its recovery copy.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
-pub struct RelinkDraft {
+pub struct ItemDraft {
     pub manifest: PathBuf,
     pub base_revision: String,
     pub saved: filmcraft_project::ProjectItem,
@@ -726,7 +726,10 @@ pub struct RelinkDraft {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl RelinkDraft {
+pub type RelinkDraft = ItemDraft;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ItemDraft {
     fn snapshot(self) -> io::Result<Snapshot> {
         use filmcraft_format::project_folder::FolderSnapshot;
         use filmcraft_project::MediaRef;
@@ -735,19 +738,20 @@ impl RelinkDraft {
         // available when a rotating Auto Save precedes the first recovery checkpoint.
         let (snapshot, mut loaded) = FolderSnapshot::open(&manifest)?;
         if snapshot.revision() != base_revision {
-            return Err(io::Error::other("stale relink checkpoint base"));
+            return Err(io::Error::other("stale item checkpoint base"));
         }
         let id = saved.id;
-        let item = loaded.project.item_mut(id).ok_or_else(|| io::Error::other("missing reviewed source"))?;
+        let item = loaded.project.item_mut(id).ok_or_else(|| io::Error::other("missing edited item"))?;
         let source_identity =
             |item: &filmcraft_project::ProjectItem| item.as_media().filter(|m| matches!(m.media, MediaRef::File { .. })).and_then(|m| m.identity);
         let identity = source_identity(&saved);
-        if item != &saved || working.id != id || identity.is_none() || source_identity(&working) != identity {
-            return Err(io::Error::other("source differs from reviewed relink"));
+        let sequence_edit = saved.as_sequence().is_some() && working.as_sequence().is_some();
+        if item != &saved || working.id != id || (!sequence_edit && (identity.is_none() || source_identity(&working) != identity)) {
+            return Err(io::Error::other("item differs from saved edit"));
         }
         *item = working;
         let path = manifest.to_str().ok_or_else(|| io::Error::other("non-UTF-8 recovery origin"))?.to_owned();
-        Ok(Snapshot { project: Arc::new(loaded.project), path: Some(path), revision, modular: true, reviewed_source: Some(id) })
+        Ok(Snapshot { project: Arc::new(loaded.project), path: Some(path), revision, modular: true, reviewed_source: (!sequence_edit).then_some(id) })
     }
 }
 
@@ -755,11 +759,11 @@ enum Msg {
     /// The project has unsaved changes at this revision.
     Dirty(Snapshot),
     #[cfg(not(target_arch = "wasm32"))]
-    DirtyRelink(Box<RelinkDraft>),
+    DirtyItem(Box<ItemDraft>),
     #[cfg(not(target_arch = "wasm32"))]
     ReplaceJournal(Option<Snapshot>, Sender<Result<(), String>>),
     #[cfg(not(target_arch = "wasm32"))]
-    CheckpointRelink(Box<RelinkDraft>, Sender<Result<(), String>>),
+    CheckpointRelink(Box<ItemDraft>, Sender<Result<(), String>>),
     /// Nothing unsaved (just saved / opened): drop the journal.
     Clean,
     Prefs(AutoSavePrefs),
@@ -913,8 +917,8 @@ impl Persistence {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn send_dirty_relink(&self, draft: RelinkDraft) {
-        self.send(Msg::DirtyRelink(Box::new(draft)));
+    pub(crate) fn send_dirty_item(&self, draft: ItemDraft) {
+        self.send(Msg::DirtyItem(Box::new(draft)));
     }
 
     /// FIFO barrier for an explicit bin decision. Once queued, wait for its actual
@@ -936,6 +940,9 @@ impl Persistence {
     /// Acknowledge only after the worker has published a self-contained recovery candidate.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn checkpoint_relink(&self, draft: RelinkDraft) -> Result<(), String> {
+        if draft.saved.as_media().is_none() {
+            return Err("expected a reviewed file source".into());
+        }
         let (reply, result) = channel();
         self.tx.send(Msg::CheckpointRelink(Box::new(draft), reply)).map_err(|_| self.stopped_error())?;
         result.recv().map_err(|_| self.stopped_error())?
@@ -1098,7 +1105,7 @@ struct Worker {
     /// Newest unsaved state (None = clean).
     latest: Option<Snapshot>,
     #[cfg(not(target_arch = "wasm32"))]
-    draft: Option<Box<RelinkDraft>>,
+    draft: Option<Box<ItemDraft>>,
     /// Revision currently in the journal (0 = none) / last auto-saved revision.
     journaled: u64,
     autosaved: u64,
@@ -1155,7 +1162,7 @@ impl Worker {
             };
             match msg {
                 #[cfg(not(target_arch = "wasm32"))]
-                Some(Msg::DirtyRelink(d)) => {
+                Some(Msg::DirtyItem(d)) => {
                     self.last_change = Instant::now();
                     self.first_pending.get_or_insert(self.last_change);
                     self.latest = None;
@@ -1179,7 +1186,7 @@ impl Worker {
                 #[cfg(not(target_arch = "wasm32"))]
                 Some(Msg::CheckpointRelink(draft, reply)) => {
                     let result = if self.prefs.recovery_journal {
-                        self.write_relink(&draft).map(|_| {
+                        self.write_item_checkpoint(&draft).map(|_| {
                             self.latest = None;
                             self.draft = Some(draft);
                         })
@@ -1246,7 +1253,7 @@ impl Worker {
     fn write_journal(&mut self) -> Result<u64, String> {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(draft) = self.draft.take() {
-            let result = self.write_relink(&draft);
+            let result = self.write_item_checkpoint(&draft);
             self.draft = Some(draft);
             return result;
         }
@@ -1288,25 +1295,23 @@ impl Worker {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn write_relink(&mut self, draft: &RelinkDraft) -> Result<u64, String> {
+    fn write_item_checkpoint(&mut self, draft: &ItemDraft) -> Result<u64, String> {
         let unix = unix_now();
         let mut meta = self.meta.clone();
         meta.saved_unix = unix;
         meta.revision = draft.revision;
-        meta.reviewed_source = Some(draft.saved.id);
+        meta.reviewed_source = draft.saved.as_media().map(|_| draft.saved.id);
         let result = (|| {
             meta.project_path = Some(std::path::absolute(&draft.manifest)?.to_str().ok_or_else(|| io::Error::other("non-UTF-8 recovery origin"))?.to_owned());
-            let written = self.checkpoints.publish_relink(
-                &self.session_dir,
-                &draft.manifest,
-                &draft.base_revision,
-                &draft.saved,
-                &draft.working,
-                |root, bytes, name| {
-                    meta.project_name = name.to_owned();
-                    publish_checkpoint_meta(&self.session_dir, &mut meta, root, bytes)
-                },
-            )?;
+            let marker = |root: &str, bytes, name: &str| {
+                meta.project_name = name.to_owned();
+                publish_checkpoint_meta(&self.session_dir, &mut meta, root, bytes)
+            };
+            let written = if draft.saved.as_sequence().is_some() {
+                self.checkpoints.publish_trim(&self.session_dir, &draft.manifest, &draft.base_revision, &draft.saved, &draft.working, marker)
+            } else {
+                self.checkpoints.publish_relink(&self.session_dir, &draft.manifest, &draft.base_revision, &draft.saved, &draft.working, marker)
+            }?;
             Ok(Self::checkpoint_metrics(&self.events, &self.session_dir, written))
         })();
         self.finish_journal(draft.revision, unix, result)

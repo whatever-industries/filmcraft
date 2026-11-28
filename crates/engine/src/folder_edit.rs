@@ -176,7 +176,7 @@ impl Session {
 
     pub fn dirty_folder_bins(&self) -> std::collections::BTreeSet<BinId> {
         if let Some(w) = &self.warm_folder {
-            return w.source.as_ref().filter(|(_, i)| self.project.item(i.id) != Some(i)).map(|(id, _)| *id).into_iter().collect();
+            return w.edited_item.as_ref().filter(|(_, i)| self.project.item(i.id) != Some(i)).map(|(id, _)| *id).into_iter().collect();
         }
         if let Some(folder) = &self.editing_folder {
             return scope::status(&folder.project, &self.project).bins;

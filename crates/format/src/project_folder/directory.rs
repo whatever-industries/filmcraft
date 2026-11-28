@@ -91,6 +91,10 @@ impl FolderDirectory {
         self.items.iter().map(|(&id, rec)| (id, rec.copy_key.as_deref().unwrap_or(&rec.hash)))
     }
 
+    pub fn is_sequence_copy(&self, id: ItemId) -> bool {
+        self.items.get(&id).is_some_and(|r| r.identity.is_some())
+    }
+
     /// Charge verified payload bytes to the caller's remaining traversal budget.
     pub fn read_item(&self, id: ItemId, remaining: &mut u64) -> io::Result<ProjectItem> {
         let rec = self.items.get(&id).ok_or_else(|| invalid(format!("missing item {}", id.0)))?;

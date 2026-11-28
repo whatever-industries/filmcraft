@@ -370,7 +370,8 @@ Find a clip whose original file is missing, open Link Media, choose **Review in 
 
 - **Save on bin close** publishes that bin. **Discard** restores its last saved source. A successful close also closes timelines owned by the bin.
 - **Global Save** publishes all outstanding bins and changed project settings. Repeating Save with the same document and view writes zero project bytes.
-- **A broader edit** loads the remaining project records and transfers the working relink and its Undo and Redo history into the full editor. Selection, timeline tabs and playheads stay in the same session. A failed load leaves the working edit available for retry.
+- **An ordinary clip-edge trim** in the active sequence uses the existing trim command and marks its owning bin Unsaved. The editor keeps deferred timelines on disk through Undo, Redo, Save, Discard, and checkpoint confirmation.
+- **A broader edit** loads the remaining project records and transfers the working edit and its Undo and Redo history into the full editor. Selection, timeline tabs and playheads stay in the same session. A failed load leaves the working edit available for retry.
 - **A background checkpoint** leaves the bin Unsaved. The recovery worker assembles an independent draft using the saved revision and the edited source. On recovery it rechecks the replacement at the chosen path. If that file is missing or its identity differs, the recovered clip stays offline and can be saved in that state.
 
 The desktop regressions drive Find, Link Media and the bin-close dialog by their registered controls. A separate process test kills the editor after a durable checkpoint, promotion, Redo, and selective bin decisions, then recovers in a fresh session. [Desktop relink tests](../crates/ui-egui/tests/it/modular_bin_ui/verified_relink.rs) and [forced-exit tests](../crates/ui-egui/tests/it/modular_bin_ui/verified_relink_crash.rs)
@@ -420,3 +421,19 @@ The extra RSS is the largest simultaneous writer-minus-pending difference observ
 | 48,000 | Pending | 45.5 MiB | 45.5 MiB | 45.6 MiB |
 
 The desktop relink remains opt-in. Checkpoint duration is recorded for comparison. Acceptance requires the bin to stay Unsaved, the last confirmed draft to survive an interrupted replacement, and the first checkpoint to stay within 64 MiB of extra memory on each benchmark project.
+
+
+### Editing one reel with unrelated timelines unloaded
+
+A warm modular project can trim the In or Out edge of a clip in one loaded sequence with a single owning bin. Linked picture and sound follow the ordinary timeline command. Global Save publishes the changed sequence and any changed view in one revision. Saving the bin on close publishes the sequence alone. Discard restores the saved cut. If closing the bin activates another timeline, FilmCraft loads that timeline and the sources it needs for playback.
+
+The local acceptance runs applied a 12-frame Out trim to equivalent project copies in the same app. One run loaded the whole project to establish the reference cut. In the modular run, the test inspected the actual sequence IDs in the editing session after the trim, Undo, Redo, and each persistence decision.
+
+| Project size | Reels loaded during the edit | Other reels kept unloaded | Published item records changed by Save | Discard |
+|---|---:|---:|---|---|
+| 24,000 placements | 1 | 11 | Active sequence only | Original revision retained |
+| 48,000 placements | 1 | 11 | Active sequence only | Original revision retained |
+
+At both sizes, the worker confirmed a local checkpoint while the bin was Unsaved. The writer was killed, the disposable APFS project volume ejected, and the draft recovered in a fresh process. The complete local draft matched the reference project. The recovered copy preserved the sequences and settings through Save As. Smaller tests cover an actual pointer drag with linked sound, a failed bin-close Save and retry, recovery of the last confirmed trim after an interrupted replacement, and a crash following explicit Discard. [One-reel acceptance tests](../crates/ui-egui/tests/it/modular_bin_ui/one_reel.rs)
+
+The feature uses the existing opt-in desktop path and a current index. Ripple trims and edits across several sequences use the full-project path. It also handles ambiguous bin ownership and independent sequence copies that still share a stored record. Opening a bin may load the items displayed in it. The residency check covers reels that were deferred when the trim began.

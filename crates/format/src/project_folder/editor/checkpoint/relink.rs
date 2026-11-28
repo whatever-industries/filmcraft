@@ -18,13 +18,12 @@ fn checked_item(item: ProjectItem) -> io::Result<ProjectItem> {
     project.items.remove(&id).ok_or_else(|| invalid("missing checkpoint item"))
 }
 
-fn relink_bytes(directory: &FolderDirectory, original: &[u8], saved: &ProjectItem, working: &ProjectItem) -> io::Result<Vec<u8>> {
+fn edited_bytes(directory: &FolderDirectory, original: &[u8], saved: &ProjectItem, working: &ProjectItem) -> io::Result<Vec<u8>> {
     let before = checked_item(directory.decode_item(saved.id, original)?)?;
-    let identity = |item: &ProjectItem| item.as_media().filter(|m| matches!(m.media, MediaRef::File { .. })).and_then(|m| m.identity);
-    if &before != saved || saved.id != working.id || identity(saved).is_none() || identity(saved) != identity(working) {
-        return Err(invalid("source differs from reviewed relink"));
+    if before != *saved || working.id != saved.id {
+        return Err(invalid("item differs from saved before-image"));
     }
-    let edited = overlay::record(&serde_json::from_slice(original)?, &serde_json::to_value(saved)?, &serde_json::to_value(working)?, "reviewed source")?;
+    let edited = overlay::record(&serde_json::from_slice(original)?, &serde_json::to_value(saved)?, &serde_json::to_value(working)?, "edited item")?;
     let bytes = serde_json::to_vec(&edited)?;
     if checked_item(directory.decode_item(saved.id, &bytes)?)? != checked_item(working.clone())? {
         return Err(invalid("checkpoint differs from reviewed edit"));
@@ -34,6 +33,37 @@ fn relink_bytes(directory: &FolderDirectory, original: &[u8], saved: &ProjectIte
 
 impl CheckpointStore {
     pub fn publish_relink(
+        &mut self,
+        session: &Path,
+        path: &Path,
+        expected: &str,
+        saved: &ProjectItem,
+        working: &ProjectItem,
+        publish_marker: impl FnOnce(&str, usize, &str) -> io::Result<usize>,
+    ) -> io::Result<CheckpointWrite> {
+        let identity = |item: &ProjectItem| item.as_media().filter(|m| matches!(m.media, MediaRef::File { .. })).and_then(|m| m.identity);
+        if identity(saved).is_none() || identity(saved) != identity(working) {
+            return Err(invalid("source differs from reviewed relink"));
+        }
+        self.publish_edited_item(session, path, expected, saved, working, publish_marker)
+    }
+
+    pub fn publish_trim(
+        &mut self,
+        session: &Path,
+        path: &Path,
+        expected: &str,
+        saved: &ProjectItem,
+        working: &ProjectItem,
+        publish_marker: impl FnOnce(&str, usize, &str) -> io::Result<usize>,
+    ) -> io::Result<CheckpointWrite> {
+        if saved.as_sequence().is_none() || working.as_sequence().is_none() {
+            return Err(invalid("expected a sequence checkpoint"));
+        }
+        self.publish_edited_item(session, path, expected, saved, working, publish_marker)
+    }
+
+    fn publish_edited_item(
         &mut self,
         session: &Path,
         path: &Path,
@@ -70,7 +100,7 @@ impl CheckpointStore {
 
         let (source_pos, (_, hash)) =
             records.items.iter_mut().enumerate().find(|(_, (id, _))| *id == saved.id.0).ok_or_else(|| invalid("missing reviewed source"))?;
-        let bytes = relink_bytes(&directory, &verified_bytes(folder, hash, &mut remaining)?, saved, working)?;
+        let bytes = edited_bytes(&directory, &verified_bytes(folder, hash, &mut remaining)?, saved, working)?;
         *hash = digest(&bytes);
         let mut replacement = Some(bytes);
         let first_item = 1 + records.bins.len();

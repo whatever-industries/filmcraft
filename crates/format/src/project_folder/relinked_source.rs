@@ -1,7 +1,7 @@
-//! Publish a single reviewed file source without constructing an incomplete Project.
+//! Publish an edit to one verified resident item without serializing a partial project.
 use super::{FolderDirectory, ROOT, digest, invalid, overlay, retention, revisions, verified_bytes};
 use crate::{MAX_PROJECT_BYTES, SCHEMA_VERSION};
-use filmcraft_project::{BinId, MediaRef, ProjectItem};
+use filmcraft_project::{BinId, MediaRef, ProjectItem, ProjectView};
 use std::{collections::BTreeSet, fs::File, io, path::Path};
 
 fn folder(path: &Path) -> io::Result<&Path> {
@@ -28,22 +28,6 @@ pub struct RelinkSave {
 /// The caller supplies the published before-image and the in-memory edit. Copy the
 /// manifest verbatim except for the one item key and normal revision bookkeeping.
 pub fn save_relinked_source(path: &Path, expected: &str, owner: BinId, before: &ProjectItem, after: &ProjectItem) -> io::Result<RelinkSave> {
-    let folder = folder(path)?;
-    let _guard = revisions::writer(folder)?;
-    let (base, prior) = revisions::read_base(folder, expected)?;
-    let directory = FolderDirectory::open(path)?;
-    if directory.revision != expected || directory.envelope["schema_version"] != SCHEMA_VERSION {
-        return Err(invalid("unsupported or stale source revision"));
-    }
-    let owners: BTreeSet<_> = directory
-        .bins
-        .iter()
-        .filter(|(_, b)| b["children"].as_array().is_some_and(|entries| entries.iter().any(|e| e["Item"] == before.id.0)))
-        .map(|(id, _)| BinId(*id))
-        .collect();
-    if owners != [owner].into() || prior.identities.contains_key(&before.id.0) {
-        return Err(invalid("source needs one owning bin"));
-    }
     let mut allowed = before.clone();
     let old = allowed.as_media_mut().ok_or_else(|| invalid("expected file source"))?;
     let new = after.as_media().ok_or_else(|| invalid("expected relinked source"))?;
@@ -56,46 +40,109 @@ pub fn save_relinked_source(path: &Path, expected: &str, owner: BinId, before: &
     if &allowed != after {
         return Err(invalid("relink changed unrelated source fields"));
     }
-    let mut remaining = directory.remaining_item_bytes;
-    let mut replacement = None;
-    let mut old_len = 0;
-    // A warm index is a lookup accelerator, not evidence that a file is still intact.
-    // Hash the other immutable records without decoding them before retaining their keys.
-    for (id, hash) in &prior.items {
-        let bytes = verified_bytes(folder, hash, &mut remaining)?;
-        if *id == before.id.0 {
-            let raw: serde_json::Value = serde_json::from_slice(&bytes)?;
-            if serde_json::from_value::<ProjectItem>(raw.clone())? != *before {
-                return Err(invalid("source differs from saved before-image"));
-            }
-            old_len = bytes.len() as u64;
-            replacement = Some(serde_json::to_vec(&overlay::record(&raw, &serde_json::to_value(before)?, &serde_json::to_value(after)?, "relinked source")?)?);
+    save_resident_records(path, expected, Some((owner, before, after)), None)
+}
+
+/// Publish the active timeline record and/or the current global view in one revision.
+pub fn save_trimmed_sequence(
+    path: &Path,
+    expected: &str,
+    edit: Option<(BinId, &ProjectItem, &ProjectItem)>,
+    view: Option<&ProjectView>,
+) -> io::Result<RelinkSave> {
+    if let Some((_, before, after)) = edit {
+        let mut allowed = before.clone();
+        allowed.kind = after.kind.clone();
+        if allowed != *after || before.as_sequence().is_none() {
+            return Err(invalid("expected the same sequence"));
         }
+        after.as_sequence().ok_or_else(|| invalid("missing sequence"))?.check_bounds().map_err(invalid)?;
     }
-    let bytes_read = base.len() as u64 + directory.bytes_read + directory.remaining_item_bytes - remaining;
-    let data = replacement.ok_or_else(|| invalid("missing required source record"))?;
-    if before == after {
-        return Ok(RelinkSave { revision: expected.into(), bytes_read, bytes_written: 0, maintenance_warning: None });
-    }
-    if data.len() as u64 > remaining + old_len {
-        return Err(invalid("project exceeds the record budget"));
-    }
-    let hash = digest(&data);
-    let mut bytes_written = 0;
-    let mut bytes_read = bytes_read;
-    match crate::atomic_write_new(&folder.join(&hash), &data) {
-        Ok(()) => bytes_written += data.len() as u64,
+    save_resident_records(path, expected, edit, view)
+}
+
+fn stage(folder: &Path, hash: &str, data: &[u8], written: &mut u64, read: &mut u64) -> io::Result<()> {
+    match crate::atomic_write_new(&folder.join(hash), data) {
+        Ok(()) => *written += data.len() as u64,
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
             let mut budget = MAX_PROJECT_BYTES;
-            verified_bytes(folder, &hash, &mut budget)?;
-            bytes_read += data.len() as u64;
+            verified_bytes(folder, hash, &mut budget)?;
+            *read += data.len() as u64;
         }
         Err(e) => return Err(e),
     }
+    Ok(())
+}
+
+fn save_resident_records(path: &Path, expected: &str, edit: Option<(BinId, &ProjectItem, &ProjectItem)>, view: Option<&ProjectView>) -> io::Result<RelinkSave> {
+    let folder = folder(path)?;
+    let _guard = revisions::writer(folder)?;
+    let (base, prior) = revisions::read_base(folder, expected)?;
+    let directory = FolderDirectory::open(path)?;
+    if directory.revision != expected || directory.envelope["schema_version"] != SCHEMA_VERSION {
+        return Err(invalid("unsupported or stale source revision"));
+    }
+    if let Some((owner, before, _)) = edit {
+        let owners: BTreeSet<_> = directory
+            .bins
+            .iter()
+            .filter(|(_, b)| b["children"].as_array().is_some_and(|entries| entries.iter().any(|e| e["Item"] == before.id.0)))
+            .map(|(id, _)| BinId(*id))
+            .collect();
+        if owners != [owner].into() || !prior.items.iter().any(|(id, _)| *id == before.id.0) || prior.identities.contains_key(&before.id.0) {
+            return Err(invalid("edited item needs one owning bin"));
+        }
+    }
+    let mut remaining = directory.remaining_item_bytes;
     let mut next = prior.clone();
-    next.items.iter_mut().find(|(id, _)| *id == before.id.0).ok_or_else(|| invalid("missing required source record"))?.1 = hash;
+    let mut pending = Vec::new();
+    let mut delta = 0i64;
+    let mut bytes_written = 0;
+    let mut bytes_read = base.len() as u64 + directory.bytes_read;
+    let mut backed_up_bins = BTreeSet::new();
+    for (id, hash) in &mut next.items {
+        let bytes = verified_bytes(folder, hash, &mut remaining)?;
+        bytes_read += bytes.len() as u64;
+        if let Some((owner, before, after)) = edit.filter(|(_, before, _)| before.id.0 == *id) {
+            let raw: serde_json::Value = serde_json::from_slice(&bytes)?;
+            if serde_json::from_value::<ProjectItem>(raw.clone())? != *before {
+                return Err(invalid("item differs from saved before-image"));
+            }
+            if before != after {
+                let data = serde_json::to_vec(&overlay::record(&raw, &serde_json::to_value(before)?, &serde_json::to_value(after)?, "edited item")?)?;
+                delta += data.len() as i64 - bytes.len() as i64;
+                if serde_json::from_slice::<ProjectItem>(&data)? != *after {
+                    return Err(invalid("published item differs from edit"));
+                }
+                *hash = digest(&data);
+                pending.push((hash.clone(), data));
+                backed_up_bins.insert(owner.0);
+            }
+        }
+    }
+    if let Some(view) = view {
+        let mut budget = MAX_PROJECT_BYTES;
+        let old = verified_bytes(folder, &prior.envelope, &mut budget)?;
+        bytes_read += old.len() as u64;
+        let mut envelope = directory.envelope;
+        let saved: ProjectView = serde_json::from_value(envelope["view"].clone())?;
+        envelope["view"] = overlay::record(&envelope["view"], &serde_json::to_value(saved)?, &serde_json::to_value(view)?, "project view")?;
+        let data = serde_json::to_vec(&envelope)?;
+        delta += data.len() as i64 - old.len() as i64;
+        next.envelope = digest(&data);
+        pending.push((next.envelope.clone(), data));
+    }
+    if delta > remaining as i64 {
+        return Err(invalid("project exceeds the record budget"));
+    }
+    if next.envelope == prior.envelope && next.items == prior.items {
+        return Ok(RelinkSave { revision: expected.into(), bytes_read, bytes_written, maintenance_warning: None });
+    }
+    for (hash, bytes) in pending {
+        stage(folder, &hash, &bytes, &mut bytes_written, &mut bytes_read)?;
+    }
     let transfers = revisions::Transfers {
-        backed_up_bins: [owner.0].into(),
+        backed_up_bins,
         active_move_bases: prior.revision.as_ref().map(|r| r.active_move_bases.clone()).unwrap_or_default(),
         ..Default::default()
     };

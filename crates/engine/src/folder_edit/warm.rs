@@ -1,13 +1,13 @@
-//! Opt-in desktop session for a single reviewed source. General edits and exports
+//! Opt-in desktop session for a reviewed relink or a trim in one resident sequence. General edits and exports
 //! first hydrate a complete project, including every reachable undo/redo state.
 use super::EditingFolder;
-use crate::{EngineError, Result, Session, autosave::RelinkDraft};
+use crate::{EngineError, Result, Session, autosave::ItemDraft};
 use filmcraft_format::{
     Loaded,
     project_folder::{
         FolderSnapshot, Reader,
         index::{Index, warm_index},
-        lock_source_revision, save_relinked_source,
+        lock_source_revision, save_relinked_source, save_trimmed_sequence,
     },
 };
 use filmcraft_project::{BinEntry, BinId, FindQuery, ItemId, Project, ProjectItem, ProjectView};
@@ -27,7 +27,7 @@ pub(crate) struct WarmFolder {
     manifest: PathBuf,
     pub revision: String,
     pub view: ProjectView,
-    pub source: Option<(BinId, ProjectItem)>,
+    pub edited_item: Option<(BinId, ProjectItem)>,
     pub cleanup: Option<BinId>,
 }
 
@@ -50,17 +50,17 @@ impl WarmFolder {
             return Err(error("all records are resident"));
         }
         let view = reader.view.clone();
-        Ok((Self { reader, index, manifest, revision, view, source: None, cleanup: None }, loaded))
+        Ok((Self { reader, index, manifest, revision, view, edited_item: None, cleanup: None }, loaded))
     }
 
     pub fn sequence_name(&self, id: ItemId) -> Option<&str> {
         self.index.labels.get(&id).filter(|l| l.sequence).map(|l| l.name.as_str())
     }
 
-    pub fn draft(&self, project: &Project, revision: u64) -> Option<RelinkDraft> {
-        let (_, saved) = self.source.as_ref()?;
+    pub fn draft(&self, project: &Project, revision: u64) -> Option<ItemDraft> {
+        let (_, saved) = self.edited_item.as_ref()?;
         let working = project.item(saved.id)?;
-        (working != saved).then(|| RelinkDraft {
+        (working != saved).then(|| ItemDraft {
             manifest: self.manifest.clone(),
             base_revision: self.revision.clone(),
             saved: saved.clone(),
@@ -101,6 +101,12 @@ impl Session {
             | "project.discardBin"
             | "edit.undo"
             | "edit.redo" => Ok(()),
+            "timeline.select" | "playhead.set" | "playhead.step" => Ok(()),
+            "sequence.open" => {
+                let ids = p["item"].as_u64().map(ItemId).filter(|id| self.project.item(*id).is_none()).into_iter().collect();
+                self.hydrate_visible(ids)
+            }
+            "timeline.trim" if p["mode"] != "ripple" => self.prepare_warm_trim(),
             "project.select"
                 if p["items"].as_array().is_some_and(|ids| {
                     ids.iter().filter_map(Value::as_u64).all(|id| !w.index.labels.contains_key(&ItemId(id)) || self.project.item(ItemId(id)).is_some())
@@ -108,10 +114,36 @@ impl Session {
             {
                 Ok(())
             }
-            "media.relink" if (p.get("review").is_some() || p["reviewOnly"] == true) && w.source.is_none() => Ok(()),
-            "file.save" if self.project_view() == w.view && p.get("path").is_none() => Ok(()),
+            "media.relink" if (p.get("review").is_some() || p["reviewOnly"] == true) && w.edited_item.is_none() => Ok(()),
+            "file.save"
+                if p.get("path").is_none()
+                    && (self.project_view() == w.view || w.edited_item.as_ref().is_none_or(|(_, item)| item.as_sequence().is_some())) =>
+            {
+                Ok(())
+            }
             _ => self.promote_warm_folder(),
         }
+    }
+
+    fn prepare_warm_trim(&mut self) -> Result<()> {
+        let Some(id) = self.state.active_sequence else { return Ok(()) };
+        let Some(w) = &mut self.warm_folder else { return Ok(()) };
+        let Some(item) = self.project.item(id) else { return self.promote_warm_folder() };
+        if w.edited_item.as_ref().is_some_and(|(_, saved)| saved.id != id) || w.reader.directory.is_sequence_copy(id) {
+            return self.promote_warm_folder();
+        }
+        let Some(owner) = crate::relink::review::owning_bin(&self.project, id) else { return self.promote_warm_folder() };
+        let _guard = w.lock()?;
+        if w.edited_item.is_none() {
+            let mut remaining = w.reader.directory.remaining_item_bytes;
+            let saved = w.reader.directory.read_item(id, &mut remaining).map_err(error)?;
+            if &saved != item {
+                drop(_guard);
+                return self.promote_warm_folder();
+            }
+            w.edited_item = Some((owner, saved));
+        }
+        Ok(())
     }
 
     pub(crate) fn prepare_warm_find(&mut self, query: &FindQuery) -> Result<()> {
@@ -155,12 +187,26 @@ impl Session {
             return Ok(());
         }
         let Some(w) = &mut self.warm_folder else { return Ok(()) };
-        if w.source.is_some() {
+        if w.edited_item.as_ref().is_some_and(|(_, item)| item.as_media().is_some()) {
             return self.promote_warm_folder();
         }
         let _guard = w.lock()?;
         let added = w.reader.missing(ids, &self.project.items).map_err(error)?;
-        self.install_warm_records(added)
+        if added.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<_> = added.keys().copied().collect();
+        self.install_warm_records(added)?;
+        if !self.history.undo.is_empty() || !self.history.redo.is_empty() {
+            let records: Vec<_> = ids
+                .into_iter()
+                .map(|id| self.project.item(id).cloned().map(|item| (id, item)).ok_or_else(|| error("missing loaded item")))
+                .collect::<Result<_>>()?;
+            for (_, project, _) in self.history.undo.iter_mut().chain(&mut self.history.redo) {
+                Arc::make_mut(project).items.extend(records.iter().cloned());
+            }
+        }
+        Ok(())
     }
 
     fn install_warm_records(&mut self, added: impl IntoIterator<Item = (ItemId, ProjectItem)>) -> Result<()> {
@@ -202,11 +248,11 @@ impl Session {
         crate::still_migration::migrate_legacy_still_sizes(&mut base, &self.media, &*self.services);
         let base = Arc::new(base);
         let merge = |partial: &Project| -> Result<Arc<Project>> {
-            let Some((_, saved)) = &w.source else { return Ok(base.clone()) };
+            let Some((_, saved)) = &w.edited_item else { return Ok(base.clone()) };
             if base.item(saved.id) != Some(saved) {
-                return Err(error("the saved source changed during promotion"));
+                return Err(error("the saved item changed during promotion"));
             }
-            let working = partial.item(saved.id).ok_or_else(|| error("missing source in relink history"))?;
+            let working = partial.item(saved.id).ok_or_else(|| error("missing edited item in history"))?;
             let mut result = base.clone();
             if working != saved {
                 Arc::make_mut(&mut result).items.insert(saved.id, working.clone());
@@ -236,6 +282,7 @@ impl Session {
 
     pub(crate) fn save_warm(&mut self, bin: Option<BinId>) -> Result<Value> {
         let started = web_time::Instant::now();
+        let current_view = self.project_view();
         let w = self.warm_folder.as_mut().ok_or_else(|| error("expected modular project"))?;
         if bin.is_some_and(|id| self.project.root.find_bin(id).is_none()) {
             return Err(error("unknown bin"));
@@ -243,12 +290,18 @@ impl Session {
         let mut bytes = 0;
         let mut warning = None;
         let mut resolved = true;
-        if let Some((owner, saved)) = &mut w.source
+        let view = (bin.is_none() && current_view != w.view).then_some(&current_view);
+        if let Some((owner, saved)) = &mut w.edited_item
             && let Some(working) = self.project.item(saved.id)
             && working != saved
         {
             if bin.is_none_or(|id| id == *owner) {
-                let saved_change = save_relinked_source(&w.manifest, &w.revision, *owner, saved, working).map_err(error)?;
+                let saved_change = if saved.as_sequence().is_some() {
+                    save_trimmed_sequence(&w.manifest, &w.revision, Some((*owner, saved, working)), view)
+                } else {
+                    save_relinked_source(&w.manifest, &w.revision, *owner, saved, working)
+                }
+                .map_err(error)?;
                 w.revision = saved_change.revision;
                 bytes = saved_change.bytes_written;
                 warning = saved_change.maintenance_warning;
@@ -257,6 +310,15 @@ impl Session {
             } else {
                 resolved = false;
             }
+        }
+        if let Some(view) = view {
+            if bytes == 0 {
+                let change = save_trimmed_sequence(&w.manifest, &w.revision, None, Some(view)).map_err(error)?;
+                w.revision = change.revision;
+                bytes = change.bytes_written;
+                warning = change.maintenance_warning;
+            }
+            w.view = current_view;
         }
         let _guard = if bytes == 0 { Some(w.lock()?) } else { None };
         if resolved {
@@ -287,8 +349,8 @@ impl Session {
         let w = self.warm_folder.as_ref().ok_or_else(|| error("expected modular project"))?;
         let _guard = w.lock()?;
         let revision = w.revision.clone();
-        let discarded = w.source.as_ref().is_some_and(|(bin, item)| *bin == id && self.project.item(item.id) != Some(item));
-        if discarded && let Some((_, saved)) = &w.source {
+        let discarded = w.edited_item.as_ref().is_some_and(|(bin, item)| *bin == id && self.project.item(item.id) != Some(item));
+        if discarded && let Some((_, saved)) = &w.edited_item {
             if let Some(p) = &self.persistence {
                 p.clear_relink_checkpoint().map_err(error)?;
             }

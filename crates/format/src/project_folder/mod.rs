@@ -20,7 +20,7 @@ mod overlay;
 mod paths;
 mod recovery;
 mod relinked_source;
-pub use relinked_source::{RelinkSave, lock_source_revision, save_relinked_source};
+pub use relinked_source::{RelinkSave, lock_source_revision, save_relinked_source, save_trimmed_sequence};
 mod retention;
 mod revisions;
 pub use retention::{RetentionPolicy, RetentionPreview, configure_retention, keep_version, preview_retention, prune_history, retention_policy};

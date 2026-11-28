@@ -810,8 +810,8 @@ impl Session {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(w) = &self.warm_folder {
             if let Some(draft) = w.draft(&self.project, self.revision) {
-                p.reviewed_source = Some((self.document_epoch, draft.saved.id));
-                p.send_dirty_relink(draft);
+                p.reviewed_source = draft.saved.as_media().map(|_| (self.document_epoch, draft.saved.id));
+                p.send_dirty_item(draft);
             } else {
                 p.send_clean();
             }
@@ -1309,6 +1309,16 @@ impl Session {
         merge: Option<&str>,
         f: impl FnOnce(&mut Sequence, &mut EditCtx, &mut EditorState) -> Result<R>,
     ) -> Result<R> {
+        self.edit_sequence_with(label, merge, false, f)
+    }
+
+    fn edit_sequence_with<R>(
+        &mut self,
+        label: &str,
+        merge: Option<&str>,
+        resident: bool,
+        f: impl FnOnce(&mut Sequence, &mut EditCtx, &mut EditorState) -> Result<R>,
+    ) -> Result<R> {
         let seq_id = self.state.active_sequence.ok_or(EngineError::NoSequence)?;
         let media = self.media.clone();
         let body = move |p: &mut Project, st: &mut EditorState| {
@@ -1329,6 +1339,12 @@ impl Session {
             }
             Ok(r)
         };
+        if resident {
+            let result = self.edit_resident(label, body)?;
+            #[cfg(not(target_arch = "wasm32"))]
+            self.refresh_folder_dirty();
+            return Ok(result);
+        }
         match merge {
             Some(key) => self.edit_merged(label, key, body),
             None => self.edit(label, body),
