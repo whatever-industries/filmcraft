@@ -529,6 +529,7 @@ pub struct Session {
     pub project: Arc<Project>,
     /// Runtime identity of the opened project, stable across edits/undo and renewed on replacement.
     pub project_instance: Arc<()>,
+    detached_history: Option<(u64, autosave::HistoryOrigin)>,
     pub history: History,
     pub revision: u64,
     /// Bumped whenever the session installs a different project document (`file.newProject`,
@@ -667,6 +668,7 @@ impl Session {
         Self {
             project: Arc::new(Project::new("Untitled")),
             project_instance: Arc::new(()),
+            detached_history: None,
             history: History { limit: 200, ..Default::default() },
             revision: 1,
             document_epoch: 0,
@@ -788,6 +790,17 @@ impl Session {
         self.persistence.as_ref().map(|p| p.candidates.as_slice()).unwrap_or(&[])
     }
 
+    pub fn detached_history_origin(&self) -> Option<&autosave::HistoryOrigin> {
+        self.detached_history.as_ref().filter(|(epoch, _)| *epoch == self.document_epoch && self.path.is_none()).map(|(_, origin)| origin)
+    }
+
+    fn checkpoint_origin(&self) -> Option<autosave::HistoryOrigin> {
+        self.folder_revision()
+            .zip(self.path.as_ref())
+            .and_then(|(revision, path)| Some(autosave::HistoryOrigin { manifest: std::path::absolute(path).ok()?, revision: revision.to_owned() }))
+            .or_else(|| self.detached_history_origin().cloned())
+    }
+
     /// Tell the worker about the current project state if it changed (cheap: an `Arc` clone and a
     /// channel send; serialization happens on the worker). Called after every command.
     pub fn sync_persistence(&mut self) {
@@ -795,6 +808,8 @@ impl Session {
         let project = project.clone();
         let dirty = revision != self.saved_revision;
         let modular = self.folder_revision().is_some();
+        let cur = autosave::Sent { revision, saved_revision: self.saved_revision, path: self.path.clone() };
+        let origin = self.persistence.as_ref().filter(|p| p.last_sent.as_ref() != Some(&cur)).and_then(|_| self.checkpoint_origin());
         let Some(p) = self.persistence.as_mut() else { return };
         // A later project can reuse the same item ID. Track the dirty owner only
         // for the document in which the relink is still unsaved.
@@ -805,10 +820,10 @@ impl Session {
         if let (Some(id), Some(folder)) = (self.reviewed_relink, &self.editing_folder) {
             p.reviewed_source = (project.item(id) != folder.project.item(id)).then_some((self.document_epoch, id));
         }
-        let cur = autosave::Sent { revision, saved_revision: self.saved_revision, path: self.path.clone() };
         if p.last_sent.as_ref() == Some(&cur) {
             return;
         }
+        p.history_origin = origin;
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(w) = &self.warm_folder {
             if w.saved_directory != project.modular_directory {

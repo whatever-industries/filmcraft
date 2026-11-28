@@ -122,6 +122,10 @@ pub(crate) fn available(s: &Session) -> std::result::Result<(), String> {
     s.folder_revision().map(|_| ()).ok_or_else(|| "open a local project folder first".into())
 }
 
+pub(crate) fn history_available(s: &Session) -> std::result::Result<(), String> {
+    if s.detached_history_origin().is_some() { Ok(()) } else { available(s) }
+}
+
 fn bin_id(p: &Value, saved: &Project, working: &Project) -> Result<BinId> {
     let id = BinId(p.get("bin").and_then(Value::as_u64).ok_or_else(|| EngineError::Other("expected a numeric bin id".into()))?);
     if [saved, working].iter().all(|p| p.directory().parent(filmcraft_project::DirectoryEntry::Bin(id)).is_none()) {

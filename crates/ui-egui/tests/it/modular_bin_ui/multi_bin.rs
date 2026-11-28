@@ -11,7 +11,9 @@ use std::{
     time::SystemTime,
 };
 
-#[derive(Clone, Copy)]
+mod acceptance;
+
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct Cut {
     bin: BinId,
     reel: ItemId,

@@ -28,6 +28,7 @@ struct Page {
 #[derive(Clone, Debug)]
 pub struct Draft {
     project: Arc<()>,
+    backup: Option<String>,
     return_focus: Option<egui::Id>,
     focus_first: bool,
     page: Page,
@@ -39,15 +40,36 @@ pub struct Draft {
     message: String,
 }
 
-fn page(app: &mut FilmcraftApp, before: Option<u64>) -> Result<Page, String> {
-    let params = before.map_or_else(|| json!({}), |n| json!({"before":n}));
+fn page(app: &mut FilmcraftApp, backup: Option<&str>, before: Option<u64>) -> Result<Page, String> {
+    let mut params = before.map_or_else(|| json!({}), |n| json!({"before":n}));
+    if let Some(path) = backup {
+        params["backupPath"] = json!(path);
+    }
     let result = app.session.execute("project.recoveryVersions", params).map_err(|e| e.to_string())?;
     serde_json::from_value(result).map_err(|e| e.to_string())
 }
 
 pub fn open(app: &mut FilmcraftApp, ctx: &egui::Context) -> Result<Value, String> {
+    if app.session.detached_history_origin().is_some() {
+        let owner = app.session.project_instance.clone();
+        let ctx = ctx.clone();
+        app.pick_ui(FileDialog::open_file(tl!("Modular project backup"), &["fcmod"]), move |app, paths| {
+            if let Some(path) = paths.into_iter().next()
+                && Arc::ptr_eq(&owner, &app.session.project_instance)
+                && let Err(message) = open_history(app, &ctx, Some(path))
+            {
+                app.session.error_toast("project.restoreSequenceCopy", message);
+            }
+        });
+        return Ok(json!({"dialog":"chooseSequenceBackup"}));
+    }
+    open_history(app, ctx, None)
+}
+
+fn open_history(app: &mut FilmcraftApp, ctx: &egui::Context, backup: Option<String>) -> Result<Value, String> {
     app.ui.sequence_recovery = Some(Draft {
-        page: page(app, None)?,
+        page: page(app, backup.as_deref(), None)?,
+        backup,
         project: app.session.project_instance.clone(),
         return_focus: ctx.memory(|m| m.focused()),
         focus_first: true,
@@ -68,6 +90,9 @@ impl Draft {
         self.sequences.clear();
         self.message.clear();
         let mut params = json!({"revision":hash});
+        if let Some(path) = &self.backup {
+            params["backupPath"] = json!(path);
+        }
         if let Some(id) = moved {
             params["sequence"] = json!(id);
         }
@@ -182,7 +207,7 @@ fn show_versions(app: &mut FilmcraftApp, ui: &mut egui::Ui, d: &mut Draft) {
         });
     }
     if cursors != d.cursors {
-        match page(app, cursors.last().copied()) {
+        match page(app, d.backup.as_deref(), cursors.last().copied()) {
             Ok(p) => {
                 d.page = p;
                 d.cursors = cursors;
@@ -207,7 +232,10 @@ fn show_versions(app: &mut FilmcraftApp, ui: &mut egui::Ui, d: &mut Draft) {
 fn show_actions(app: &mut FilmcraftApp, ui: &mut egui::Ui, d: &mut Draft) -> bool {
     let mut close = false;
     ui.horizontal_wrapped(|ui| {
-        let params = json!({"revision":d.version,"sequence":d.sequence});
+        let mut params = json!({"revision":d.version,"sequence":d.sequence});
+        if let Some(path) = &d.backup {
+            params["backupPath"] = json!(path);
+        }
         let restore = ui.add_enabled(d.sequence.is_some(), egui::Button::new(tl!("Restore as Copy")));
         app.auto.add_response("sequenceRecovery.restore", &restore, tl!("Restore as Copy"));
         if restore.clicked() {

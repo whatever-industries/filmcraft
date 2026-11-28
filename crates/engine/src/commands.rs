@@ -2100,8 +2100,8 @@ fn build() -> Vec<CommandSpec> {
             "Restore Sequence from Backup…",
             ["File"],
             None,
-            r#"{"revision":str,"sequence":id}"#,
-            crate::folder_edit::available,
+            r#"{"backupPath":str?,"revision":str,"sequence":id}"#,
+            crate::folder_edit::history_available,
             Session::restore_sequence_copy
         ),
         cmd!("file.recover", "Recover Unsaved Changes…", ["File"], None, r#"{"id":str?}"#, has_recovery, |s, p| recover(s, str_p(p, "id"))),
@@ -4365,20 +4365,25 @@ fn build() -> Vec<CommandSpec> {
     #[cfg(not(target_arch = "wasm32"))]
     v.extend([
         CommandSpec {
-            enabled: crate::folder_edit::available,
-            ..query!("project.recoveryVersions", "List Sequence Backups", r#"{"before":int?}"#, Session::recovery_versions)
+            enabled: crate::folder_edit::history_available,
+            ..query!("project.recoveryVersions", "List Sequence Backups", r#"{"backupPath":str?,"before":int?}"#, Session::recovery_versions)
         },
         CommandSpec {
-            enabled: crate::folder_edit::available,
-            ..query!("project.recoverySequences", "List Sequences in Backup", r#"{"revision":str,"sequence":id?}"#, Session::recovery_sequences)
+            enabled: crate::folder_edit::history_available,
+            ..query!(
+                "project.recoverySequences",
+                "List Sequences in Backup",
+                r#"{"backupPath":str?,"revision":str,"sequence":id?}"#,
+                Session::recovery_sequences
+            )
         },
         cmd!(
             "project.exportRecoverySequence",
             "Export Historical Sequence",
             [],
             None,
-            r#"{"revision":str,"sequence":id,"path":str}"#,
-            crate::folder_edit::available,
+            r#"{"backupPath":str?,"revision":str,"sequence":id,"path":str}"#,
+            crate::folder_edit::history_available,
             Session::export_recovery_sequence
         ),
         CommandSpec { enabled: crate::folder_edit::available, ..query!("project.binStatus", "Bin Save Status", "{}", Session::bin_status) },
@@ -5747,6 +5752,10 @@ fn recover(s: &mut Session, id: Option<&str>) -> Result<Value> {
         other => (project, other),
     };
     install_project(s, project, path, false);
+    #[cfg(not(target_arch = "wasm32"))]
+    if s.allow_project_folders {
+        s.detached_history = c.meta.history_origin.clone().map(|origin| (s.document_epoch, origin));
+    }
     if let Some(per) = &mut s.persistence {
         per.reviewed_source = c.meta.reviewed_source.map(|id| (s.document_epoch, id));
     }

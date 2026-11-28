@@ -564,6 +564,13 @@ pub fn unix_now() -> i64 {
 
 // ------------------------------------------------------------------ recovery candidates
 
+/// The published project the draft was edited against. Backups preserve its revision digest.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HistoryOrigin {
+    pub manifest: PathBuf,
+    pub revision: String,
+}
+
 /// Session metadata. For modular drafts this is also the atomic publication marker.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -579,6 +586,8 @@ pub struct JournalMeta {
     /// Digest of the immutable record manifest for a modular recovery draft.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history_origin: Option<HistoryOrigin>,
     /// Unsaved source edit used to identify the owning bin after detached recovery.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reviewed_source: Option<ItemId>,
@@ -707,6 +716,7 @@ pub(crate) struct Sent {
 
 #[derive(Clone)]
 struct Snapshot {
+    history_origin: Option<HistoryOrigin>,
     #[cfg(not(target_arch = "wasm32"))]
     directory_base: Option<String>,
     reviewed_source: Option<ItemId>,
@@ -759,6 +769,7 @@ impl ItemDraft {
         }
         let path = manifest.to_str().ok_or_else(|| io::Error::other("non-UTF-8 recovery origin"))?.to_owned();
         Ok(Snapshot {
+            history_origin: Some(HistoryOrigin { manifest, revision: base_revision }),
             directory_base: None,
             project: Arc::new(loaded.project),
             path: Some(path),
@@ -857,6 +868,7 @@ pub struct Persistence {
     pub status: Status,
     pub(crate) last_sent: Option<Sent>,
     pub(crate) reviewed_source: Option<(u64, ItemId)>,
+    pub(crate) history_origin: Option<HistoryOrigin>,
     lock: Option<File>,
     tx: Sender<Msg>,
     events: Receiver<WorkerEvent>,
@@ -918,6 +930,7 @@ impl Persistence {
             candidates,
             status: Status::default(),
             last_sent: None,
+            history_origin: None,
             reviewed_source: None,
             lock: Some(lock),
             tx,
@@ -929,6 +942,7 @@ impl Persistence {
 
     pub(crate) fn send_dirty(&self, project: Arc<Project>, revision: u64, path: Option<String>, modular: bool) {
         self.send(Msg::Dirty(Snapshot {
+            history_origin: self.history_origin.clone(),
             #[cfg(not(target_arch = "wasm32"))]
             directory_base: None,
             project,
@@ -941,7 +955,15 @@ impl Persistence {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn send_dirty_directory(&self, project: Arc<Project>, revision: u64, path: Option<String>, base: String) {
-        self.send(Msg::Dirty(Snapshot { directory_base: Some(base), project, revision, path, modular: true, reviewed_source: None }));
+        self.send(Msg::Dirty(Snapshot {
+            history_origin: self.history_origin.clone(),
+            directory_base: Some(base),
+            project,
+            revision,
+            path,
+            modular: true,
+            reviewed_source: None,
+        }));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -960,7 +982,15 @@ impl Persistence {
         reviewed_source: Option<ItemId>,
     ) -> Result<(), String> {
         let (reply, result) = channel();
-        let snapshot = project.map(|project| Snapshot { directory_base: None, project, revision, path, modular: true, reviewed_source });
+        let snapshot = project.map(|project| Snapshot {
+            history_origin: self.history_origin.clone(),
+            directory_base: None,
+            project,
+            revision,
+            path,
+            modular: true,
+            reviewed_source,
+        });
         self.tx.send(Msg::ReplaceJournal(snapshot, reply)).map_err(|_| self.stopped_error())?;
         result.recv().map_err(|_| self.stopped_error())?
     }
@@ -1315,6 +1345,7 @@ impl Worker {
         meta.saved_unix = unix;
         meta.revision = s.revision;
         meta.reviewed_source = s.reviewed_source;
+        meta.history_origin = s.history_origin.clone();
         meta.project_name = s.project.name.clone();
         meta.project_path = s.path.clone();
         let result = (|| -> io::Result<(usize, f64, f64)> {
@@ -1357,7 +1388,9 @@ impl Worker {
         meta.revision = draft.revision;
         meta.reviewed_source = draft.saved.as_media().map(|_| draft.saved.id);
         let result = (|| {
-            meta.project_path = Some(std::path::absolute(&draft.manifest)?.to_str().ok_or_else(|| io::Error::other("non-UTF-8 recovery origin"))?.to_owned());
+            let manifest = std::path::absolute(&draft.manifest)?;
+            meta.project_path = Some(manifest.to_str().ok_or_else(|| io::Error::other("non-UTF-8 recovery origin"))?.to_owned());
+            meta.history_origin = Some(HistoryOrigin { manifest, revision: draft.base_revision.clone() });
             let marker = |root: &str, bytes, name: &str| {
                 meta.project_name = name.to_owned();
                 publish_checkpoint_meta(&self.session_dir, &mut meta, root, bytes)
@@ -1415,6 +1448,7 @@ impl Worker {
                 && read_meta(&self.session_dir).is_ok_and(|m| {
                     m.revision == snapshot.revision
                         && m.reviewed_source == snapshot.reviewed_source
+                        && m.history_origin == snapshot.history_origin
                         && m.checkpoint.as_ref().is_some_and(|root| self.checkpoints.confirmed(&self.session_dir, root))
                 })
             {
@@ -1476,6 +1510,7 @@ impl Worker {
                     let root = meta.checkpoint.ok_or_else(|| io::Error::other("missing local relink checkpoint"))?;
                     let loaded = filmcraft_format::project_folder::load_checkpoint(&self.session_dir, &root)?;
                     Ok(Snapshot {
+                        history_origin: meta.history_origin,
                         directory_base: None,
                         project: Arc::new(loaded.project),
                         path: meta.project_path,

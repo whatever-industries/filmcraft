@@ -150,6 +150,22 @@ pub fn rescue_bytes(folder: &Path, revision: &str, sequence: u64, output: &Path)
     encode_at(folder, records, output)
 }
 
+/// Backups preserve stored relative paths from the original project folder.
+pub fn rescue_backup_bytes(folder: &Path, revision: &str, sequence: u64, origin: &Path, output: &Path) -> io::Result<Vec<u8>> {
+    let records = extract(folder, &at(folder, revision)?, sequence)?;
+    encode_at(origin.parent().ok_or_else(|| invalid("missing project folder"))?, records, output)
+}
+
+/// Verify the selected backup descends from the acknowledged checkpoint base.
+pub fn backup_head(folder: &Path, base: &str) -> io::Result<String> {
+    let bytes = read_member(&folder.join(ROOT), MANIFEST_LIMIT)?;
+    let head = digest(&bytes);
+    if walk_from(folder, head.clone(), serde_json::from_slice(&bytes)?, |hash, _| Ok(hash == base))?.is_none() {
+        return Err(invalid("this backup does not contain the recovered project's saved revision"));
+    }
+    Ok(head)
+}
+
 pub fn rescue(folder: &Path, revision: &str, sequence: u64, output: &Path) -> io::Result<()> {
     atomic_write_new(output, &rescue_bytes(folder, revision, sequence, output)?)
 }
@@ -261,6 +277,17 @@ pub enum EditorRestore {
 }
 
 pub fn editor_restore(folder: &Path, expected: &str, revision: &str, sequence: u64, working: &Project) -> io::Result<EditorRestore> {
+    editor_restore_from(folder, expected, revision, sequence, working, None)
+}
+
+pub fn editor_restore_from(
+    folder: &Path,
+    expected: &str,
+    revision: &str,
+    sequence: u64,
+    working: &Project,
+    origin: Option<&Path>,
+) -> io::Result<EditorRestore> {
     let (_, head) = revisions::read_base(folder, expected)?;
     let records = extract(folder, &at(folder, revision)?, sequence)?;
     check_manifest(&head)?;
@@ -290,6 +317,10 @@ pub fn editor_restore(folder: &Path, expected: &str, revision: &str, sequence: u
             return Ok(EditorRestore::ExportRequired("the saved cut contains additional project data".into()));
         }
     }
+    let cut = match origin {
+        Some(manifest) => super::detached_project(cut, manifest, None)?,
+        None => cut,
+    };
     if cut.luts != working.luts {
         return Ok(EditorRestore::ExportRequired("project LUT library changed".into()));
     }

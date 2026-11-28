@@ -27,7 +27,7 @@ Check an item when the modular branch demonstrates the behavior. “Local only�
 - [x] **Multi-bin Save and Discard · local only.** All three decisions passed on the 24,000- and 48,000-placement projects. Both reopened cuts and project settings matched the standard project. [Publication sizes and reel loading](#feature-scale-multi-bin-decisions)
 - [x] **Save and checkpoint on a full APFS volume · local only.** Bin Save, global Save, and detached crash recovery passed on the small project and both feature fixtures. [Failure cases and retry costs](#save-and-checkpoint-on-a-full-volume)
 - [ ] **Qualify native exFAT project and recovery folders.** With free space available, macOS rejected exclusive publication of new records on the 62 GB exFAT drive. Repeat the disk-full trials after publication on that filesystem is supported.
-- [ ] **Finish the single-editor acceptance run.** Force-quit after a confirmed checkpoint, disconnect the original project drive, and recover. Restore a protected older cut as a copy beside today’s edits, export to `.fcproj`, and reopen both cuts. Compare playback, the missing-media prompt, and Toggle Proxies with the standard project under the same drive conditions. Record the results before marking the workflow qualified.
+- [x] **Single-editor acceptance run · local only.** On the 24,000-placement project, a fresh editor reopened both today’s recovered cut and a protected older copy from a standard export with the original project volume unmounted. [End-to-end results](#single-editor-acceptance-run)
 
 ### Upstream merges
 
@@ -151,6 +151,18 @@ The global Save recheck for the single-bin engine stage used the same already-lo
 The folder passed the one-reel save-time gate at both sizes. Open time and peak memory remain higher. The earlier storage runs additionally exercised process interruption around manifest publication and injected StorageFull failures. Actual volume exhaustion, shared-filesystem durability, and physical read/write amplification remain unmeasured.
 
 The one-reel writes above put 5 GB in the range of roughly 1,600 to 3,100 saves in those two fixtures. This informed the starting count of 2,000. Writes include manifest publication, and shared records are stored once. Actual recovery storage varies with bin contents and edit type. The editor uses the published bin count alone to trigger cleanup.
+
+### Single-editor acceptance run
+
+One 12-reel standard project with 24,000 placements went through conversion, editing, recovery, and export on local APFS. The test protected a version containing a 36-frame clip, trimmed sequences in two bins, changed the title-safe setting, used global Save, and reopened the modular project. Both edits and the setting matched an independently edited standard project. The published history was backed up to a separate volume.
+
+A further trim shortened the first clip from 31 to 26 frames. The bin still showed Unsaved after the background worker acknowledged the checkpoint. The editor process was killed and the original APFS project volume was unmounted. A fresh editor recovered the edit, opened the backup’s history, and restored the protected cut as an independent copy. Both sequences opened in the same session. Their pictures differed at the trim boundary, and the nested master still referenced and played today’s cut.
+
+A fresh process reopened the exported `.fcproj` with the source volume still offline. It verified the 26-frame current clip, the 36-frame historical clip, the second bin’s edit, project settings and master playback. The missing-camera prompt matched the standard project. Switching proxies on displayed the available proxy in both projects. The protected revision stayed available in the backup.
+
+The regression uses the editor command interface. Run `cargo test -p filmcraft-ui-egui --test it recovered_edit_and_protected_copy_reopen_together` for the small fixture. The feature-scale run used the same prepare, edit, recover and reopen stages with the source project on an ejectable disk image. Upstream acceptance requires repeating the workflow on merged code.
+
+All 46 modular UI checks passed. The full UI integration suite reported 906 passes, four failures and eight ignored tests. Both quit-dialog failures and the multicam live-switching failure reproduced on the unchanged branch. The queued-frame polling check passed when rerun in isolation.
 
 ### Save and checkpoint on a full volume
 
