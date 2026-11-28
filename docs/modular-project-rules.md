@@ -23,8 +23,11 @@ Check an item when the modular branch demonstrates the behavior. “Local only�
 - [x] **Project folders and independent bins · local only.** Legacy mixed nodes open as a folder with a same-named editorial bin. Reorganizing the directory preserves editorial IDs and saved bin history. Global Save publishes structure. A new bin’s first selective Save publishes its minimum folder path. [Storage and editor checks](#project-folders-and-independent-bins)
 - [x] **Directory recovery · local only.** On both feature fixtures, a directory-only Save kept 11 reels deferred and changed zero bin or item records. After a blocked publication, the confirmed checkpoint restored all 12 reels with the source path disconnected.
 - [x] **Inspect saved bin media · local only.** Inspect unused clips filed in the chosen bin and the sources its sequences need across bins. The detached backup regression covers a missing original with a present proxy, replacement footage and the returning original. [Inspection scope](#checking-media-in-a-saved-bin)
-- [ ] **Review replacements in the editor.** Check identity again before applying a relink. Save the bin offline and verify the remembered path and review requirement on reopen.
-- [ ] **Qualify the production workflow end to end.** Extend validation beyond the qualified one-reel edits, exercise a physically full volume, and run the single-editor acceptance workflow in “What completes #1049” on a feature-scale project.
+- [x] **Recover media like a standard project · local only.** Recovery uses the saved path and the ordinary missing-media prompt. An explicit Link Media operation keeps its existing match checks. [Crash and reopen regression](#crash-recovery-after-a-partial-relink)
+- [x] **Multi-bin Save and Discard · local only.** All three decisions passed on the 24,000- and 48,000-placement projects. Both reopened cuts and project settings matched the standard project. [Publication sizes and reel loading](#feature-scale-multi-bin-decisions)
+- [x] **Save and checkpoint on a full APFS volume · local only.** Bin Save, global Save, and detached crash recovery passed on the small project and both feature fixtures. [Failure cases and retry costs](#save-and-checkpoint-on-a-full-volume)
+- [ ] **Qualify native exFAT project and recovery folders.** With free space available, macOS rejected exclusive publication of new records on the 62 GB exFAT drive. Repeat the disk-full trials after publication on that filesystem is supported.
+- [ ] **Finish the single-editor acceptance run.** Force-quit after a confirmed checkpoint, disconnect the original project drive, and recover. Restore a protected older cut as a copy beside today’s edits, export to `.fcproj`, and reopen both cuts. Compare playback, the missing-media prompt, and Toggle Proxies with the standard project under the same drive conditions. Record the results before marking the workflow qualified.
 
 ### Upstream merges
 
@@ -38,7 +41,7 @@ Check an item when it lands on the relevant upstream `main`. Later entries descr
 - [ ] **Editor saves and recovery.** Land bin Save and Discard, sequence-move recovery, crash checkpoints, and retention after the storage changes.
 - [ ] **On-demand editing.** Land the qualified project-wide search, relink, and one-reel editing paths.
 - [ ] **Project folders and editorial bins.** Submit storage compatibility, editor behavior and recovery validation after the independent-save foundation lands.
-- [ ] **Published-history backup and restore review.** Land the backup port and the media checks as each passes branch validation.
+- [ ] **Published-history backup and inspection.** Land the backup port, read-only media report, and standard media behavior on recovery.
 
 **Close #1049** when the merged single-editor workflow passes the production acceptance run. Multi-editor collaboration follows as phase two.
 
@@ -73,6 +76,22 @@ Run `project.inspectBinMedia` on a local modular document or a restored history 
 
 The File menu and keyboard route to `file.save`. The folder writer compares the loaded project and view to the saved baseline and publishes one manifest. A successful global Save advances the session's saved revision. The project close and quit handlers consult session dirtiness and invoke global Save. Bin close dispatches the selective Save or Discard command. [Folder writer](../crates/engine/src/folder_edit.rs) · [Save and recovery commands](../crates/engine/src/commands.rs) · [Project and window prompts](../crates/ui-egui/src/panels/clip_dialogs.rs) · [Folder command tests](../crates/engine/src/file_tests.rs)
 
+### Feature-scale multi-bin decisions
+
+Each trial converted a disposable copy of a standard twelve-reel project. Two reels were filed separately in Cuts and Selects. Each had a distinct generated color matte in place of one picture clip, preserving the fixture’s placement count. The trial shortened the mattes by five and eleven frames and changed the title-safe setting. For each decision, a fresh modular reopen matched both sequences, all project settings, and frames on each side of each trimmed edge in an independently saved `.fcproj`.
+
+| Desktop action | Sequence records published | Settings published | Bytes at 24,000 placements | Bytes at 48,000 placements |
+| --- | --- | --- | ---: | ---: |
+| Close Cuts and choose Save | Cuts | No | 1,597,862 | 3,191,461 |
+| Close Selects and choose Discard | None | No | 0 | 0 |
+| Global Save after discarding Selects | Cuts | Yes | 1,603,856 | 3,203,456 |
+| Global Save with Cuts focused and both bins Unsaved | Cuts and Selects | Yes | 3,019,500 | 6,041,021 |
+| Repeat global Save | None | No | 0 | 0 |
+
+Closing either bin also closed its timeline. The sibling’s tab and timeline stayed open with its trim and the setting still Unsaved. On both sizes, opening the indexed project and trimming Cuts kept one reel resident. Opening Selects brought the count to two. Trimming Selects loaded all twelve and preserved the first edit. All twelve remained resident through the bin decisions. Unrelated item records and bin membership records retained their digests. Each publishing action advanced the manifest once.
+
+Bytes count new or rewritten project records and manifests, including the archived revision. To repeat, set `FILMCRAFT_MULTI_BIN_PROJECT` to the feature fixture’s original `.fcproj` and run `cargo test -p filmcraft-ui-egui --test it two_bin_decisions_match_standard_project -- --nocapture`. The default runs the same decisions on a small generated project. [Desktop regression](../crates/ui-egui/tests/it/modular_bin_ui/multi_bin.rs)
+
 ## Bin views, close, and moves
 
 | Rule | Status | Reproduction and acceptance test |
@@ -104,14 +123,13 @@ The prepared two-camera control and the live transfer tests use generated media.
 
 A local APFS backup trial protected a 119-frame cut, saved four successive three-frame trims, then pruned with a one-backup limit. Two intermediate saves and their exclusive records were retired. After copying published history to a second volume and ejecting the source disk image, the 107-frame current cut reopened from the backup and the 119-frame protected cut reopened from a separate rescue export. Both full sequence records matched their saved versions, and the retired cut remained unavailable. [Published-history backup command](project-files.md#back-up-published-history)
 
-### Next local milestone — check media after restoring a backup
+### Checking media after restoring a backup
 
-The detached-volume trial above verified the edits in both cuts. The next question for the editor is “Which footage can I use when I open this saved cut?” A relative path can point to a different file after the backup moves. The prototype in `modular-integration` reports whether a path opens. The modular editor already records an original’s fingerprint and uses it during relink. The project currently stores a proxy path without a separate proxy fingerprint.
+The editor opens a recovered cut using FilmCraft’s standard media rules. If Drive B is absent, the clip remembers its path and the bin can be saved. On reopen, a playable file at that path is available even if the footage changed. Toggle Proxies, Make Offline, and an explicit Link Media operation follow the same rules as in a standard project. The forced-exit tests compare rendered frames and missing-media prompts against a `.fcproj`. [Crash recovery checks](#crash-recovery-after-a-partial-relink)
 
-1. **Inspect one saved revision.** Start with a read-only developer command for the current or a selected retained revision. Report the revision, source item ID, and original and proxy results separately. Use the selected revision’s references, resolve relative paths from the restored folder, and honor existing media-access rules. A damaged record should identify the affected item and mark the report incomplete while preserving the readable results. Reject a retired revision. Leave unrelated timelines unloaded.
-2. **Distinguish a reachable file from a verified match.** Use the existing relink fingerprint check for originals. Report a matching original, a missing file, a file requiring review, or a path that access rules refused. Report a reachable proxy separately when the original is offline. A legacy original or proxy without its own recorded identity can be reported as present with identity unverified. Preserve deliberately offline clips. Inspection leaves the remembered paths, saved revision and bin edit states untouched.
-3. **Repeat the detached-volume trial.** Use the pruned backup with the 107-frame current cut and protected 119-frame cut. Give the two saves different media references and check each independently. Eject the source volume, then exercise a missing original, a proxy returning by itself, the matching original returning, and different same-named footage at the restored relative path. Include a refused network path and a damaged record. Compare the reports and both reopened timelines, and verify that inspection wrote zero project bytes.
-4. **Gate editor integration on those results.** Route a mismatch to the existing Link Media review before playback can use the replacement. Keep the chosen Drive B path when an editor saves the bin offline, then reopen and verify the same location and review requirement. Recheck identity when applying a reviewed relink so a file swapped after inspection also requires review. Verify that reviewing or saving one bin preserves the other cut. Keep this work local until the command and editor checks pass.
+For a current or retained revision, `project.inspectBinMedia` can report a fingerprint mismatch. This read-only result is advisory. Restore as Copy still checks for changes to the **project records** an older cut needs, such as a nested sequence or a clip’s RAW settings. If those records conflict with today’s edits, the separate rescue export preserves the older cut’s project state. [Saved-bin inspection](#checking-media-in-a-saved-bin)
+
+To repeat the inspection trial, inspect the current and protected cuts on the pruned backup with the original drive ejected. Exercise a missing original, a proxy available by itself, a returning original, and different footage at the saved path. Check refused network paths, a damaged record with partial results, and a retired revision. Verify that inspection writes zero project bytes and leaves unrelated timelines unloaded.
 
 ## Avid comparisons
 
@@ -133,6 +151,30 @@ The global Save recheck for the single-bin engine stage used the same already-lo
 The folder passed the one-reel save-time gate at both sizes. Open time and peak memory remain higher. The earlier storage runs additionally exercised process interruption around manifest publication and injected StorageFull failures. Actual volume exhaustion, shared-filesystem durability, and physical read/write amplification remain unmeasured.
 
 The one-reel writes above put 5 GB in the range of roughly 1,600 to 3,100 saves in those two fixtures. This informed the starting count of 2,000. Writes include manifest publication, and shared records are stored once. Actual recovery storage varies with bin contents and edit type. The editor uses the published bin count alone to trigger cleanup.
+
+### Save and checkpoint on a full volume
+
+Each trial started with a 48-frame clip. One trim left 36 frames, and a second left 24. A fresh process checked both the stored duration and the rendered picture at frame 32. Tests covered a small project and 12-reel projects with 24,000 and 48,000 placements.
+
+| Failure | Observed editor behavior |
+| --- | --- |
+| Project destination full during bin Save or global Save | Save reported the filesystem error and the edit stayed Unsaved. The published manifest remained byte-for-byte identical and reopened at 36 frames. After freeing space, Save published 24 frames, advancing history by one revision and one bin backup. |
+| Recovery destination full with other project settings pending | Selective Save reported that the bin could not be saved. The prior cut reopened. After freeing space, the bin saved and the settings remained Unsaved. |
+| Recovery destination full after a confirmed 36-frame checkpoint | The failed 24-frame checkpoint left the confirmed marker intact. After killing the editor, freeing recovery space and unmounting the source project volume, recovery reopened the 36-frame cut. |
+| Recovery destination regains space while the editor is idle | Without an edit, Save, or explicit flush, the worker confirmed the 24-frame cut. The bin stayed Unsaved and the project manifest stayed unchanged. A fresh editor recovered 24 frames with the source volume unmounted. |
+| Publication succeeds and recovery cleanup fails | A separate deterministic engine test blocked cleanup. The editor reported that publication had succeeded. The saved cut reopened, and retrying cleanup wrote zero project bytes. |
+
+The physical drive used exFAT. With more than 9 GB free, native project creation, bin Save, and checkpoint creation failed with `EOPNOTSUPP` at exclusive file publication. The capacity trials used bounded APFS volumes. A fixed 128 MiB APFS image stored on the USB drive exercised the physical-drive path. Global Save and the selective-Save case with pending settings also ran on local APFS images.
+
+The table measures one 120-second interval **after the first checkpoint failure** on local APFS images. Attempts and repeated errors exclude that first failure. CPU seconds and physical I/O are process deltas from macOS. Physical reads exclude cache hits. Idle controls recorded zero CPU seconds and zero physical bytes at all three sizes.
+
+| Project | Retries before / after | Repeated errors before / after | CPU seconds before / after | Physical reads before / after | Physical writes before / after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Small | 117 / 5 | 117 / 0 | 0.12 / <0.01 | 0 / 0 | ~0.9 MiB / 40 KiB |
+| 24,000 placements | 106 / 5 | 106 / 0 | ~12 / 0.6 | 0 / 0 | 0 / 0 |
+| 48,000 placements | 96 / 5 | 96 / 0 | ~21 / 1.2 | 0 / ~9.4 MiB | 0 / 0 |
+
+A full recovery volume now generates one editor notification per episode. Automatic retries start after two seconds, double their delay, and cap it at one minute. A successful checkpoint restores the ordinary edit debounce. Explicit flushes can retry immediately. A separate trial edited the cut again during backoff, freed space, and immediately flushed the latest revision. The next edit checkpointed at the ordinary debounce, and a second full-volume episode produced a fresh notification. Releasing space at the end of the measured intervals produced a new checkpoint in roughly 2–4 seconds. These single-run timings depend on when space returns within the retry interval.
 
 ### Save during recovery cleanup
 
@@ -426,7 +468,7 @@ Separate untimed runs counted successful file I/O under the project directory, e
 
 In the local developer harness, run `relink-edit` with `apply,checkpoint` to exercise the first recovery stage. The worker verifies the saved revision and the reviewed source before copying its records to local recovery storage. It applies the edit to that source and keeps unopened sequences and independent copy identities in the draft. It acknowledges the checkpoint after publishing a self-contained draft in the recovery directory. The owning bin stays Unsaved. A stale revision fails the checkpoint and preserves the previously acknowledged draft.
 
-A normal project open shows the last explicit Save. Recover Unsaved Changes opens a detached draft and checks the chosen file against FilmCraft’s recorded media fingerprint before playback. An unreadable, missing, or fingerprint-mismatched file stays offline at the chosen path and opens Link Media for review. Saving the detached copy preserves the path, clip name and offline state. A second crash during editing retains the review requirement. An acknowledged Discard clears the draft.
+A normal project open shows the last explicit Save. Recover Unsaved Changes opens a detached draft with the chosen media path. As in a standard project, a playable file at that path is available even if its contents changed. A missing file triggers the ordinary Link Media prompt. Saving with the file missing preserves its path, so a later reopen can use the file if it returns. An explicit Make Offline decision survives recovery and Save. An acknowledged Discard clears the draft.
 
 The force-quit regression covers unchanged footage, a moved file, and different playable footage at the same path. It removes access to the original project folder before recovery, checks an unopened sequence and project settings, and reopens the saved copy in a fresh process. [Recovery regression](../crates/ui-egui/examples/bench_bin_open/source_recovery_tests.rs)
 
@@ -440,7 +482,7 @@ Find a clip whose original file is missing, open Link Media, choose **Review in 
 - **Global Save** publishes all outstanding bins and changed project settings. Repeating Save with the same document and view writes zero project bytes.
 - **An ordinary clip-edge trim** in the active sequence uses the existing trim command and marks its owning bin Unsaved. The editor keeps deferred timelines on disk through Undo, Redo, Save, Discard, and checkpoint confirmation.
 - **A broader edit** loads the remaining project records and transfers the working edit and its Undo and Redo history into the full editor. Selection, timeline tabs and playheads stay in the same session. A failed load leaves the working edit available for retry.
-- **A background checkpoint** leaves the bin Unsaved. The recovery worker assembles an independent draft using the saved revision and the edited source. On recovery it rechecks the replacement at the chosen path. If that file is missing or its identity differs, the recovered clip stays offline and can be saved in that state.
+- **A background checkpoint** leaves the bin Unsaved. The recovery worker assembles an independent draft using the saved revision and the edited source. Recovery opens the chosen path with the standard project media rules, including the existing proxy preference and missing-media handling.
 
 The desktop regressions drive Find, Link Media and the bin-close dialog by their registered controls. A separate process test kills the editor after a durable checkpoint, promotion, Redo, and selective bin decisions, then recovers in a fresh session. [Desktop relink tests](../crates/ui-egui/tests/it/modular_bin_ui/verified_relink.rs) and [forced-exit tests](../crates/ui-egui/tests/it/modular_bin_ui/verified_relink_crash.rs)
 
