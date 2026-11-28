@@ -327,6 +327,132 @@ fn promoting_after_split_undo_preserves_ids_for_redo() {
     another_split(&mut r.warm, r.reference.project.next_id);
 }
 
+fn preview_trim(s: &mut Session, clip: &Value, kind: &str) {
+    s.execute("trim.selectEditPoint", json!({"clip":clip,"edge":"out","kind":kind})).unwrap();
+    let direction = if kind == "trim" { "reverse" } else { "forward" };
+    s.execute("trim.shuttle", json!({"direction":direction,"clock":100.0})).unwrap();
+    s.execute("trim.tick", json!({"clock":100.1})).unwrap();
+    let state = s.execute("trim.tick", json!({"clock":100.25})).unwrap();
+    assert_ne!(state["dynamic"]["offsetFrames"], 0);
+}
+
+#[test]
+fn dynamic_trim_accept_cancel_and_save() {
+    for dirty in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut r = Run::new(tmp.path());
+        let disk = manifest(&r.folder);
+        r.warm.start_autosave(AutosaveConfig::new(tmp.path().join("data"))).unwrap();
+        if dirty {
+            r.trim();
+        }
+        let before = r.reference.project.clone();
+        let clip = &r.args["clip"];
+        let checkpoint = r.warm.persistence.as_ref().unwrap().flush().unwrap();
+        assert_eq!(checkpoint.is_some(), dirty);
+        for finish in ["trim.cancelDynamic", "trim.shuttleStop"] {
+            let prior_checkpoint = r.warm.persistence.as_ref().unwrap().flush().unwrap();
+            for s in [&mut r.reference, &mut r.warm] {
+                preview_trim(s, clip, "ripple");
+                assert_eq!(s.is_dirty(), dirty);
+                assert_eq!(s.dirty_folder_bins().contains(&r.bin), dirty);
+            }
+            assert_eq!(r.warm.persistence.as_ref().unwrap().flush().unwrap(), prior_checkpoint);
+            let cut = r.warm.project.sequence(r.reel).unwrap();
+            let original = before.sequence(r.reel).unwrap();
+            assert!(cut.video_tracks[0].items[0].duration > original.video_tracks[0].items[0].duration);
+            assert_eq!(cut.audio_tracks[0].items[0].duration, cut.video_tracks[0].items[0].duration);
+            assert_eq!(Some(cut), r.reference.project.sequence(r.reel));
+            assert_eq!(r.warm.playhead(), r.reference.playhead());
+            assert_eq!(r.warm.render_program(0.25).unwrap().over_black_rgba8(), r.reference.render_program(0.25).unwrap().over_black_rgba8());
+            r.unloaded();
+            assert_eq!(manifest(&r.folder), disk);
+            for s in [&mut r.reference, &mut r.warm] {
+                s.execute(finish, json!({})).unwrap();
+            }
+            if finish == "trim.cancelDynamic" {
+                assert_eq!(r.warm.project.sequence(r.reel), before.sequence(r.reel));
+                assert_eq!(r.warm.is_dirty(), dirty);
+                assert_eq!(r.warm.dirty_folder_bins().contains(&r.bin), dirty);
+            }
+        }
+        let accepted = r.reference.project.clone();
+        assert_eq!(r.warm.dirty_folder_bins(), [r.bin].into());
+        r.warm.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(r.warm.project.sequence(r.reel), before.sequence(r.reel));
+        assert_eq!(r.warm.is_dirty(), dirty);
+        r.warm.execute("edit.redo", json!({})).unwrap();
+        assert_eq!(r.warm.project.sequence(r.reel), accepted.sequence(r.reel));
+        r.warm.execute("file.save", json!({})).unwrap();
+        let head = manifest(&r.folder);
+        assert_eq!(head["bins"], disk["bins"]);
+        let changed: Vec<_> =
+            head["items"].as_array().unwrap().iter().zip(disk["items"].as_array().unwrap()).filter(|(a, b)| a != b).map(|(a, _)| &a[0]).collect();
+        assert_eq!(changed, [&json!(r.reel)]);
+        let reopened = open(&r.folder);
+        assert_eq!(reopened.project, accepted);
+        assert_eq!(reopened.project_view(), r.reference.project_view());
+        assert!(!r.warm.is_dirty());
+        r.unloaded();
+    }
+}
+
+#[test]
+fn promoting_during_a_dynamic_trim_preserves_the_complete_undo_snapshot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut r = Run::new(tmp.path());
+    r.trim();
+    let before = r.reference.project.clone();
+    for s in [&mut r.reference, &mut r.warm] {
+        preview_trim(s, &r.args["clip"], "ripple");
+        s.execute("file.projectSettings.general", json!({})).unwrap();
+    }
+    assert_eq!(r.warm.project, r.reference.project);
+    r.warm.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(r.warm.project, before);
+    assert_eq!(r.warm.dirty_folder_bins(), [r.bin].into());
+}
+
+#[test]
+fn shuttle_keys_preview_cancel_and_accept_without_opening_other_reels() {
+    let tmp = tempfile::tempdir().unwrap();
+    let r = Run::new(tmp.path());
+    let original = r.reference.project.sequence(r.reel).unwrap();
+    let mut d = Driver::open(r.warm, support::with_shots(support::builder()));
+    d.ok("ui.set", json!({"focused":"Timeline"}));
+    d.exec("trim.selectEditPoint", json!({"clip":r.args["clip"],"edge":"out","kind":"ripple"}));
+    for (direction, finish) in [("J", "Escape"), ("L", "K")] {
+        d.ok("ui.key", json!({"key":direction}));
+        d.frames(8);
+        let s = &d.app().session;
+        assert!(s.trim_play.dynamic.is_some());
+        assert_ne!(s.project.sequence(r.reel), Some(original));
+        assert!(!s.is_dirty());
+        d.ok("ui.key", json!({"key":finish}));
+        d.frames(2);
+        let s = &d.app().session;
+        assert!(s.trim_play.dynamic.is_none());
+        assert_eq!(s.project.sequence(r.reel) == Some(original), finish == "Escape");
+        assert_eq!(s.is_dirty(), finish == "K");
+        assert!(r.deferred.iter().all(|id| s.project.item(*id).is_none()));
+    }
+}
+
+#[test]
+fn dynamic_regular_and_rolling_trims_keep_other_reels_unloaded() {
+    for kind in ["trim", "roll"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut r = Run::new(tmp.path());
+        for s in [&mut r.reference, &mut r.warm] {
+            preview_trim(s, &r.args["clip"], kind);
+            let result = s.execute("trim.shuttleStop", json!({})).unwrap();
+            assert_eq!(result["committed"], true);
+        }
+        assert_eq!(r.warm.project.sequence(r.reel), r.reference.project.sequence(r.reel));
+        r.unloaded();
+    }
+}
+
 const ACTION: &str = "FILMCRAFT_TEST_TRIM_ACTION";
 const ROOT: &str = "FILMCRAFT_TEST_TRIM_ROOT";
 
@@ -351,6 +477,19 @@ fn checkpoint(root: &Path, action: &str) {
         r.trim();
     }
     assert_eq!(r.warm.persistence.as_ref().unwrap().flush().unwrap(), Some(r.warm.revision));
+    if matches!(action, "dynamic-live" | "dynamic-accepted") {
+        let confirmed = r.warm.revision;
+        preview_trim(&mut r.warm, &r.args["clip"], "ripple");
+        assert_ne!(r.reference.project.sequence(r.reel), r.warm.project.sequence(r.reel));
+        assert_eq!(r.warm.persistence.as_ref().unwrap().flush().unwrap(), Some(confirmed));
+        if action == "dynamic-accepted" {
+            preview_trim(&mut r.reference, &r.args["clip"], "ripple");
+            for s in [&mut r.reference, &mut r.warm] {
+                assert_eq!(s.execute("trim.shuttleStop", json!({})).unwrap()["committed"], true);
+            }
+            assert_eq!(r.warm.persistence.as_ref().unwrap().flush().unwrap(), Some(r.warm.revision));
+        }
+    }
     r.unloaded();
     assert!(r.warm.is_dirty());
     let (_, mut expected) = FolderSnapshot::open(&r.folder).unwrap();
@@ -415,7 +554,7 @@ fn crash_recovery() {
         }
         return;
     }
-    for action in ["trim.ripplePrevious", "trim.rippleNext", "checkpoint", "ripple", "interrupt", "discard"] {
+    for action in ["dynamic-live", "dynamic-accepted", "trim.ripplePrevious", "trim.rippleNext", "checkpoint", "ripple", "interrupt", "discard"] {
         let tmp = tempfile::tempdir().unwrap();
         let mut writer = child(tmp.path(), action).stdout(Stdio::piped()).spawn().unwrap();
         let ready = BufReader::new(writer.stdout.take().unwrap()).lines().map_while(Result::ok).any(|l| l.contains("confirmed trim boundary"));

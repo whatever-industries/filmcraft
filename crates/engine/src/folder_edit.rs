@@ -175,18 +175,19 @@ impl Session {
     }
 
     pub fn dirty_folder_bins(&self) -> std::collections::BTreeSet<BinId> {
+        let (project, _) = self.committed_state();
         if let Some(w) = &self.warm_folder {
-            return w.edited_item.as_ref().filter(|(_, i)| self.project.item(i.id) != Some(i)).map(|(id, _)| *id).into_iter().collect();
+            return w.edited_item.as_ref().filter(|(_, i)| project.item(i.id) != Some(i)).map(|(id, _)| *id).into_iter().collect();
         }
         if let Some(folder) = &self.editing_folder {
-            return scope::status(&folder.project, &self.project).bins;
+            return scope::status(&folder.project, project).bins;
         }
         // A detached relink draft retains a dirty owner until explicitly saved.
         self.persistence
             .as_ref()
             .and_then(|p| p.reviewed_source)
             .filter(|(epoch, _)| *epoch == self.document_epoch && self.is_dirty())
-            .and_then(|(_, item)| crate::relink::review::owning_bin(&self.project, item))
+            .and_then(|(_, item)| crate::relink::review::owning_bin(project, item))
             .into_iter()
             .collect()
     }
@@ -240,7 +241,7 @@ impl Session {
         if self.warm_folder.is_some() {
             return Ok(json!({"dirtyBins":self.dirty_folder_bins(),"projectSettingsDirty":false,"unfiledItemsDirty":false}));
         }
-        let status = scope::status(&self.folder()?.project, &self.project);
+        let status = scope::status(&self.folder()?.project, self.committed_state().0);
         Ok(json!({"dirtyBins":status.bins,"projectSettingsDirty":status.settings,"unfiledItemsDirty":status.unfiled}))
     }
 
@@ -263,6 +264,9 @@ impl Session {
     }
 
     pub(crate) fn refresh_folder_dirty(&mut self) {
+        if self.trim_play.dynamic.is_some() {
+            return;
+        }
         if self.warm_folder.is_some() && self.dirty_folder_bins().is_empty() {
             self.saved_revision = self.revision;
         }

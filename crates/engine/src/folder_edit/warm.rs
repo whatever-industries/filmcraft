@@ -126,7 +126,8 @@ impl Session {
                 let ids = p["item"].as_u64().map(ItemId).filter(|id| self.project.item(*id).is_none()).into_iter().collect();
                 self.hydrate_visible(ids)
             }
-            "timeline.trim" | "trim.ripplePrevious" | "trim.rippleNext" => Ok(()),
+            "trim.shuttle" | "trim.shuttleStop" | "trim.cancelDynamic" | "trim.tick" | "trim.playAround" => Ok(()),
+            "timeline.trim" | "timeline.roll" | "trim.ripplePrevious" | "trim.rippleNext" => Ok(()),
             "project.select"
                 if p["items"].as_array().is_some_and(|ids| {
                     ids.iter().filter_map(Value::as_u64).all(|id| !w.index.labels.contains_key(&ItemId(id)) || self.project.item(ItemId(id)).is_some())
@@ -220,11 +221,14 @@ impl Session {
         }
         let ids: Vec<_> = added.keys().copied().collect();
         self.install_warm_records(added)?;
-        if !self.history.undo.is_empty() || !self.history.redo.is_empty() {
+        if !self.history.undo.is_empty() || !self.history.redo.is_empty() || self.trim_play.dynamic.is_some() {
             let records: Vec<_> = ids
                 .into_iter()
                 .map(|id| self.project.item(id).cloned().map(|item| (id, item)).ok_or_else(|| error("missing loaded item")))
                 .collect::<Result<_>>()?;
+            if let Some(d) = &mut self.trim_play.dynamic {
+                Arc::make_mut(&mut d.before).items.extend(records.iter().cloned());
+            }
             for (_, project, _) in self.history.undo.iter_mut().chain(&mut self.history.redo) {
                 Arc::make_mut(project).items.extend(records.iter().cloned());
             }
@@ -291,6 +295,9 @@ impl Session {
         };
         let undo = rebase(&self.history.undo)?;
         let redo = rebase(&self.history.redo)?;
+        if let Some(d) = &mut self.trim_play.dynamic {
+            d.before = merge(&d.before)?;
+        }
         let warning = snapshot.schedule_retention().err();
         self.editing_folder = Some(EditingFolder { snapshot, project: base, view: w.view.clone(), departures: Default::default(), cleanup: w.cleanup });
         self.project = current;

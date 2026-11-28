@@ -3582,7 +3582,7 @@ fn build() -> Vec<CommandSpec> {
                 .unwrap_or_default();
             // `followLinks: false` rolls only this pair; the default clamps linked cuts together.
             let follow = s.state.linked_selection && p.get("followLinks").and_then(Value::as_bool).unwrap_or(true);
-            let (x, n, linked) = s.edit_sequence("Rolling Edit", |q, ctx, _| {
+            let (x, n, linked) = s.edit_one_reel_trim("Rolling Edit", false, |q, ctx, _| {
                 let pairs = linked_roll_pairs(q, l, r, follow);
                 let linked = pairs.len() > 1;
                 let d = clamp_roll_linked(q, &pairs, d, ctx)?;

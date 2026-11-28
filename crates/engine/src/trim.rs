@@ -441,7 +441,8 @@ impl TrimPlayback {
 pub struct DynamicTrim {
     /// The project before the trim: the one undo step pushed on commit, and the base every live
     /// update re-applies the offset to (so updates never accumulate rounding or clamping).
-    before: Arc<Project>,
+    pub(crate) before: Arc<Project>,
+    pub(crate) before_revision: u64,
     shift_before: TrimShift,
     /// Edit point movement applied so far (whole frames).
     pub offset: Tick,
@@ -490,8 +491,11 @@ pub fn shuttle(s: &mut Session, p: &Value) -> Result<Value> {
     let slow = p.get("slow").and_then(Value::as_bool).unwrap_or(false);
     s.trim_play.around = None;
     if s.trim_play.dynamic.is_none() {
+        #[cfg(not(target_arch = "wasm32"))]
+        s.prepare_warm_trim(false)?;
         s.trim_play.dynamic = Some(DynamicTrim {
             before: s.project.clone(),
+            before_revision: s.revision,
             shift_before: s.state.trim_shift,
             offset: Tick::ZERO,
             speed: 0.0,
@@ -565,11 +569,18 @@ fn status(s: &Session) -> Value {
 /// history or the journal. Returns the offset that could actually be applied.
 fn apply_dynamic(s: &mut Session, offset: Tick) -> Result<Tick> {
     let Some(d) = s.trim_play.dynamic.clone() else { return Ok(Tick::ZERO) };
-    let (undo_len, journal_len, limit) = (s.history.undo.len(), s.journal.len(), s.history.limit);
+    let (undo_len, limit) = (s.history.undo.len(), s.history.limit);
+    let merge_key = s.history.merge_key.take();
     let redo = std::mem::take(&mut s.history.redo);
     s.history.limit = usize::MAX;
     s.project = d.before.clone();
-    let r = if offset == Tick::ZERO { Ok(vec![json!(0)]) } else { trim_all_raw(s, &|_, _| Some(offset)) };
+    let r = if offset == Tick::ZERO {
+        // Returning to the original cut changes the displayed frame without running an edit command.
+        s.bump();
+        Ok(vec![json!(0)])
+    } else {
+        trim_all_raw(s, &|_, _| Some(offset))
+    };
     let applied = match r {
         Ok(a) => a.first().and_then(Value::as_i64).map(Tick).unwrap_or_default(),
         Err(_) => {
@@ -584,7 +595,7 @@ fn apply_dynamic(s: &mut Session, offset: Tick) -> Result<Tick> {
     s.history.undo.truncate(undo_len);
     s.history.limit = limit;
     s.history.redo = redo;
-    s.journal.truncate(journal_len);
+    s.history.merge_key = merge_key;
     s.state.trim_shift = d.shift_before;
     add_shift(s, applied);
     // the Program monitor follows the moving edit
@@ -611,8 +622,7 @@ pub fn commit(s: &mut Session) -> Value {
     let Some(d) = s.trim_play.dynamic.take() else { return json!({"committed": false}) };
     let rate = s.sequence_rate();
     if d.offset == Tick::ZERO || Arc::ptr_eq(&d.before, &s.project) {
-        s.project = d.before;
-        s.state.trim_shift = d.shift_before;
+        restore_before(s, d);
         return json!({"committed": false, "offsetFrames": 0});
     }
     let kind = s.state.edit_points.first().map_or(TrimKind::Trim, |e| e.kind);
@@ -627,21 +637,34 @@ pub fn commit(s: &mut Session) -> Value {
         s.history.undo.remove(0);
     }
     s.history.redo.clear();
+    s.history.merge_key = None;
+    s.bump();
+    #[cfg(not(target_arch = "wasm32"))]
+    s.refresh_folder_dirty();
     json!({"committed": true, "label": label, "offsetFrames": rate.frame_at(d.offset), "offset": d.offset.0})
+}
+
+fn restore_before(s: &mut Session, d: DynamicTrim) {
+    let clean = d.before_revision == s.saved_revision;
+    s.project = d.before;
+    s.state.trim_shift = d.shift_before;
+    if d.before_revision != s.revision {
+        s.bump();
+    }
+    if clean {
+        s.saved_revision = s.revision;
+    }
 }
 
 /// `trim.cancelDynamic` (Esc): drop a dynamic trim in progress, restoring the edit.
 pub fn cancel(s: &mut Session) -> Result<Value> {
     s.trim_play.around = None;
     if let Some(d) = s.trim_play.dynamic.take() {
-        s.project = d.before;
-        s.state.trim_shift = d.shift_before;
+        restore_before(s, d);
         s.fix_state();
         if let Some(t) = s.active_sequence().and_then(|q| s.state.edit_points.first().and_then(|e| edit_time(q, e))) {
             s.set_playhead(t);
         }
-        s.revision += 1;
-        s.events.push(crate::Event::ProjectChanged { revision: s.revision });
     }
     Ok(Value::Null)
 }

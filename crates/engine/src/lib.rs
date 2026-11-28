@@ -791,7 +791,9 @@ impl Session {
     /// Tell the worker about the current project state if it changed (cheap: an `Arc` clone and a
     /// channel send; serialization happens on the worker). Called after every command.
     pub fn sync_persistence(&mut self) {
-        let dirty = self.is_dirty();
+        let (project, revision) = self.committed_state();
+        let project = project.clone();
+        let dirty = revision != self.saved_revision;
         let modular = self.folder_revision().is_some();
         let Some(p) = self.persistence.as_mut() else { return };
         // A later project can reuse the same item ID. The recovery check belongs
@@ -801,15 +803,15 @@ impl Session {
         }
         #[cfg(not(target_arch = "wasm32"))]
         if let (Some(id), Some(folder)) = (self.reviewed_relink, &self.editing_folder) {
-            p.reviewed_source = (self.project.item(id) != folder.project.item(id)).then_some((self.document_epoch, id));
+            p.reviewed_source = (project.item(id) != folder.project.item(id)).then_some((self.document_epoch, id));
         }
-        let cur = autosave::Sent { revision: self.revision, saved_revision: self.saved_revision, path: self.path.clone() };
+        let cur = autosave::Sent { revision, saved_revision: self.saved_revision, path: self.path.clone() };
         if p.last_sent.as_ref() == Some(&cur) {
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(w) = &self.warm_folder {
-            if let Some(draft) = w.draft(&self.project, self.revision) {
+            if let Some(draft) = w.draft(&project, revision) {
                 p.reviewed_source = draft.saved.as_media().map(|_| (self.document_epoch, draft.saved.id));
                 p.send_dirty_item(draft);
             } else {
@@ -819,7 +821,7 @@ impl Session {
             return;
         }
         if dirty {
-            p.send_dirty(self.project.clone(), self.revision, self.path.clone(), modular);
+            p.send_dirty(project, revision, self.path.clone(), modular);
         } else {
             p.send_clean();
         }
@@ -894,7 +896,7 @@ impl Session {
         let clean = !self.is_dirty();
         self.bump();
         if clean {
-            self.saved_revision = self.revision;
+            self.saved_revision = self.committed_state().1;
         }
     }
 
@@ -941,8 +943,13 @@ impl Session {
         }
     }
 
+    /// Playback renders the moving cut. Persistence and bin status follow the last accepted cut.
+    fn committed_state(&self) -> (&Arc<Project>, u64) {
+        self.trim_play.dynamic.as_ref().map_or((&self.project, self.revision), |d| (&d.before, d.before_revision))
+    }
+
     pub fn is_dirty(&self) -> bool {
-        self.revision != self.saved_revision
+        self.committed_state().1 != self.saved_revision
     }
 
     /// Run a command by id.
@@ -1015,7 +1022,8 @@ impl Session {
         self.sync_persistence();
         // playback reads the newest snapshot (mixer moves, mutes… are heard while playing)
         self.previews.live.publish_project(self.project.clone());
-        if r.is_ok() && journal {
+        let preview_step = self.exec_depth != 0 && self.trim_play.dynamic.is_some() && matches!(id, "timeline.trim" | "timeline.roll");
+        if r.is_ok() && journal && !preview_step {
             self.journal.push((id.to_string(), params));
             if self.journal.len() > 10_000 {
                 self.journal.drain(..1000);
@@ -1027,7 +1035,7 @@ impl Session {
     /// Another command arrives while trim-mode playback runs: a dynamic trim is committed first
     /// (so e.g. Undo undoes it as one step); loop playback stops unless it is a trim command.
     fn settle_trim_playback(&mut self, id: &str) {
-        const LIVE: [&str; 5] = ["trim.shuttle", "trim.tick", "trim.shuttleStop", "trim.cancelDynamic", "trim.playAround"];
+        const LIVE: [&str; 6] = ["trim.shuttle", "trim.tick", "trim.shuttleStop", "trim.cancelDynamic", "trim.playAround", "file.autoSaveNow"];
         if LIVE.contains(&id) {
             return;
         }
@@ -1320,7 +1328,10 @@ impl Session {
     ) -> Result<R> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.prepare_warm_trim(allocating)?;
+            // Shuttle qualified this edit before capturing its starting cut.
+            if self.trim_play.dynamic.is_none() {
+                self.prepare_warm_trim(allocating)?;
+            }
             if self.warm_folder.is_some() {
                 return self.edit_sequence_with(label, None, true, f);
             }
