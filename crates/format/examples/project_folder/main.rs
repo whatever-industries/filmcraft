@@ -1,8 +1,5 @@
 //! Developer-only project-folder conversion. See docs/project-files.md.
-use filmcraft_format::{
-    atomic_write_new,
-    project_folder::{backup_history, checkout, history, move_backups, pack, rescue, restore_copy, save, unpack},
-};
+use filmcraft_format::project_folder::{backup_history, checkout, history, move_backups, pack_native, rescue, restore_copy, save, unpack};
 use std::{
     io::{self, Write},
     path::Path,
@@ -17,7 +14,7 @@ fn run() -> io::Result<()> {
             return writeln!(io::stdout().lock(), "{revision}");
         }
         if command == "pack" {
-            return pack(src, dest, atomic_write_new);
+            return pack_native(src, dest);
         }
         if command == "checkout" {
             let revision = checkout(src, dest)?;

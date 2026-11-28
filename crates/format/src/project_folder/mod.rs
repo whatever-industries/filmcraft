@@ -325,6 +325,17 @@ fn materialize(
     })
 }
 
+/// Convert into a fresh native folder. Only this packer writes its internal names
+/// until the verified manifest makes the project available to editors.
+pub fn pack_native(source: &Path, folder: &Path) -> io::Result<()> {
+    pack(source, folder, publication::stage_record)?;
+    #[cfg(unix)]
+    fs::File::open(folder)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|error| io::Error::new(error.kind(), format!("project manifest published, but syncing the project directory failed: {error}")))?;
+    Ok(())
+}
+
 pub fn pack(source: &Path, folder: &Path, mut write_new: impl FnMut(&Path, &[u8]) -> io::Result<()>) -> io::Result<()> {
     let records = records_from(source, folder)?;
     fs::create_dir(folder)?; // Exclusively reserve a fresh destination. Never adopt an existing directory.

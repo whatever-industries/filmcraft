@@ -20,9 +20,9 @@ pub(super) fn stage_record(path: &Path, bytes: &[u8]) -> io::Result<()> {
     }
 }
 
-/// Only for internal records under the project writer lock or in the worker's private
-/// checkpoint directory. These namespaces have one writer, so once a name is absent
-/// it stays available until publication. User-selected output paths have no such lock.
+/// The caller owns these internal names through the project writer lock, a private
+/// checkpoint session, or a newly reserved conversion folder. Only that writer can
+/// publish them. User-selected output paths have no such reservation.
 #[cfg(unix)]
 fn publish_writer_owned_record(staged: tempfile::NamedTempFile, path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {

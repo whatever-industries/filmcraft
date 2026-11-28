@@ -1,4 +1,4 @@
-use filmcraft_format::project_folder::{ROOT, checkout, history, pack, records_from, rescue, restore_copy, save, save_with, unpack};
+use filmcraft_format::project_folder::{ROOT, checkout, history, pack, pack_native, records_from, rescue, restore_copy, save, save_with, unpack};
 use filmcraft_format::{SCHEMA_VERSION, atomic_write_new};
 use serde_json::Value;
 use serde_json::json;
@@ -145,7 +145,12 @@ fn occupied_destinations_and_write_failures_preserve_existing_data() {
     fs::set_permissions(&src, perms).unwrap();
     let folder = tmp.path().join("folder");
     fs::create_dir(&folder).unwrap();
-    assert_eq!(pack(&src, &folder, atomic_write_new).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(pack_native(&src, &folder).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+    let sentinel = folder.join("keep");
+    fs::write(&sentinel, b"existing contents").unwrap();
+    assert_eq!(pack_native(&src, &folder).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(fs::read(sentinel).unwrap(), b"existing contents");
+    assert!(!folder.join(ROOT).exists());
     for fail_at in [1, 3] {
         let dest = tmp.path().join(format!("failed-{fail_at}"));
         let mut count = 0;
@@ -162,7 +167,7 @@ fn occupied_destinations_and_write_failures_preserve_existing_data() {
         assert!(unpack(&dest, &tmp.path().join("should-not-exist")).is_err());
     }
     let dest = tmp.path().join("complete");
-    pack(&src, &dest, atomic_write_new).unwrap();
+    pack_native(&src, &dest).unwrap();
     assert_eq!(unpack(&dest, &src).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
     assert_eq!(fs::read(&src).unwrap(), bytes);
 }

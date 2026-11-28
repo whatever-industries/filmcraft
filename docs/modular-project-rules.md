@@ -27,7 +27,7 @@ Check an item when the modular branch demonstrates the behavior. 鈥淟ocal only鈥
 - [x] **Multi-bin Save and Discard 路 local only.** All three decisions passed on the 24,000- and 48,000-placement projects. Both reopened cuts and project settings matched the standard project. [Publication sizes and reel loading](#feature-scale-multi-bin-decisions)
 - [x] **Save and checkpoint on a full APFS volume 路 local only.** Bin Save, global Save, and detached crash recovery passed on the small project and both feature fixtures. [Failure cases and retry costs](#save-and-checkpoint-on-a-full-volume)
 - [x] **Save and recover an existing modular project on native exFAT 路 local only.** Global Save and bin Save reopened the expected cuts. Recovery from the USB drive survived a forced quit with the source volume unmounted. [Native exFAT comparison](#native-exfat-comparison)
-- [ ] **Create a new modular project directly on native exFAT.** The converter still requires exclusive file publication for its new destination.
+- [x] **Convert directly onto native exFAT 路 local only.** The converter created a new USB project from a standard file. After a trim and global Save, a fresh editor reopened the 36-frame cut. [Direct conversion trial](#direct-conversion-onto-native-exfat)
 - [x] **Single-editor acceptance run 路 local only.** On the 24,000-placement project, a fresh editor reopened both today鈥檚 recovered cut and a protected older copy from a standard export with the original project volume unmounted. [End-to-end results](#single-editor-acceptance-run)
 
 ### Upstream merges
@@ -203,7 +203,13 @@ After the fix, the same macOS exFAT drive passed both modular trials with ample 
 - **Project on USB.** Global Save published the trim from 48 frames to 36. A fresh editor reopened it and showed the matte at frame 32. A further trim and bin Save reopened at 24 frames with the matte gone at frame 32.
 - **Recovery data on USB.** The saved project lived on a disposable APFS volume. The background worker acknowledged the 24-frame trim while the bin still showed Unsaved. After a forced process exit and unmounting the source volume, a fresh editor recovered the 24-frame clip and rendered the expected picture. Remounting the source reopened the saved 36-frame cut.
 
-macOS rejected both exclusive rename and hard links on this drive. For internal records, the project writer lock or private checkpoint session serializes publication. When exclusive rename is unsupported, the writer checks for an occupied name and renames the already-synced staging file into place. The manifest or checkpoint marker is published last. This qualification covers edits to an existing project. Direct conversion into a new folder on exFAT remains open.
+macOS rejected both exclusive rename and hard links on this drive. For internal records, the project writer lock or private checkpoint session serializes publication. When exclusive rename is unsupported, the writer checks for an occupied name and renames the already-synced staging file into place. The manifest or checkpoint marker is published last. This trial used an existing project folder.
+
+### Direct conversion onto native exFAT
+
+On the same 62 GB USB drive, the original `project_folder pack` command returned macOS error 45 before publishing a manifest. The updated command reserved a new folder, verified the records it wrote there, and published `project.fcmod` last. A separate trial targeting an occupied folder preserved its contents.
+
+The converted project opened with a 48-frame colored clip visible at timeline frame 40. After trimming 12 frames and using global Save, a fresh editor reopened the 36-frame clip with the color gone at frame 40. The input `.fcproj` remained byte-for-byte identical and reopened in a standard editor session with all 48 frames.
 
 ### Save during recovery cleanup
 
