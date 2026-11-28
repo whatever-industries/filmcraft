@@ -138,7 +138,7 @@ pub fn checkout(folder: &Path, destination: &Path) -> io::Result<String> {
 }
 
 pub(super) fn publish(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if path.file_name().is_some_and(|name| name == ROOT) { crate::atomic_write(path, bytes) } else { atomic_write_new(path, bytes) }
+    if path.file_name().is_some_and(|name| name == ROOT) { crate::atomic_write(path, bytes) } else { super::publication::stage_record(path, bytes) }
 }
 
 pub fn save(folder: &Path, expected: &str, source: &Path) -> io::Result<String> {

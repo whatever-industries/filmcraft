@@ -26,7 +26,8 @@ Check an item when the modular branch demonstrates the behavior. “Local only�
 - [x] **Recover media like a standard project · local only.** Recovery uses the saved path and the ordinary missing-media prompt. An explicit Link Media operation keeps its existing match checks. [Crash and reopen regression](#crash-recovery-after-a-partial-relink)
 - [x] **Multi-bin Save and Discard · local only.** All three decisions passed on the 24,000- and 48,000-placement projects. Both reopened cuts and project settings matched the standard project. [Publication sizes and reel loading](#feature-scale-multi-bin-decisions)
 - [x] **Save and checkpoint on a full APFS volume · local only.** Bin Save, global Save, and detached crash recovery passed on the small project and both feature fixtures. [Failure cases and retry costs](#save-and-checkpoint-on-a-full-volume)
-- [ ] **Qualify native exFAT project and recovery folders.** With free space available, macOS rejected exclusive publication of new records on the 62 GB exFAT drive. Repeat the disk-full trials after publication on that filesystem is supported.
+- [x] **Save and recover an existing modular project on native exFAT · local only.** Global Save and bin Save reopened the expected cuts. Recovery from the USB drive survived a forced quit with the source volume unmounted. [Native exFAT comparison](#native-exfat-comparison)
+- [ ] **Create a new modular project directly on native exFAT.** The converter still requires exclusive file publication for its new destination.
 - [x] **Single-editor acceptance run · local only.** On the 24,000-placement project, a fresh editor reopened both today’s recovered cut and a protected older copy from a standard export with the original project volume unmounted. [End-to-end results](#single-editor-acceptance-run)
 
 ### Upstream merges
@@ -176,7 +177,7 @@ Each trial started with a 48-frame clip. One trim left 36 frames, and a second l
 | Recovery destination regains space while the editor is idle | Without an edit, Save, or explicit flush, the worker confirmed the 24-frame cut. The bin stayed Unsaved and the project manifest stayed unchanged. A fresh editor recovered 24 frames with the source volume unmounted. |
 | Publication succeeds and recovery cleanup fails | A separate deterministic engine test blocked cleanup. The editor reported that publication had succeeded. The saved cut reopened, and retrying cleanup wrote zero project bytes. |
 
-The physical drive used exFAT. With more than 9 GB free, native project creation, bin Save, and checkpoint creation failed with `EOPNOTSUPP` at exclusive file publication. The capacity trials used bounded APFS volumes. A fixed 128 MiB APFS image stored on the USB drive exercised the physical-drive path. Global Save and the selective-Save case with pending settings also ran on local APFS images.
+The physical drive used exFAT. In the initial trials, with more than 9 GB free, native project creation, bin Save, and checkpoint creation failed with `EOPNOTSUPP` at exclusive file publication. The capacity trials used bounded APFS volumes. A fixed 128 MiB APFS image stored on the USB drive exercised the physical-drive path. Global Save and the selective-Save case with pending settings also ran on local APFS images.
 
 The table measures one 120-second interval **after the first checkpoint failure** on local APFS images. Attempts and repeated errors exclude that first failure. CPU seconds and physical I/O are process deltas from macOS. Physical reads exclude cache hits. Idle controls recorded zero CPU seconds and zero physical bytes at all three sizes.
 
@@ -187,6 +188,22 @@ The table measures one 120-second interval **after the first checkpoint failure*
 | 48,000 placements | 96 / 5 | 96 / 0 | ~21 / 1.2 | 0 / ~9.4 MiB | 0 / 0 |
 
 A full recovery volume now generates one editor notification per episode. Automatic retries start after two seconds, double their delay, and cap it at one minute. A successful checkpoint restores the ordinary edit debounce. Explicit flushes can retry immediately. A separate trial edited the cut again during backoff, freed space, and immediately flushed the latest revision. The next edit checkpointed at the ordinary debounce, and a second full-volume episode produced a fresh notification. Releasing space at the end of the measured intervals produced a new checkpoint in roughly 2–4 seconds. These single-run timings depend on when space returns within the retry interval.
+
+### Native exFAT comparison
+
+With approximately 9.2 GB free on the 62 GB USB drive, one generated clip distinguished the saved cut from the newer unsaved cut. The editor command interface exercised upstream FilmCraft at `a9429d82` and the modular branch at `96709ed1`. A fresh process checked the clip duration and rendered frame 32 after reopening.
+
+| Destination on native exFAT | Ordinary FilmCraft | Modular FilmCraft |
+| --- | --- | --- |
+| Project, with recovery data on APFS | Save As created the 48-frame project. Save published a trim to 36 frames and a fresh editor reopened it. | An existing project folder copied to exFAT opened. Global Save of the same trim returned macOS error 45. The bin stayed Unsaved, the manifest was byte-identical, and a fresh editor reopened 48 frames. |
+| Recovery data, with the saved 36-frame project on APFS | The background worker confirmed a 24-frame trim. After a forced process exit, a fresh editor recovered 24 frames as Unsaved. The saved project remained intact. | The background worker returned error 45 on the 24-frame trim. It acknowledged no checkpoint, the bin stayed Unsaved, and the saved project reopened at 36 frames. |
+
+After the fix, the same macOS exFAT drive passed both modular trials with ample space.
+
+- **Project on USB.** Global Save published the trim from 48 frames to 36. A fresh editor reopened it and showed the matte at frame 32. A further trim and bin Save reopened at 24 frames with the matte gone at frame 32.
+- **Recovery data on USB.** The saved project lived on a disposable APFS volume. The background worker acknowledged the 24-frame trim while the bin still showed Unsaved. After a forced process exit and unmounting the source volume, a fresh editor recovered the 24-frame clip and rendered the expected picture. Remounting the source reopened the saved 36-frame cut.
+
+macOS rejected both exclusive rename and hard links on this drive. For internal records, the project writer lock or private checkpoint session serializes publication. When exclusive rename is unsupported, the writer checks for an occupied name and renames the already-synced staging file into place. The manifest or checkpoint marker is published last. This qualification covers edits to an existing project. Direct conversion into a new folder on exFAT remains open.
 
 ### Save during recovery cleanup
 

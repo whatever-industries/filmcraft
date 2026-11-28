@@ -123,7 +123,13 @@ pub fn atomic_write_new(path: &Path, data: &[u8]) -> io::Result<()> {
 /// files must sync their containing directory before publishing its commit record.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn stage_new_file(path: &Path, data: &[u8]) -> io::Result<()> {
-    atomic_write_new_with(path, |file| file.write_all(data).and_then(|_| file.sync_all()))
+    staged_contents(path, data)?.persist_noclobber(path).map_err(|e| e.error)?;
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn staged_contents(path: &Path, data: &[u8]) -> io::Result<tempfile::NamedTempFile> {
+    stage_with(path, |file| file.write_all(data).and_then(|_| file.sync_all()))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -132,7 +138,7 @@ pub fn atomic_write_new(_path: &Path, _data: &[u8]) -> io::Result<()> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn atomic_write_new_with(path: &Path, write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<()> {
+fn stage_with(path: &Path, write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<tempfile::NamedTempFile> {
     let dir = parent_dir(path);
     #[cfg(unix)]
     let mut staged = {
@@ -144,8 +150,7 @@ fn atomic_write_new_with(path: &Path, write: impl FnOnce(&mut File) -> io::Resul
     #[cfg(not(unix))]
     let mut staged = tempfile::NamedTempFile::new_in(&dir)?;
     write(staged.as_file_mut())?;
-    let _published = staged.persist_noclobber(path).map_err(|e| e.error)?;
-    Ok(())
+    Ok(staged)
 }
 
 /// Best-effort directory sync; directory handles are not uniformly readable or syncable.
@@ -269,7 +274,7 @@ mod tests {
     fn failed_staging_leaves_no_partial_destination() {
         let d = tmpdir("failed-new");
         let p = d.join("audio.wav");
-        let error = atomic_write_new_with(&p, |file| {
+        let error = stage_with(&p, |file| {
             file.write_all(b"partial")?;
             Err(io::Error::other("simulated full disk"))
         })

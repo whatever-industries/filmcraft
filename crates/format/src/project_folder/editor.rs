@@ -1,8 +1,8 @@
 //! Incremental saves from a verified editor snapshot.
 pub(super) mod checkpoint;
 use super::{
-    BinCopy, MANIFEST_LIMIT, Manifest, MoveBackup, ROOT, check_hash, check_manifest, digest, invalid, join, load_payload, overlay, paths, read_member,
-    read_records, revisions,
+    BinCopy, MANIFEST_LIMIT, Manifest, MoveBackup, ROOT, check_hash, check_manifest, digest, invalid, join, load_payload, overlay, paths,
+    publication::stage_record, read_member, read_records, revisions,
 };
 use crate::{Loaded, MAX_PROJECT_BYTES, SCHEMA_VERSION};
 use filmcraft_project::{Bin, BinEntry, ItemKind, MediaRef, Project, ProjectItem, ProjectView};
@@ -372,18 +372,6 @@ impl FolderSnapshot {
         self.files = files;
         let move_backups = next.revision.map(|r| r.moves).unwrap_or_default();
         Ok(SaveResult { revision, bytes, move_backups, maintenance_warning })
-    }
-}
-
-fn stage_record(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    // The commit syncs the folder once after staging the payloads and the archive.
-    #[cfg(unix)]
-    {
-        crate::atomic::stage_new_file(path, bytes)
-    }
-    #[cfg(not(unix))]
-    {
-        crate::atomic_write_new(path, bytes)
     }
 }
 

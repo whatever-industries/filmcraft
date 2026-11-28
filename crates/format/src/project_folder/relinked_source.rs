@@ -77,7 +77,7 @@ pub(super) fn set_trim_counter(envelope: &mut serde_json::Value, next: Option<u6
 }
 
 fn stage(folder: &Path, hash: &str, data: &[u8], written: &mut u64, read: &mut u64) -> io::Result<()> {
-    match crate::atomic_write_new(&folder.join(hash), data) {
+    match super::publication::stage_record(&folder.join(hash), data) {
         Ok(()) => *written += data.len() as u64,
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
             let mut budget = MAX_PROJECT_BYTES;

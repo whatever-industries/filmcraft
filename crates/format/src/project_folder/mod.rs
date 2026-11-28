@@ -21,6 +21,7 @@ mod editor;
 mod organization;
 mod overlay;
 mod paths;
+mod publication;
 mod recovery;
 mod relinked_source;
 pub use relinked_source::{RelinkSave, lock_source_revision, save_directory, save_relinked_source, save_trimmed_sequence};
