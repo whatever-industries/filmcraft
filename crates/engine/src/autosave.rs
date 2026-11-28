@@ -579,7 +579,7 @@ pub struct JournalMeta {
     /// Digest of the immutable record manifest for a modular recovery draft.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<String>,
-    /// Source whose reviewed relink must be fingerprint-checked before recovery can use it.
+    /// Unsaved source edit used to identify the owning bin after detached recovery.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reviewed_source: Option<ItemId>,
     /// True when the app was closed normally while changes were unsaved (no crash).

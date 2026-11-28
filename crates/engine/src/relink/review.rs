@@ -48,22 +48,6 @@ pub(crate) fn owning_bin(project: &Project, item: ItemId) -> Option<BinId> {
     owners(&project.root).get(&item).copied().flatten()
 }
 
-/// Enforce the stored-path policy and the source's reviewed fingerprint before
-/// installing a recovered project, while playback and still probing cannot see it.
-pub(crate) fn check_recovered_source(project: &mut Project, id: ItemId, document: Option<&str>, services: &dyn crate::Services) -> bool {
-    let Some(media) = project.item_mut(id).and_then(|item| item.as_media_mut()) else { return false };
-    let MediaRef::File { path } = &media.media else { return false };
-    if media.offline {
-        return true;
-    }
-    let actual = crate::doc_path::resolve(path, document.map(std::path::Path::new)).ok().and_then(|file| super::identity_of(services, &file).ok());
-    if actual.is_some() && actual == media.identity {
-        return false;
-    }
-    media.offline = true;
-    true
-}
-
 fn review_for(project: &Project, revision: &str, bin: BinId, item: ItemId, path: &str) -> Option<Review> {
     let media = project.item(item)?.as_media()?;
     let MediaRef::File { path: original } = &media.media else { return None };

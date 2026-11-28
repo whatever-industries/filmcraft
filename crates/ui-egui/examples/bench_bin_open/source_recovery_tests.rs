@@ -2,9 +2,19 @@ use super::*;
 
 #[test]
 fn force_quit_after_partial_relink_checkpoint_or_discard() -> Result<()> {
-    use filmcraft_project::MediaRef;
+    use filmcraft_project::{ItemId, MediaRef};
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
+
+    fn compare_with_standard(s: &Session, root: &Path, source: ItemId) -> Result<()> {
+        let mut standard = open(&root.join("standard.fcproj"))?;
+        standard.state.active_sequence = s.state.active_sequence;
+        assert_eq!(s.project.item(source).unwrap().as_media(), standard.project.item(source).unwrap().as_media());
+        assert_eq!(s.offline.missing, standard.offline.missing);
+        assert_eq!(s.offline.prompt, standard.offline.prompt);
+        assert!(picture(s)? == picture(&standard)?, "recovered playback differs from the ordinary project");
+        Ok(())
+    }
 
     const CHILD: &str = "FILMCRAFT_RELINK_CRASH_CASE";
     let fresh = |data: &Path| -> Result<Session> {
@@ -23,9 +33,7 @@ fn force_quit_after_partial_relink_checkpoint_or_discard() -> Result<()> {
             let media = item.as_media().unwrap();
             assert_eq!(item.name, "Renamed interview");
             assert_eq!(media.media, MediaRef::File { path: review.path });
-            let offline = std::env::var("FILMCRAFT_EXPECT_OFFLINE")? == "true";
-            assert_eq!(media.offline, offline);
-            assert_eq!(picture(&reopened)? == fs::read(root.join("offline.rgba"))?, offline);
+            compare_with_standard(&reopened, &root, review.item)?;
             assert!(!reopened.is_dirty());
             assert!(reopened.dirty_folder_bins().is_empty());
         } else if action == "recover" {
@@ -78,7 +86,11 @@ fn force_quit_after_partial_relink_checkpoint_or_discard() -> Result<()> {
         let mut published = open(&f.manifest)?;
         published.state.active_sequence = Some(f.nested);
         let offline_picture = picture(&published)?;
-        fs::write(root.join("offline.rgba"), &offline_picture)?;
+        let mut standard = open(&root.join("impact.fcproj"))?;
+        standard.execute("media.relink", json!({"item":f.review.item,"path":f.review.path}))?;
+        standard.execute("file.saveAs", json!({"path":root.join("standard.fcproj")}))?;
+        standard.state.active_sequence = Some(f.nested);
+        let linked_picture = picture(&standard)?;
         fs::write(root.join("review.json"), serde_json::to_vec(&f.review)?)?;
         kill_after_ack(root, if case == "discard" { "discard" } else { "checkpoint" })?;
         assert_eq!(fs::read(&f.manifest)?, manifest);
@@ -115,13 +127,10 @@ fn force_quit_after_partial_relink_checkpoint_or_discard() -> Result<()> {
         assert_eq!(working.name, "Renamed interview");
         let media = working.as_media().unwrap();
         assert_eq!(media.media, MediaRef::File { path: f.review.path.clone() });
-        let offline = case != "unchanged";
-        assert_eq!(media.offline, offline);
-        assert_eq!(s.offline.missing.contains(&f.review.item), offline);
-        assert_eq!(picture(&s)? == offline_picture, offline);
-        if offline {
-            assert!(s.offline.prompt);
-        }
+        compare_with_standard(&s, root, f.review.item)?;
+        let frame = picture(&s)?;
+        assert_eq!(frame == offline_picture, case == "missing");
+        assert_eq!(frame == linked_picture, case == "unchanged");
         let saved = root.join("recovered.fcproj");
         s.execute("file.saveAs", json!({"path":saved}))?;
         s.execute("file.save", json!({}))?;
@@ -132,8 +141,8 @@ fn force_quit_after_partial_relink_checkpoint_or_discard() -> Result<()> {
             // A different file can arrive after Save but before the next launch.
             image::RgbImage::from_pixel(64, 32, image::Rgb([224u8, 0, 0])).save(&f.review.path)?;
         }
-        let result = child_command(root, "reopen")?.env("FILMCRAFT_EXPECT_OFFLINE", offline.to_string()).output()?;
-        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stdout));
+        let result = child_command(root, "reopen")?.output()?;
+        assert!(result.status.success(), "{}{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
     }
     Ok(())
 }

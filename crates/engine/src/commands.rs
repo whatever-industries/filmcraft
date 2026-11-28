@@ -5746,8 +5746,6 @@ fn recover(s: &mut Session, id: Option<&str>) -> Result<Value> {
         }
         other => (project, other),
     };
-    let mut project = project;
-    let needs_review = c.meta.reviewed_source.is_some_and(|id| crate::relink::review::check_recovered_source(&mut project, id, path.as_deref(), &*s.services));
     install_project(s, project, path, false);
     if let Some(per) = &mut s.persistence {
         per.reviewed_source = c.meta.reviewed_source.map(|id| (s.document_epoch, id));
@@ -5756,7 +5754,6 @@ fn recover(s: &mut Session, id: Option<&str>) -> Result<Value> {
         s.events.push(crate::Event::OpenSequence(seq));
     }
     crate::relink::on_open(s);
-    s.offline.prompt |= needs_review;
     // Our own journal must hold the recovered state before the old one is deleted.
     s.sync_persistence();
     let per = s.persistence.as_mut().ok_or_else(|| EngineError::Other("recovery is not running".into()))?;

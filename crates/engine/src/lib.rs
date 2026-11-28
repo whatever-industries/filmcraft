@@ -796,8 +796,8 @@ impl Session {
         let dirty = revision != self.saved_revision;
         let modular = self.folder_revision().is_some();
         let Some(p) = self.persistence.as_mut() else { return };
-        // A later project can reuse the same item ID. The recovery check belongs
-        // only to this unsaved document until its first explicit save.
+        // A later project can reuse the same item ID. Track the dirty owner only
+        // for the document in which the relink is still unsaved.
         if !dirty || p.reviewed_source.is_some_and(|(epoch, _)| epoch != self.document_epoch) {
             p.reviewed_source = None;
         }

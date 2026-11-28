@@ -1,5 +1,5 @@
 //! Kill a desktop session after a durable worker acknowledgement. Recovery must
-//! include deferred timelines and must recheck the file chosen during review.
+//! include deferred timelines and use ordinary project media resolution.
 use super::*;
 use filmcraft_engine::autosave::AutosaveConfig;
 use std::{
@@ -26,23 +26,47 @@ fn recover_detached(root: &Path) {
     let draft = filmcraft_engine::autosave::load_candidate(&s.recovery_candidates()[0]).unwrap();
     let reference = filmcraft_format::decode(&fs::read(root.join("expected.fcproj")).unwrap()).unwrap();
     assert_eq!(draft.project, reference.project);
-    let (source, _, deferred): (ItemId, ItemId, ItemId) = serde_json::from_slice(&fs::read(root.join("ids.json")).unwrap()).unwrap();
+    let (source, master, deferred): (ItemId, ItemId, ItemId) = serde_json::from_slice(&fs::read(root.join("ids.json")).unwrap()).unwrap();
     s.execute("file.recover", json!({})).unwrap();
     assert!(s.is_dirty());
     assert_eq!(s.project.settings, reference.project.settings);
     assert_eq!(s.project.sequence(deferred), reference.project.sequence(deferred));
     let media = s.project.item(source).unwrap().as_media().unwrap();
-    assert!(media.offline);
+    assert!(!media.offline);
+    assert!(s.offline.missing.contains(&source));
+    assert!(s.offline.prompt);
     assert_eq!(media.media, filmcraft_project::MediaRef::File { path: origin.join("Moved/camera.png").to_string_lossy().into_owned() });
+    let mut standard = open(&root.join("expected.fcproj"));
+    s.state.active_sequence = Some(master);
+    standard.state.active_sequence = Some(master);
+    for enabled in [true, false] {
+        for editor in [&mut s, &mut standard] {
+            editor.execute("media.toggleProxies", json!({"enabled":enabled})).unwrap();
+        }
+        let frame = picture(&s);
+        assert!(frame == picture(&standard));
+        assert_eq!(frame.as_chunks::<4>().0.iter().any(|px| px[2] > 220 && px[0] < 30), enabled);
+    }
     let saved = root.join("recovered.fcproj");
     s.execute("file.saveAs", json!({"path":saved})).unwrap();
-    assert!(open(&saved).project.item(source).unwrap().as_media().unwrap().offline);
+    fs::rename(root.join("unmounted"), &origin).unwrap();
+    let reopened = open(&saved);
+    assert!(!reopened.offline.missing.contains(&source));
+    assert_eq!(reopened.project.item(source).unwrap().as_media(), s.project.item(source).unwrap().as_media());
 }
 
 fn write_until_ack(root: &Path, stage: &str) {
     let origin = root.join("origin");
     fs::create_dir_all(&origin).unwrap();
     let src = Source::new(&origin);
+    if stage == "warm" {
+        let proxy = root.join("proxy.png");
+        image::RgbImage::from_pixel(160, 90, image::Rgb([10u8, 12, 250])).save(&proxy).unwrap();
+        let mut full = open(&src.f.path);
+        full.execute("project.select", json!({"items":[src.id]})).unwrap();
+        full.execute("media.attachProxies", json!({"item":src.id,"path":proxy})).unwrap();
+        full.execute("file.save", json!({})).unwrap();
+    }
     let data = root.join("data");
     let (mut s, deferred) = warm_source(&src, &data);
     let mut cfg = AutosaveConfig::new(&data);
@@ -130,20 +154,24 @@ fn crash_after_warm_relink_or_promotion() {
             continue;
         }
         assert_eq!(s.recovery_candidates().len(), 1);
-        let protected = !matches!(stage, "save-source" | "discard-source");
-        assert_eq!(s.recovery_candidates()[0].meta.reviewed_source, protected.then_some(source));
+        let unsaved_relink = !matches!(stage, "save-source" | "discard-source");
+        assert_eq!(s.recovery_candidates()[0].meta.reviewed_source, unsaved_relink.then_some(source));
         let chosen = root.join("origin/Moved/camera.png");
         image::RgbImage::from_pixel(160, 90, image::Rgb([5u8, 188, 10])).save(&chosen).unwrap();
         s.execute("file.recover", json!({})).unwrap();
         assert!(s.project.sequence(deferred).is_some());
         assert_eq!(s.project.item(master).unwrap().name == "Today's cut", !matches!(stage, "warm" | "redo"));
-        if protected {
+        if unsaved_relink {
             let media = s.project.item(source).unwrap().as_media().unwrap();
-            assert!(media.offline);
+            assert!(!media.offline);
+            assert!(!s.offline.missing.contains(&source));
             assert_eq!(media.media, filmcraft_project::MediaRef::File { path: chosen.to_string_lossy().into_owned() });
             let saved = root.join("recovered.fcproj");
             s.execute("file.saveAs", json!({"path":saved})).unwrap();
-            assert!(open(&saved).project.item(source).unwrap().as_media().unwrap().offline);
+            let mut reopened = open(&saved);
+            reopened.state.active_sequence = Some(master);
+            assert!(!reopened.offline.missing.contains(&source));
+            assert!(picture(&reopened).as_chunks::<4>().0.iter().any(|px| px[1] > 150 && px[0] < 30));
         }
     }
 }
