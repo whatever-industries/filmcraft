@@ -331,7 +331,7 @@ pub fn to_playhead(s: &mut Session, p: &Value) -> Result<Value> {
         (true, false) => "Trim Next Edit to Playhead",
         (false, false) => "Trim Previous Edit to Playhead",
     };
-    s.edit_one_reel_trim(label, true, |q, ctx, _| {
+    s.edit_one_reel(label, true, |q, ctx, _| {
         if ripple {
             filmcraft_edit::extract(q, &tracks, range, ctx);
         } else {
@@ -492,7 +492,7 @@ pub fn shuttle(s: &mut Session, p: &Value) -> Result<Value> {
     s.trim_play.around = None;
     if s.trim_play.dynamic.is_none() {
         #[cfg(not(target_arch = "wasm32"))]
-        s.prepare_warm_trim(false)?;
+        s.prepare_warm_sequence_edit(false)?;
         s.trim_play.dynamic = Some(DynamicTrim {
             before: s.project.clone(),
             before_revision: s.revision,

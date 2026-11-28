@@ -1,5 +1,7 @@
 //! Exercise the normal trim command against a full-project reference and inspect
 //! the actual session inventory independently of checkpoint I/O.
+mod split;
+
 use super::*;
 use filmcraft_engine::autosave::{AutosaveConfig, load_candidate};
 use filmcraft_format::project_folder::{
@@ -143,6 +145,40 @@ impl Run {
         self.unloaded();
     }
 
+    fn check_undo_redo_discard(&mut self, before: &filmcraft_project::Project, prior: &Value) {
+        self.warm.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(self.warm.project.next_id, before.next_id);
+        assert_eq!(self.warm.project.sequence(self.reel), before.sequence(self.reel));
+        self.unloaded();
+        self.warm.execute("edit.redo", json!({})).unwrap();
+        assert_eq!(self.warm.project.sequence(self.reel), self.reference.project.sequence(self.reel));
+        assert_eq!(self.warm.project.next_id, self.reference.project.next_id);
+        self.unloaded();
+        self.warm.execute("project.discardBin", json!({"bin":self.bin})).unwrap();
+        assert_eq!(self.warm.project.next_id, before.next_id);
+        assert_eq!(self.warm.project.sequence(self.reel), before.sequence(self.reel));
+        assert!(!self.warm.is_dirty());
+        assert_eq!(&manifest(&self.folder), prior);
+        self.unloaded();
+    }
+
+    fn check_saved_and_reopen(&mut self, root: &Path, prior: &Value) {
+        let next = manifest(&self.folder);
+        assert_eq!(next["bins"], prior["bins"]);
+        let changed: Vec<_> =
+            next["items"].as_array().unwrap().iter().zip(prior["items"].as_array().unwrap()).filter(|(a, b)| a != b).map(|(a, _)| &a[0]).collect();
+        assert_eq!(changed, [&json!(self.reel)]);
+        let envelope = manifest(&self.folder.with_file_name(next["envelope"].as_str().unwrap()));
+        assert_eq!(envelope["project"]["next_id"], self.reference.project.next_id);
+        assert_eq!(open(&self.folder).project, self.reference.project);
+        assert!(!self.warm.is_dirty());
+        self.unloaded();
+        self.warm = Session::local_folder_editor();
+        self.warm.enable_experimental_modular_relink(root.join("data"));
+        self.warm.execute("file.open", json!({"path":self.folder})).unwrap();
+        self.unloaded();
+    }
+
     fn use_ripple_extension(&mut self) {
         self.args["mode"] = json!("ripple");
         self.args["deltaFrames"] = json!(12);
@@ -235,39 +271,14 @@ fn playhead_trims_save_discard_and_reopen() {
         let prior = manifest(&r.folder);
         let before = r.reference.project.clone();
         r.trim_to_playhead(command);
-        r.warm.execute("edit.undo", json!({})).unwrap();
-        assert_eq!(r.warm.project.next_id, before.next_id);
-        assert_eq!(r.warm.project.sequence(r.reel), before.sequence(r.reel));
-        r.unloaded();
-        r.warm.execute("edit.redo", json!({})).unwrap();
-        assert_eq!(r.warm.project.sequence(r.reel), r.reference.project.sequence(r.reel));
-        assert_eq!(r.warm.project.next_id, r.reference.project.next_id);
-        r.unloaded();
-        r.warm.execute("project.discardBin", json!({"bin":r.bin})).unwrap();
-        assert_eq!(r.warm.project.next_id, before.next_id);
-        assert_eq!(r.warm.project.sequence(r.reel), before.sequence(r.reel));
-        assert!(!r.warm.is_dirty());
-        assert_eq!(manifest(&r.folder), prior);
-        r.unloaded();
+        r.check_undo_redo_discard(&before, &prior);
         playhead_trim(&mut r.warm, command, 12);
         if command == "trim.ripplePrevious" {
             r.warm.execute("project.saveBin", json!({"bin":r.bin})).unwrap();
         } else {
             r.warm.execute("file.save", json!({})).unwrap();
         }
-        let next = manifest(&r.folder);
-        assert_eq!(next["bins"], prior["bins"]);
-        let changed: Vec<_> =
-            next["items"].as_array().unwrap().iter().zip(prior["items"].as_array().unwrap()).filter(|(a, b)| a != b).map(|(a, _)| &a[0]).collect();
-        assert_eq!(changed, [&json!(r.reel)]);
-        let envelope = manifest(&r.folder.with_file_name(next["envelope"].as_str().unwrap()));
-        assert_eq!(envelope["project"]["next_id"], r.reference.project.next_id);
-        assert_eq!(open(&r.folder).project, r.reference.project);
-        assert!(!r.warm.is_dirty());
-        r.unloaded();
-        r.warm = Session::local_folder_editor();
-        r.warm.enable_experimental_modular_relink(tmp.path().join("data"));
-        r.warm.execute("file.open", json!({"path":r.folder})).unwrap();
+        r.check_saved_and_reopen(tmp.path(), &prior);
         another_split(&mut r.warm, r.reference.project.next_id);
         playhead_trim(&mut r.reference, "trim.ripplePrevious", 1);
         assert_eq!(r.warm.project.sequence(r.reel), r.reference.project.sequence(r.reel));
@@ -464,17 +475,21 @@ fn child(root: &Path, action: &str) -> Command {
 
 fn checkpoint(root: &Path, action: &str) {
     let playhead = matches!(action, "trim.ripplePrevious" | "trim.rippleNext");
-    let mut r = Run::from_folder(root, fixture(root, playhead));
+    let mut r = Run::from_folder(root, fixture(root, playhead || action == "split"));
     if action == "ripple" {
         r.use_ripple_extension();
     }
     let disk = fs::read(&r.folder).unwrap();
     r.warm.start_autosave(AutosaveConfig::new(root.join("data"))).unwrap();
-    if playhead {
+    if action == "split" {
+        split::all_tracks(&mut r);
+    } else if playhead {
         r.trim_to_playhead(action);
-        fs::write(root.join("edited-reel"), serde_json::to_vec(&r.reel).unwrap()).unwrap();
     } else {
         r.trim();
+    }
+    if playhead || action == "split" {
+        fs::write(root.join("edited-reel"), serde_json::to_vec(&r.reel).unwrap()).unwrap();
     }
     assert_eq!(r.warm.persistence.as_ref().unwrap().flush().unwrap(), Some(r.warm.revision));
     if matches!(action, "dynamic-live" | "dynamic-accepted") {
@@ -554,7 +569,7 @@ fn crash_recovery() {
         }
         return;
     }
-    for action in ["dynamic-live", "dynamic-accepted", "trim.ripplePrevious", "trim.rippleNext", "checkpoint", "ripple", "interrupt", "discard"] {
+    for action in ["split", "dynamic-live", "dynamic-accepted", "trim.ripplePrevious", "trim.rippleNext", "checkpoint", "ripple", "interrupt", "discard"] {
         let tmp = tempfile::tempdir().unwrap();
         let mut writer = child(tmp.path(), action).stdout(Stdio::piped()).spawn().unwrap();
         let ready = BufReader::new(writer.stdout.take().unwrap()).lines().map_while(Result::ok).any(|l| l.contains("confirmed trim boundary"));

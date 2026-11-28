@@ -462,7 +462,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec("captions.split", "Split Caption", &[], None, r#"{"caption":id?,"time":ticks?}"#, has_captions, |s, p| {
             let t = time_p(s, p, "").unwrap_or(s.playhead());
             let explicit = u64_p(p, "caption").map(ClipId);
-            let ids = s.edit_sequence("Split Caption", |q, ctx, st| {
+            let ids = s.edit_one_reel("Split Caption", true, |q, ctx, st| {
                 let ids = match explicit {
                     Some(c) => vec![edit::captions::split_caption(q, c, t, ctx)?],
                     None => edit::captions::split_captions_at(q, &[], t, ctx),

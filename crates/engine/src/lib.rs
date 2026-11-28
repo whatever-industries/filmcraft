@@ -1320,17 +1320,12 @@ impl Session {
         self.edit_sequence_with(label, merge, false, f)
     }
 
-    fn edit_one_reel_trim<R>(
-        &mut self,
-        label: &str,
-        allocating: bool,
-        f: impl FnOnce(&mut Sequence, &mut EditCtx, &mut EditorState) -> Result<R>,
-    ) -> Result<R> {
+    fn edit_one_reel<R>(&mut self, label: &str, allocating: bool, f: impl FnOnce(&mut Sequence, &mut EditCtx, &mut EditorState) -> Result<R>) -> Result<R> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             // Shuttle qualified this edit before capturing its starting cut.
             if self.trim_play.dynamic.is_none() {
-                self.prepare_warm_trim(allocating)?;
+                self.prepare_warm_sequence_edit(allocating)?;
             }
             if self.warm_folder.is_some() {
                 return self.edit_sequence_with(label, None, true, f);

@@ -2743,16 +2743,16 @@ fn build() -> Vec<CommandSpec> {
             let selected_here =
                 s.active_sequence().is_some_and(|q| sel.iter().any(|c| q.find_item(*c).is_some_and(|(_, it)| it.start < t && t < it.start + it.duration)));
             let n = if selected_here {
-                s.edit_sequence("Add Edit", |q, ctx, _| Ok(edit::razor_items(q, &sel, t, ctx)))?
+                s.edit_one_reel("Add Edit", true, |q, ctx, _| Ok(edit::razor_items(q, &sel, t, ctx)))?
             } else {
                 let tg = s.targeting().targeted;
-                s.edit_sequence("Add Edit", |q, ctx, _| Ok(edit::razor(q, &tg, t, ctx)))?
+                s.edit_one_reel("Add Edit", true, |q, ctx, _| Ok(edit::razor(q, &tg, t, ctx)))?
             };
             Ok(json!({"cuts": n.len()}))
         }),
         cmd!("sequence.addEditAllTracks", "Add Edit to All Tracks", ["Sequence"], Some("Cmd+Shift+K"), r#"{"time":ticks?}"#, has_seq, |s, p| {
             let t = time_p(s, p, "").unwrap_or(s.playhead());
-            let n = s.edit_sequence("Add Edit to All Tracks", |q, ctx, _| {
+            let n = s.edit_one_reel("Add Edit to All Tracks", true, |q, ctx, _| {
                 let mut n = edit::razor(q, &[], t, ctx);
                 n.extend(edit::captions::split_captions_at(q, &[], t, ctx));
                 Ok(n)
@@ -3456,7 +3456,7 @@ fn build() -> Vec<CommandSpec> {
                 if mode == TrimMode::Ripple {
                     s.command_origin = Some(crate::trim::RIPPLE_TRIM_ORIGIN.to_string());
                 }
-                let applied = s.edit_one_reel_trim(if mode == TrimMode::Ripple { "Ripple Trim" } else { "Trim" }, false, |q, ctx, st| {
+                let applied = s.edit_one_reel(if mode == TrimMode::Ripple { "Ripple Trim" } else { "Trim" }, false, |q, ctx, st| {
                     if q.find_item(c).is_some_and(|(t, _)| q.track(t).is_some_and(|tr| tr.locked)) {
                         return Err(edit::EditError::Locked.into());
                     }
@@ -3582,7 +3582,7 @@ fn build() -> Vec<CommandSpec> {
                 .unwrap_or_default();
             // `followLinks: false` rolls only this pair; the default clamps linked cuts together.
             let follow = s.state.linked_selection && p.get("followLinks").and_then(Value::as_bool).unwrap_or(true);
-            let (x, n, linked) = s.edit_one_reel_trim("Rolling Edit", false, |q, ctx, _| {
+            let (x, n, linked) = s.edit_one_reel("Rolling Edit", false, |q, ctx, _| {
                 let pairs = linked_roll_pairs(q, l, r, follow);
                 let linked = pairs.len() > 1;
                 let d = clamp_roll_linked(q, &pairs, d, ctx)?;
@@ -3646,10 +3646,10 @@ fn build() -> Vec<CommandSpec> {
             let clip = clip_p(p, "clip");
             let n = if let Some(c) = clip {
                 let clips = with_links(s, &[c]);
-                s.edit_sequence("Razor", |q, ctx, _| Ok(edit::razor_items(q, &clips, t, ctx)))?
+                s.edit_one_reel("Razor", true, |q, ctx, _| Ok(edit::razor_items(q, &clips, t, ctx)))?
             } else {
                 let tracks: Vec<TrackId> = tr.into_iter().collect();
-                s.edit_sequence("Razor", |q, ctx, _| Ok(edit::razor(q, &tracks, t, ctx)))?
+                s.edit_one_reel("Razor", true, |q, ctx, _| Ok(edit::razor(q, &tracks, t, ctx)))?
             };
             Ok(json!({"cuts": n.len()}))
         }),

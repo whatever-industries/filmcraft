@@ -1,4 +1,4 @@
-//! Opt-in desktop session for a reviewed relink or a trim in one resident sequence. General edits and exports
+//! Opt-in desktop session for a reviewed relink or an edit to one resident sequence. General edits and exports
 //! first hydrate a complete project, including every reachable undo/redo state.
 use super::EditingFolder;
 use crate::{EngineError, Result, Session, autosave::ItemDraft};
@@ -127,6 +127,7 @@ impl Session {
                 self.hydrate_visible(ids)
             }
             "trim.shuttle" | "trim.shuttleStop" | "trim.cancelDynamic" | "trim.tick" | "trim.playAround" => Ok(()),
+            "timeline.setTargeting" | "sequence.addEdit" | "sequence.addEditAllTracks" | "timeline.razor" | "captions.split" => Ok(()),
             "timeline.trim" | "timeline.roll" | "trim.ripplePrevious" | "trim.rippleNext" => Ok(()),
             "project.select"
                 if p["items"].as_array().is_some_and(|ids| {
@@ -146,7 +147,7 @@ impl Session {
         }
     }
 
-    pub(crate) fn prepare_warm_trim(&mut self, allocating: bool) -> Result<()> {
+    pub(crate) fn prepare_warm_sequence_edit(&mut self, allocating: bool) -> Result<()> {
         let Some(id) = self.state.active_sequence else { return Ok(()) };
         let Some(w) = &mut self.warm_folder else { return Ok(()) };
         let Some(item) = self.project.item(id) else { return self.promote_warm_folder() };
